@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Provly — We Got Compliance. You Got Care.</title>
+  <meta name="description" content="The only compliance platform built specifically for DSPD providers. 16 modules. One system. $99/month. Built by Hope Haven Services Inc.">
+  <meta property="og:title" content="Provly — We Got Compliance. You Got Care.">
+  <meta property="og:description" content="The only compliance platform built specifically for DSPD providers. Replace Therap, Virtru, and your EVV vendor — and save $10,000+ per year.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://getprovly.com">
+  <link rel="canonical" href="https://getprovly.com">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body { font-family: 'Outfit', 'Manrope', sans-serif; }
+    ::selection { background: #00897B; color: white; }
+    @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+    input:focus, textarea:focus { outline: 2px solid #00897B; outline-offset: -1px; }
+    @media (max-width: 900px) {
+      .hero-grid-4 { grid-template-columns: repeat(2, 1fr) !important; }
+      .stats-grid-4 { grid-template-columns: repeat(2, 1fr) !important; }
+      .pricing-grid { grid-template-columns: 1fr 1fr !important; }
+      .modules-grid { grid-template-columns: repeat(2, 1fr) !important; }
+      .comparison-grid { grid-template-columns: 1fr !important; }
+      .nav-links-desktop { display: none !important; }
+    }
+    @media (max-width: 600px) {
+      .hero-grid-4, .stats-grid-4, .modules-grid, .pricing-grid { grid-template-columns: 1fr !important; }
+      .hero-buttons { flex-direction: column !important; }
+      .footer-flex { flex-direction: column !important; text-align: center !important; }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    // ── Color Palette ──
+    const CB = {
+      navy: "#0A1E33", navyLight: "#0F2B46", blue: "#1A73E8", blueLight: "#4A9AF5",
+      teal: "#00897B", tealLight: "#26A69A", tealDark: "#00695C",
+      cream: "#FAFBFD", warm: "#F8F6F3", white: "#FFFFFF",
+      text: "#1A1A2E", textMid: "#4A5568", textLight: "#94A3B8",
+      red: "#E53935", green: "#2E7D32", amber: "#F57F17",
+      border: "#E2E8F0", cardShadow: "0 1px 3px rgba(10,30,51,0.08), 0 8px 32px rgba(10,30,51,0.06)"
+    };
+
+    // ── SVG Icon Components ──
+    const Icon = ({ d, size = 20, color = "currentColor", style = {} }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, ...style }}>{typeof d === "string" ? <path d={d} /> : d}</svg>
+    );
+    const ShieldIcon = (p) => <Icon {...p} d={<><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></>} />;
+    const CheckCircleIcon = (p) => <Icon {...p} d={<><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></>} />;
+    const UsersIcon = (p) => <Icon {...p} d={<><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></>} />;
+    const FileTextIcon = (p) => <Icon {...p} d={<><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></>} />;
+    const MessageSquareIcon = (p) => <Icon {...p} d={<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>} />;
+    const MailIcon = (p) => <Icon {...p} d={<><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></>} />;
+    const CalendarIcon = (p) => <Icon {...p} d={<><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></>} />;
+    const BarChart3Icon = (p) => <Icon {...p} d={<><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></>} />;
+    const AlertTriangleIcon = (p) => <Icon {...p} d={<><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></>} />;
+    const ZapIcon = (p) => <Icon {...p} d={<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>} />;
+    const LockIcon = (p) => <Icon {...p} d={<><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></>} />;
+    const ArrowRightIcon = (p) => <Icon {...p} d={<><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></>} />;
+    const HeartIcon = (p) => <Icon {...p} d={<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>} />;
+    const MapPinIcon = (p) => <Icon {...p} d={<><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></>} />;
+    const ChevronDownIcon = (p) => <Icon {...p} d={<polyline points="6 9 12 15 18 9"/>} />;
+
+    // ── Scroll Animation Hook ──
+    function useInView(threshold = 0.15) {
+      const ref = useRef(null);
+      const [visible, setVisible] = useState(false);
+      useEffect(() => {
+        const el = ref.current;
+        if (!el) return;
+        const obs = new IntersectionObserver(([e]) => { if (e.isIntersecting) { setVisible(true); obs.disconnect(); } }, { threshold });
+        obs.observe(el);
+        return () => obs.disconnect();
+      }, []);
+      return [ref, visible];
+    }
+
+    function FadeIn({ children, delay = 0, y = 30, style = {} }) {
+      const [ref, vis] = useInView();
+      return (
+        <div ref={ref} style={{ opacity: vis ? 1 : 0, transform: vis ? "translateY(0)" : `translateY(${y}px)`, transition: `opacity 0.7s ease ${delay}s, transform 0.7s ease ${delay}s`, ...style }}>
+          {children}
+        </div>
+      );
+    }
+
+    // ── Sub-Components ──
+    function ModuleCard({ icon, title, desc, delay }) {
+      return (
+        <FadeIn delay={delay}>
+          <div style={{ background: CB.white, borderRadius: 16, padding: "28px 24px", border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, height: "100%", transition: "transform 0.2s, box-shadow 0.2s", cursor: "default" }}
+            onMouseEnter={e => { e.currentTarget.style.transform = "translateY(-4px)"; e.currentTarget.style.boxShadow = "0 4px 12px rgba(10,30,51,0.12), 0 16px 48px rgba(10,30,51,0.08)"; }}
+            onMouseLeave={e => { e.currentTarget.style.transform = "translateY(0)"; e.currentTarget.style.boxShadow = CB.cardShadow; }}>
+            <div style={{ width: 44, height: 44, borderRadius: 12, background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealLight})`, display: "flex", alignItems: "center", justifyContent: "center", color: CB.white, marginBottom: 16 }}>{icon}</div>
+            <div style={{ fontSize: 17, fontWeight: 700, color: CB.navy, marginBottom: 8, lineHeight: 1.3 }}>{title}</div>
+            <div style={{ fontSize: 14, color: CB.textMid, lineHeight: 1.65 }}>{desc}</div>
+          </div>
+        </FadeIn>
+      );
+    }
+
+    function Stat({ value, label, delay }) {
+      return (
+        <FadeIn delay={delay}>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 48, fontWeight: 800, color: CB.white, lineHeight: 1, letterSpacing: -2 }}>{value}</div>
+            <div style={{ fontSize: 14, color: "rgba(255,255,255,0.7)", marginTop: 8, fontWeight: 500, letterSpacing: 0.5 }}>{label}</div>
+          </div>
+        </FadeIn>
+      );
+    }
+
+    function PricingTier({ tier, clients, price, popular, features, delay }) {
+      return (
+        <FadeIn delay={delay}>
+          <div style={{ background: CB.white, borderRadius: 20, padding: popular ? "36px 28px" : "28px 24px", border: popular ? `2px solid ${CB.teal}` : `1px solid ${CB.border}`, boxShadow: popular ? `0 8px 40px rgba(0,137,123,0.15)` : CB.cardShadow, position: "relative", transform: popular ? "scale(1.04)" : "none" }}>
+            {popular && <div style={{ position: "absolute", top: -14, left: "50%", transform: "translateX(-50%)", background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealLight})`, color: CB.white, fontSize: 12, fontWeight: 700, padding: "5px 18px", borderRadius: 20, letterSpacing: 0.5, textTransform: "uppercase" }}>Most Popular</div>}
+            <div style={{ fontSize: 14, fontWeight: 600, color: CB.teal, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>{tier}</div>
+            <div style={{ fontSize: 13, color: CB.textLight, marginBottom: 16 }}>{clients} clients</div>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginBottom: 20 }}>
+              <span style={{ fontSize: 48, fontWeight: 800, color: CB.navy, lineHeight: 1, letterSpacing: -2 }}>{price}</span>
+              <span style={{ fontSize: 15, color: CB.textLight }}>/month</span>
+            </div>
+            <div style={{ fontSize: 13, color: CB.textMid, marginBottom: 20, padding: "10px 14px", background: CB.cream, borderRadius: 10, fontWeight: 500 }}>All 16 modules included. No feature-gating.</div>
+            {features.map((f, i) => (
+              <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 10 }}>
+                <CheckCircleIcon size={16} color={CB.teal} style={{ marginTop: 2 }} />
+                <span style={{ fontSize: 14, color: CB.textMid, lineHeight: 1.5 }}>{f}</span>
+              </div>
+            ))}
+            <button style={{ width: "100%", padding: "14px 20px", borderRadius: 12, border: popular ? "none" : `2px solid ${CB.navy}`, background: popular ? `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})` : "transparent", color: popular ? CB.white : CB.navy, fontSize: 15, fontWeight: 700, cursor: "pointer", marginTop: 20, transition: "all 0.2s", letterSpacing: 0.3, fontFamily: "inherit" }}
+              onMouseEnter={e => { if (!popular) { e.currentTarget.style.background = CB.navy; e.currentTarget.style.color = CB.white; } else { e.currentTarget.style.opacity = "0.9"; }}}
+              onMouseLeave={e => { if (!popular) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = CB.navy; } else { e.currentTarget.style.opacity = "1"; }}}>
+              Start Free Trial <ArrowRightIcon size={16} style={{ verticalAlign: "middle", marginLeft: 4 }} />
+            </button>
+          </div>
+        </FadeIn>
+      );
+    }
+
+    function ComparisonRow({ feature, therap, cb, winner, shade }) {
+      return (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 0, background: shade ? CB.cream : CB.white }}>
+          <div style={{ padding: "14px 20px", fontSize: 14, fontWeight: 600, color: CB.text, borderBottom: `1px solid ${CB.border}` }}>{feature}</div>
+          <div style={{ padding: "14px 20px", fontSize: 14, color: CB.textMid, borderBottom: `1px solid ${CB.border}`, borderLeft: `1px solid ${CB.border}` }}>{therap}</div>
+          <div style={{ padding: "14px 20px", fontSize: 14, color: winner ? CB.tealDark : CB.textMid, fontWeight: winner ? 700 : 400, borderBottom: `1px solid ${CB.border}`, borderLeft: `1px solid ${CB.border}`, background: winner ? "rgba(0,137,123,0.06)" : "transparent" }}>{cb} {winner && <CheckCircleIcon size={14} style={{ verticalAlign: "middle", marginLeft: 4 }} />}</div>
+        </div>
+      );
+    }
+
+    // ── Main Landing Page ──
+    function LandingPage() {
+      const [email, setEmail] = useState("");
+      const [orgName, setOrgName] = useState("");
+      const [submitted, setSubmitted] = useState(false);
+
+      const handleSubmit = () => {
+        if (email.trim()) setSubmitted(true);
+      };
+
+      return (
+        <div style={{ fontFamily: "'Outfit', 'Manrope', sans-serif", color: CB.text, overflowX: "hidden" }}>
+
+          {/* ══════ NAV ══════ */}
+          <nav style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 100, background: "rgba(255,255,255,0.92)", backdropFilter: "blur(20px)", borderBottom: `1px solid ${CB.border}` }}>
+            <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 32px", display: "flex", justifyContent: "space-between", alignItems: "center", height: 64 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ width: 36, height: 36, borderRadius: 10, background: `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <ShieldIcon size={20} color={CB.white} />
+                </div>
+                <span style={{ fontSize: 20, fontWeight: 800, color: CB.navy, letterSpacing: -0.5 }}>Provly</span>
+              </div>
+              <div className="nav-links-desktop" style={{ display: "flex", alignItems: "center", gap: 32 }}>
+                {["Modules", "Pricing", "Compare"].map(item => (
+                  <a key={item} href={`#${item.toLowerCase()}`} style={{ fontSize: 14, fontWeight: 600, color: CB.textMid, textDecoration: "none", transition: "color 0.2s" }}
+                    onMouseEnter={e => e.currentTarget.style.color = CB.navy}
+                    onMouseLeave={e => e.currentTarget.style.color = CB.textMid}>{item}</a>
+                ))}
+                <a href="#waitlist" style={{ background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})`, color: CB.white, padding: "9px 22px", borderRadius: 10, fontSize: 14, fontWeight: 700, textDecoration: "none", transition: "opacity 0.2s", letterSpacing: 0.3 }}
+                  onMouseEnter={e => e.currentTarget.style.opacity = "0.9"}
+                  onMouseLeave={e => e.currentTarget.style.opacity = "1"}>Join Waitlist</a>
+              </div>
+            </div>
+          </nav>
+
+          {/* ══════ HERO ══════ */}
+          <section style={{ position: "relative", minHeight: "100vh", display: "flex", alignItems: "center", paddingTop: 64, overflow: "hidden" }}>
+            <div style={{ position: "absolute", inset: 0, background: `radial-gradient(ellipse at 30% 20%, rgba(0,137,123,0.06) 0%, transparent 50%), radial-gradient(ellipse at 80% 80%, rgba(26,115,232,0.04) 0%, transparent 50%), ${CB.cream}` }} />
+            <div style={{ position: "absolute", top: "15%", right: "5%", width: 400, height: 400, borderRadius: "50%", background: `radial-gradient(circle, rgba(0,137,123,0.05) 0%, transparent 70%)`, animation: "float 8s ease-in-out infinite" }} />
+            <div style={{ position: "absolute", bottom: "10%", left: "10%", width: 300, height: 300, borderRadius: "50%", background: `radial-gradient(circle, rgba(26,115,232,0.04) 0%, transparent 70%)`, animation: "float 10s ease-in-out infinite 2s" }} />
+            
+            <div style={{ maxWidth: 1200, margin: "0 auto", padding: "80px 32px", position: "relative", zIndex: 1 }}>
+              <div style={{ maxWidth: 720 }}>
+                <FadeIn delay={0}>
+                  <div style={{ display: "inline-flex", alignItems: "center", gap: 8, background: "rgba(0,137,123,0.08)", border: "1px solid rgba(0,137,123,0.15)", borderRadius: 30, padding: "6px 16px", marginBottom: 24 }}>
+                    <div style={{ width: 8, height: 8, borderRadius: 4, background: CB.teal, animation: "pulse 2s ease-in-out infinite" }} />
+                    <span style={{ fontSize: 13, fontWeight: 600, color: CB.tealDark }}>Now accepting early access applications</span>
+                  </div>
+                </FadeIn>
+                
+                <FadeIn delay={0.1}>
+                  <h1 style={{ fontSize: 64, fontWeight: 900, lineHeight: 1.05, letterSpacing: -3, color: CB.navy, marginBottom: 12 }}>
+                    We Got Compliance.
+                  </h1>
+                </FadeIn>
+                <FadeIn delay={0.2}>
+                  <h1 style={{ fontSize: 64, fontWeight: 900, lineHeight: 1.05, letterSpacing: -3, color: CB.teal, marginBottom: 28 }}>
+                    You Got Care.
+                  </h1>
+                </FadeIn>
+                
+                <FadeIn delay={0.3}>
+                  <p style={{ fontSize: 20, lineHeight: 1.7, color: CB.textMid, maxWidth: 580, marginBottom: 36 }}>
+                    The only compliance platform built specifically for DSPD providers. 16 modules. One system. $99/month. Replace Therap, Virtru, and your EVV vendor — and save $10,000+ per year.
+                  </p>
+                </FadeIn>
+                
+                <FadeIn delay={0.4}>
+                  <div className="hero-buttons" style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+                    <a href="#waitlist" style={{ display: "inline-flex", alignItems: "center", gap: 8, background: `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})`, color: CB.white, padding: "16px 32px", borderRadius: 14, fontSize: 16, fontWeight: 700, textDecoration: "none", boxShadow: "0 4px 16px rgba(10,30,51,0.25)", transition: "transform 0.2s, box-shadow 0.2s", letterSpacing: 0.3 }}
+                      onMouseEnter={e => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 8px 24px rgba(10,30,51,0.3)"; }}
+                      onMouseLeave={e => { e.currentTarget.style.transform = "translateY(0)"; e.currentTarget.style.boxShadow = "0 4px 16px rgba(10,30,51,0.25)"; }}>
+                      Join the Waitlist <ArrowRightIcon size={18} />
+                    </a>
+                    <a href="#modules" style={{ display: "inline-flex", alignItems: "center", gap: 8, background: "transparent", color: CB.navy, padding: "16px 28px", borderRadius: 14, fontSize: 16, fontWeight: 700, textDecoration: "none", border: `2px solid ${CB.border}`, transition: "all 0.2s" }}
+                      onMouseEnter={e => { e.currentTarget.style.borderColor = CB.navy; }}
+                      onMouseLeave={e => { e.currentTarget.style.borderColor = CB.border; }}>
+                      See What's Inside <ChevronDownIcon size={18} />
+                    </a>
+                  </div>
+                </FadeIn>
+
+                <FadeIn delay={0.5}>
+                  <div style={{ display: "flex", gap: 28, marginTop: 48, flexWrap: "wrap" }}>
+                    {[
+                      { icon: <ShieldIcon size={16} />, text: "HIPAA Compliant" },
+                      { icon: <LockIcon size={16} />, text: "SOC 2 Target" },
+                      { icon: <ZapIcon size={16} />, text: "DSPD-Native" },
+                      { icon: <HeartIcon size={16} />, text: "Built by Providers" },
+                    ].map((badge, i) => (
+                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, color: CB.textLight }}>
+                        <span style={{ color: CB.teal }}>{badge.icon}</span> {badge.text}
+                      </div>
+                    ))}
+                  </div>
+                </FadeIn>
+              </div>
+            </div>
+          </section>
+
+          {/* ══════ STATS BAR ══════ */}
+          <section style={{ background: `linear-gradient(135deg, ${CB.navy} 0%, ${CB.navyLight} 100%)`, padding: "56px 32px" }}>
+            <div className="stats-grid-4" style={{ maxWidth: 1000, margin: "0 auto", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 32 }}>
+              <Stat value="458" label="DSPD Providers in Utah" delay={0} />
+              <Stat value="16" label="Integrated Modules" delay={0.1} />
+              <Stat value="$99" label="Starting Monthly Price" delay={0.2} />
+              <Stat value="33" label="Service Codes Supported" delay={0.3} />
+            </div>
+          </section>
+
+          {/* ══════ PROBLEM ══════ */}
+          <section style={{ padding: "100px 32px", background: CB.white }}>
+            <div style={{ maxWidth: 900, margin: "0 auto", textAlign: "center" }}>
+              <FadeIn>
+                <div style={{ fontSize: 13, fontWeight: 700, color: CB.red, textTransform: "uppercase", letterSpacing: 2, marginBottom: 16 }}>The Problem</div>
+                <h2 style={{ fontSize: 40, fontWeight: 800, color: CB.navy, lineHeight: 1.15, letterSpacing: -1.5, marginBottom: 20 }}>
+                  You didn't start a disability services agency to wrestle with software.
+                </h2>
+                <p style={{ fontSize: 18, color: CB.textMid, lineHeight: 1.75, maxWidth: 680, margin: "0 auto 48px" }}>
+                  Right now, you're paying for Therap, Virtru, an EVV vendor, a scheduling tool, and tracking compliance on spreadsheets. Your staff spends more time on paperwork than on the people they serve. That ends now.
+                </p>
+              </FadeIn>
+
+              <FadeIn delay={0.1}>
+                <div className="hero-grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 20, textAlign: "left" }}>
+                  {[
+                    { num: "$1,200+", label: "per month", desc: "What mid-size providers pay across 4+ disconnected systems" },
+                    { num: "8–12", label: "separate tools", desc: "EVV, billing, documentation, scheduling, HR, compliance tracking, email encryption..." },
+                    { num: "83%", label: "need EVV", desc: "Of Utah's 458 DSPD providers deliver EVV-required services and need a compliant solution" },
+                  ].map((item, i) => (
+                    <div key={i} style={{ background: CB.cream, borderRadius: 16, padding: 28, border: `1px solid ${CB.border}` }}>
+                      <div style={{ fontSize: 36, fontWeight: 800, color: CB.red, letterSpacing: -1 }}>{item.num}</div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>{item.label}</div>
+                      <div style={{ fontSize: 14, color: CB.textMid, lineHeight: 1.6 }}>{item.desc}</div>
+                    </div>
+                  ))}
+                </div>
+              </FadeIn>
+            </div>
+          </section>
+
+          {/* ══════ MODULES ══════ */}
+          <section id="modules" style={{ padding: "100px 32px", background: CB.cream }}>
+            <div style={{ maxWidth: 1200, margin: "0 auto" }}>
+              <FadeIn>
+                <div style={{ textAlign: "center", marginBottom: 56 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: CB.teal, textTransform: "uppercase", letterSpacing: 2, marginBottom: 16 }}>The Solution</div>
+                  <h2 style={{ fontSize: 40, fontWeight: 800, color: CB.navy, lineHeight: 1.15, letterSpacing: -1.5, marginBottom: 16 }}>
+                    16 modules. One platform. Every feature included.
+                  </h2>
+                  <p style={{ fontSize: 18, color: CB.textMid, maxWidth: 600, margin: "0 auto" }}>
+                    Built on the DHHS91172 Scope of Work. When you select your service codes, the entire platform auto-configures to your operations.
+                  </p>
+                </div>
+              </FadeIn>
+
+              <div className="modules-grid" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
+                {[
+                  { icon: <UsersIcon size={22} />, title: "Staff Management", desc: "Training matrix auto-calculated from hire date. 30/90/180-day deadlines. Credential expiration alerts." },
+                  { icon: <HeartIcon size={22} />, title: "Person Management", desc: "Every SOW 1.10 field. Intake workflows. 1056 authorization tracking with utilization alerts." },
+                  { icon: <FileTextIcon size={22} />, title: "Service Documentation", desc: "Dynamic forms per service code. Select RHS, DSI, or MTP — the form auto-loads the right fields." },
+                  { icon: <MapPinIcon size={22} />, title: "EVV Built-In", desc: "GPS clock in/out for all 9 EVV-required codes. Geofence validation. No separate vendor needed." },
+                  { icon: <BarChart3Icon size={22} />, title: "Billing & Claims", desc: "Auto-calculated units from service notes. Billing rules engine enforcing every Article 2 limitation." },
+                  { icon: <ShieldIcon size={22} />, title: "Compliance Dashboard", desc: "Real-time audit readiness score. 38 SOW deadlines tracked automatically. Missing doc alerts." },
+                  { icon: <AlertTriangleIcon size={22} />, title: "Incident Management", desc: "SOW 1.27 workflow with 24-hour and 5-day countdown timers. Fatality protocol built in." },
+                  { icon: <ZapIcon size={22} />, title: "AI Document Engine", desc: "Claude AI drafts quarterly summaries from your service notes. Compliance gap analysis. Shift handoff generation." },
+                  { icon: <CalendarIcon size={22} />, title: "Calendar System", desc: "3-layer calendar: organization, location, individual. Role-scoped. Auto-generated compliance events." },
+                  { icon: <MessageSquareIcon size={22} />, title: "Internal Messaging", desc: "HIPAA-compliant P2P messaging, site channels, shift handoff notes. Replaces texting PHI on personal phones." },
+                  { icon: <MailIcon size={22} />, title: "Secure Email", desc: "Encrypted email to SCs, families, state officials. SOW-compliant templates. Replaces Virtru at $0 cost." },
+                  { icon: <LockIcon size={22} />, title: "Reporting & PDF Export", desc: "Formatted PDFs matching DSPD expectations. Utilization reports. Board report generator. Custom analytics." },
+                ].map((mod, i) => (
+                  <ModuleCard key={i} {...mod} delay={i * 0.05} />
+                ))}
+              </div>
+              
+              <FadeIn delay={0.3}>
+                <div style={{ textAlign: "center", marginTop: 32, fontSize: 15, color: CB.textMid }}>
+                  Plus: <strong>Quarterly Summary Generator</strong> · <strong>Medication Management</strong> · <strong>Notification Preferences</strong> · <strong>Data Import & Migration</strong>
+                </div>
+              </FadeIn>
+            </div>
+          </section>
+
+          {/* ══════ COMPARISON ══════ */}
+          <section id="compare" style={{ padding: "100px 32px", background: CB.white }}>
+            <div style={{ maxWidth: 800, margin: "0 auto" }}>
+              <FadeIn>
+                <div style={{ textAlign: "center", marginBottom: 48 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: CB.blue, textTransform: "uppercase", letterSpacing: 2, marginBottom: 16 }}>The Comparison</div>
+                  <h2 style={{ fontSize: 40, fontWeight: 800, color: CB.navy, lineHeight: 1.15, letterSpacing: -1.5, marginBottom: 16 }}>
+                    Better product. Fraction of the cost.
+                  </h2>
+                  <p style={{ fontSize: 16, color: CB.textMid }}>Provly vs. Therap + Virtru + Sandata combined</p>
+                </div>
+              </FadeIn>
+
+              <FadeIn delay={0.1}>
+                <div style={{ borderRadius: 16, overflow: "hidden", border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", background: CB.navy }}>
+                    <div style={{ padding: "16px 20px", fontSize: 14, fontWeight: 700, color: CB.white }}>Feature</div>
+                    <div style={{ padding: "16px 20px", fontSize: 14, fontWeight: 700, color: "rgba(255,255,255,0.6)", borderLeft: "1px solid rgba(255,255,255,0.1)" }}>Therap + Virtru + EVV</div>
+                    <div style={{ padding: "16px 20px", fontSize: 14, fontWeight: 700, color: CB.tealLight, borderLeft: "1px solid rgba(255,255,255,0.1)" }}>Provly</div>
+                  </div>
+                  <ComparisonRow feature="Service Documentation" therap="Generic forms" cb="DSPD-native (33 codes)" winner shade />
+                  <ComparisonRow feature="EVV" therap="Separate vendor ($200-400/mo)" cb="Built-in ($0)" winner />
+                  <ComparisonRow feature="Secure Email" therap="Virtru ($87/user/mo)" cb="Built-in ($0)" winner shade />
+                  <ComparisonRow feature="Compliance Engine" therap="None" cb="38 deadlines, audit score" winner />
+                  <ComparisonRow feature="AI Assistance" therap="None" cb="Claude-powered summaries & analysis" winner shade />
+                  <ComparisonRow feature="Messaging" therap="None / Basic" cb="P2P + channels + shift handoffs" winner />
+                  <ComparisonRow feature="Calendar" therap="None" cb="3-layer, role-scoped" winner shade />
+                  <ComparisonRow feature="UX / Mobile" therap='"Worst, most user unfriendly"' cb="Modern, mobile-first" winner />
+                  <ComparisonRow feature="Total (20 clients)" therap="$1,200–$1,600/month" cb="$299/month" winner shade />
+                </div>
+              </FadeIn>
+              
+              <FadeIn delay={0.2}>
+                <div style={{ textAlign: "center", marginTop: 32, padding: "20px 28px", background: "rgba(0,137,123,0.06)", borderRadius: 14, border: "1px solid rgba(0,137,123,0.12)" }}>
+                  <span style={{ fontSize: 18, fontWeight: 700, color: CB.tealDark }}>Save $10,000–$16,000 per year</span>
+                  <span style={{ fontSize: 15, color: CB.textMid, marginLeft: 8 }}>with a product that's actually better.</span>
+                </div>
+              </FadeIn>
+            </div>
+          </section>
+
+          {/* ══════ PRICING ══════ */}
+          <section id="pricing" style={{ padding: "100px 32px", background: CB.cream }}>
+            <div style={{ maxWidth: 1100, margin: "0 auto" }}>
+              <FadeIn>
+                <div style={{ textAlign: "center", marginBottom: 56 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: CB.teal, textTransform: "uppercase", letterSpacing: 2, marginBottom: 16 }}>Pricing</div>
+                  <h2 style={{ fontSize: 40, fontWeight: 800, color: CB.navy, lineHeight: 1.15, letterSpacing: -1.5, marginBottom: 16 }}>
+                    Exceptional value. Priced with respect.
+                  </h2>
+                  <p style={{ fontSize: 18, color: CB.textMid }}>All features at every tier. No gotchas. 30-day free trial.</p>
+                </div>
+              </FadeIn>
+
+              <div className="pricing-grid" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 20, alignItems: "start" }}>
+                <PricingTier tier="Starter" clients="1–10" price="$99" delay={0}
+                  features={["All 16 modules", "EVV, messaging, secure email", "AI-powered summaries", "Compliance dashboard", "Mobile app access"]} />
+                <PricingTier tier="Growth" clients="11–30" price="$299" popular delay={0.1}
+                  features={["Everything in Starter", "Multi-site management", "Area/region hierarchy", "Priority email support", "Advanced reporting"]} />
+                <PricingTier tier="Professional" clients="31–50" price="$499" delay={0.2}
+                  features={["Everything in Growth", "Full org hierarchy (12 roles)", "Custom report builder", "Priority phone support", "Dedicated onboarding"]} />
+                <PricingTier tier="Enterprise" clients="51+" price="$999+" delay={0.3}
+                  features={["Everything in Professional", "Dedicated success manager", "Custom integrations", "SLA guarantee", "White-glove onboarding"]} />
+              </div>
+              
+              <FadeIn delay={0.3}>
+                <div style={{ textAlign: "center", marginTop: 32, fontSize: 15, color: CB.textMid }}>
+                  30-day free trial · 10% annual discount · No setup fees · No contracts · Cancel anytime
+                </div>
+              </FadeIn>
+            </div>
+          </section>
+
+          {/* ══════ BUILT BY PROVIDERS ══════ */}
+          <section style={{ padding: "80px 32px", background: CB.white }}>
+            <div style={{ maxWidth: 800, margin: "0 auto", textAlign: "center" }}>
+              <FadeIn>
+                <div style={{ fontSize: 13, fontWeight: 700, color: CB.navy, textTransform: "uppercase", letterSpacing: 2, marginBottom: 16 }}>Our Story</div>
+                <h2 style={{ fontSize: 36, fontWeight: 800, color: CB.navy, lineHeight: 1.2, letterSpacing: -1, marginBottom: 20 }}>
+                  Built by a real provider who lives the pain every day.
+                </h2>
+                <p style={{ fontSize: 17, color: CB.textMid, lineHeight: 1.8, maxWidth: 640, margin: "0 auto 28px" }}>
+                  Provly isn't another VC-funded SaaS startup guessing at your problems. It's built by Hope Haven Services Inc. — an active DSPD provider under contract DHHS91172. We use this software ourselves. Every feature exists because we needed it in our own operations.
+                </p>
+                <p style={{ fontSize: 17, color: CB.textMid, lineHeight: 1.8, maxWidth: 640, margin: "0 auto" }}>
+                  We know what a DHHS compliance review feels like. We know what it's like to track training deadlines on spreadsheets. We know the stress of wondering if your documentation will survive an audit. We built Provly so no provider has to feel that again.
+                </p>
+              </FadeIn>
+            </div>
+          </section>
+
+          {/* ══════ WAITLIST ══════ */}
+          <section id="waitlist" style={{ padding: "100px 32px", background: `linear-gradient(135deg, ${CB.navy} 0%, #0D2440 100%)`, position: "relative", overflow: "hidden" }}>
+            <div style={{ position: "absolute", top: "10%", right: "15%", width: 300, height: 300, borderRadius: "50%", background: "radial-gradient(circle, rgba(0,137,123,0.1) 0%, transparent 70%)" }} />
+            <div style={{ maxWidth: 600, margin: "0 auto", position: "relative", zIndex: 1 }}>
+              <FadeIn>
+                <div style={{ textAlign: "center" }}>
+                  <h2 style={{ fontSize: 40, fontWeight: 800, color: CB.white, lineHeight: 1.15, letterSpacing: -1.5, marginBottom: 16 }}>
+                    Join the Waitlist
+                  </h2>
+                  <p style={{ fontSize: 17, color: "rgba(255,255,255,0.7)", marginBottom: 40, lineHeight: 1.7 }}>
+                    Be among the first DSPD providers to access Provly. Early access members get priority onboarding, founding member pricing, and direct input on features.
+                  </p>
+
+                  {!submitted ? (
+                    <div style={{ background: "rgba(255,255,255,0.06)", borderRadius: 20, padding: 32, border: "1px solid rgba(255,255,255,0.1)", backdropFilter: "blur(10px)" }}>
+                      <input value={orgName} onChange={e => setOrgName(e.target.value)} placeholder="Organization Name"
+                        style={{ width: "100%", padding: "14px 18px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.08)", color: CB.white, fontSize: 15, marginBottom: 14, fontFamily: "inherit" }} />
+                      <input value={email} onChange={e => setEmail(e.target.value)} placeholder="Email Address" type="email"
+                        style={{ width: "100%", padding: "14px 18px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.08)", color: CB.white, fontSize: 15, marginBottom: 14, fontFamily: "inherit" }} />
+                      <select style={{ width: "100%", padding: "14px 18px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.7)", fontSize: 15, marginBottom: 20, fontFamily: "inherit", appearance: "none" }}>
+                        <option value="">How many clients do you serve?</option>
+                        <option value="1-10">1–10 clients</option>
+                        <option value="11-30">11–30 clients</option>
+                        <option value="31-50">31–50 clients</option>
+                        <option value="51+">51+ clients</option>
+                      </select>
+                      <button onClick={handleSubmit}
+                        style={{ width: "100%", padding: "16px 28px", borderRadius: 14, border: "none", background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})`, color: CB.white, fontSize: 17, fontWeight: 700, cursor: "pointer", transition: "all 0.2s", boxShadow: "0 4px 16px rgba(0,137,123,0.3)", letterSpacing: 0.3, fontFamily: "inherit" }}
+                        onMouseEnter={e => e.currentTarget.style.transform = "translateY(-2px)"}
+                        onMouseLeave={e => e.currentTarget.style.transform = "translateY(0)"}>
+                        Reserve My Spot <ArrowRightIcon size={18} style={{ verticalAlign: "middle", marginLeft: 6 }} />
+                      </button>
+                      <div style={{ fontSize: 13, color: "rgba(255,255,255,0.4)", marginTop: 14 }}>
+                        No commitment. No credit card. We'll notify you when early access opens.
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ background: "rgba(0,137,123,0.15)", borderRadius: 20, padding: 40, border: "1px solid rgba(0,137,123,0.3)" }}>
+                      <CheckCircleIcon size={48} color={CB.tealLight} />
+                      <h3 style={{ fontSize: 24, fontWeight: 700, color: CB.white, marginBottom: 12, marginTop: 16 }}>You're on the list!</h3>
+                      <p style={{ fontSize: 15, color: "rgba(255,255,255,0.7)", lineHeight: 1.7 }}>
+                        We'll be in touch soon with early access details. Welcome to the future of DSPD compliance.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </FadeIn>
+            </div>
+          </section>
+
+          {/* ══════ FOOTER ══════ */}
+          <footer style={{ padding: "48px 32px", background: "#060F1A", borderTop: "1px solid rgba(255,255,255,0.06)" }}>
+            <div className="footer-flex" style={{ maxWidth: 1200, margin: "0 auto", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 20 }}>
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                  <div style={{ width: 28, height: 28, borderRadius: 8, background: `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    <ShieldIcon size={16} color={CB.tealLight} />
+                  </div>
+                  <span style={{ fontSize: 16, fontWeight: 800, color: "rgba(255,255,255,0.9)" }}>Provly</span>
+                </div>
+                <div style={{ fontSize: 13, color: "rgba(255,255,255,0.35)" }}>
+                  A Hope Haven Services Inc. Product · West Jordan, UT
+                </div>
+                <div style={{ fontSize: 13, color: "rgba(255,255,255,0.35)", marginTop: 4 }}>
+                  We Got Compliance. You Got Care.
+                </div>
+              </div>
+              <div style={{ fontSize: 12, color: "rgba(255,255,255,0.25)" }}>
+                © 2026 Hope Haven Services Inc. All rights reserved.
+              </div>
+            </div>
+          </footer>
+        </div>
+      );
+    }
+
+    // ── Render ──
+    ReactDOM.render(<LandingPage />, document.getElementById("root"));
+  </script>
+</body>
+</html>
