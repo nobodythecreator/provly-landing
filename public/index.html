@@ -16,6 +16,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html { scroll-behavior: smooth; }
@@ -161,14 +162,38 @@
       );
     }
 
+    // ── Supabase Client ──
+    const supabase = window.supabase.createClient(
+      'https://zsrnqbmzgypldraifjho.supabase.co',
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpzcm5xYm16Z3lwbGRyYWlmamhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM1NTc0NjcsImV4cCI6MjA4OTEzMzQ2N30.-vI3ZvtGKFyoZplqpTt4IxriWEnIPg-PH8eIing93bY'
+    );
+
     // ── Main Landing Page ──
     function LandingPage() {
       const [email, setEmail] = useState("");
       const [orgName, setOrgName] = useState("");
+      const [clientCount, setClientCount] = useState("");
       const [submitted, setSubmitted] = useState(false);
+      const [submitting, setSubmitting] = useState(false);
+      const [error, setError] = useState("");
 
-      const handleSubmit = () => {
-        if (email.trim()) setSubmitted(true);
+      const handleSubmit = async () => {
+        if (!email.trim()) return;
+        setSubmitting(true);
+        setError("");
+        try {
+          const { error: err } = await supabase.from('waitlist').insert({
+            org_name: orgName.trim() || null,
+            email: email.trim(),
+            client_count: clientCount || null
+          });
+          if (err) throw err;
+          setSubmitted(true);
+        } catch (e) {
+          setError("Something went wrong. Please try again.");
+          console.error(e);
+        }
+        setSubmitting(false);
       };
 
       return (
@@ -454,19 +479,20 @@
                         style={{ width: "100%", padding: "14px 18px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.08)", color: CB.white, fontSize: 15, marginBottom: 14, fontFamily: "inherit" }} />
                       <input value={email} onChange={e => setEmail(e.target.value)} placeholder="Email Address" type="email"
                         style={{ width: "100%", padding: "14px 18px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.08)", color: CB.white, fontSize: 15, marginBottom: 14, fontFamily: "inherit" }} />
-                      <select style={{ width: "100%", padding: "14px 18px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.7)", fontSize: 15, marginBottom: 20, fontFamily: "inherit", appearance: "none" }}>
+                      <select value={clientCount} onChange={e => setClientCount(e.target.value)} style={{ width: "100%", padding: "14px 18px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.7)", fontSize: 15, marginBottom: 20, fontFamily: "inherit", appearance: "none" }}>
                         <option value="">How many clients do you serve?</option>
                         <option value="1-10">1–10 clients</option>
                         <option value="11-30">11–30 clients</option>
                         <option value="31-50">31–50 clients</option>
                         <option value="51+">51+ clients</option>
                       </select>
-                      <button onClick={handleSubmit}
-                        style={{ width: "100%", padding: "16px 28px", borderRadius: 14, border: "none", background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})`, color: CB.white, fontSize: 17, fontWeight: 700, cursor: "pointer", transition: "all 0.2s", boxShadow: "0 4px 16px rgba(0,137,123,0.3)", letterSpacing: 0.3, fontFamily: "inherit" }}
-                        onMouseEnter={e => e.currentTarget.style.transform = "translateY(-2px)"}
+                      <button onClick={handleSubmit} disabled={submitting}
+                        style={{ width: "100%", padding: "16px 28px", borderRadius: 14, border: "none", background: submitting ? "rgba(0,137,123,0.5)" : `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})`, color: CB.white, fontSize: 17, fontWeight: 700, cursor: submitting ? "wait" : "pointer", transition: "all 0.2s", boxShadow: "0 4px 16px rgba(0,137,123,0.3)", letterSpacing: 0.3, fontFamily: "inherit" }}
+                        onMouseEnter={e => { if (!submitting) e.currentTarget.style.transform = "translateY(-2px)"; }}
                         onMouseLeave={e => e.currentTarget.style.transform = "translateY(0)"}>
-                        Reserve My Spot <ArrowRightIcon size={18} style={{ verticalAlign: "middle", marginLeft: 6 }} />
+                        {submitting ? "Submitting..." : "Reserve My Spot"} {!submitting && <ArrowRightIcon size={18} style={{ verticalAlign: "middle", marginLeft: 6 }} />}
                       </button>
+                      {error && <div style={{ fontSize: 14, color: "#f87171", marginTop: 12 }}>{error}</div>}
                       <div style={{ fontSize: 13, color: "rgba(255,255,255,0.4)", marginTop: 14 }}>
                         No commitment. No credit card. We'll notify you when early access opens.
                       </div>
