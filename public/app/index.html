@@ -658,7 +658,7 @@
       const [saving, setSaving] = useState(false);
       const [form, setForm] = useState({
         first_name: "", last_name: "", email: "", phone: "",
-        role: "dsp", hire_date: "", is_active: true,
+        role: "dsp", hire_date: "", date_of_birth: "", is_active: true,
       });
 
       useEffect(() => {
@@ -670,10 +670,11 @@
             phone: editing.phone || "",
             role: editing.role || "dsp",
             hire_date: editing.hire_date || "",
+            date_of_birth: editing.date_of_birth || "",
             is_active: editing.is_active !== false,
           });
         } else {
-          setForm({ first_name: "", last_name: "", email: "", phone: "", role: "dsp", hire_date: "", is_active: true });
+          setForm({ first_name: "", last_name: "", email: "", phone: "", role: "dsp", hire_date: "", date_of_birth: "", is_active: true });
         }
       }, [editing, open]);
 
@@ -681,9 +682,10 @@
 
       const handleSave = async () => {
         if (!form.first_name || !form.last_name) return addToast("First and last name are required", "error");
+        if (!form.hire_date) return addToast("Hire date is required", "error");
+        if (!form.date_of_birth) return addToast("Date of birth is required", "error");
         setSaving(true);
         const payload = { ...form };
-        if (!payload.hire_date) delete payload.hire_date;
         if (!payload.email) delete payload.email;
         if (!payload.phone) delete payload.phone;
 
@@ -728,7 +730,12 @@
                 {STAFF_ROLES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
               </select>
             </FormField>
-            <FormField label="Hire Date" half>
+            <FormField label="Date of Birth" required half>
+              <input style={fieldStyle} type="date" value={form.date_of_birth} onChange={e => set("date_of_birth", e.target.value)} />
+            </FormField>
+          </FormRow>
+          <FormRow>
+            <FormField label="Hire Date" required half>
               <input style={fieldStyle} type="date" value={form.hire_date} onChange={e => set("hire_date", e.target.value)} />
             </FormField>
           </FormRow>
@@ -769,7 +776,7 @@
 
       const loadStaff = async () => {
         setLoading(true);
-        const { data, error } = await supabase.from("staff").select("id, first_name, last_name, role, hire_date, is_active, email, phone").order("last_name");
+        const { data, error } = await supabase.from("staff").select("id, first_name, last_name, role, hire_date, date_of_birth, is_active, email, phone").order("last_name");
         if (!error) setStaff(data || []);
         setLoading(false);
       };
