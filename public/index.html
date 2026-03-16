@@ -3,13 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Provly — We Got Compliance. You Got Care.</title>
-  <meta name="description" content="The only compliance platform built specifically for DSPD providers. 16 modules. One system. $99/month. Built by Hope Haven Services Inc.">
-  <meta property="og:title" content="Provly — We Got Compliance. You Got Care.">
-  <meta property="og:description" content="The only compliance platform built specifically for DSPD providers. Replace Therap, Virtru, and your EVV vendor — and save $10,000+ per year.">
-  <meta property="og:type" content="website">
-  <meta property="og:url" content="https://getprovly.com">
-  <link rel="canonical" href="https://getprovly.com">
+  <title>Provly — DSPD Compliance Platform</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -19,529 +13,837 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    html { scroll-behavior: smooth; }
-    body { font-family: 'Outfit', 'Manrope', sans-serif; }
+    html, body, #root { height: 100%; }
+    body { font-family: 'Outfit', 'Manrope', sans-serif; background: #FAFBFD; }
     ::selection { background: #00897B; color: white; }
-    @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
-    input:focus, textarea:focus { outline: 2px solid #00897B; outline-offset: -1px; }
-    @media (max-width: 900px) {
-      .hero-grid-4 { grid-template-columns: repeat(2, 1fr) !important; }
-      .stats-grid-4 { grid-template-columns: repeat(2, 1fr) !important; }
-      .pricing-grid { grid-template-columns: 1fr 1fr !important; }
-      .modules-grid { grid-template-columns: repeat(2, 1fr) !important; }
-      .comparison-grid { grid-template-columns: 1fr !important; }
-      .nav-links-desktop { display: none !important; }
-    }
-    @media (max-width: 600px) {
-      .hero-grid-4, .stats-grid-4, .modules-grid, .pricing-grid { grid-template-columns: 1fr !important; }
-      .hero-buttons { flex-direction: column !important; }
-      .footer-flex { flex-direction: column !important; text-align: center !important; }
-    }
+    input:focus, select:focus, textarea:focus { outline: 2px solid #00897B; outline-offset: -1px; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes slideIn { from { opacity: 0; transform: translateX(-12px); } to { opacity: 1; transform: translateX(0); } }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
   <div id="root"></div>
   <script type="text/babel">
-    const { useState, useEffect, useRef } = React;
+    const { useState, useEffect, useContext, createContext, useCallback } = React;
 
-    // ── Color Palette ──
+    // ═══════════════════════════════════════════════════════════════
+    // DESIGN TOKENS — matched exactly to landing page
+    // ═══════════════════════════════════════════════════════════════
     const CB = {
       navy: "#0A1E33", navyLight: "#0F2B46", blue: "#1A73E8", blueLight: "#4A9AF5",
       teal: "#00897B", tealLight: "#26A69A", tealDark: "#00695C",
       cream: "#FAFBFD", warm: "#F8F6F3", white: "#FFFFFF",
       text: "#1A1A2E", textMid: "#4A5568", textLight: "#94A3B8",
       red: "#E53935", green: "#2E7D32", amber: "#F57F17",
-      border: "#E2E8F0", cardShadow: "0 1px 3px rgba(10,30,51,0.08), 0 8px 32px rgba(10,30,51,0.06)"
+      border: "#E2E8F0",
+      cardShadow: "0 1px 3px rgba(10,30,51,0.08), 0 8px 32px rgba(10,30,51,0.06)",
+      sidebarW: 260,
     };
 
-    // ── SVG Icon Components ──
-    const Icon = ({ d, size = 20, color = "currentColor", style = {} }) => (
-      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, ...style }}>{typeof d === "string" ? <path d={d} /> : d}</svg>
-    );
-    const ShieldIcon = (p) => <Icon {...p} d={<><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></>} />;
-    const CheckCircleIcon = (p) => <Icon {...p} d={<><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></>} />;
-    const UsersIcon = (p) => <Icon {...p} d={<><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></>} />;
-    const FileTextIcon = (p) => <Icon {...p} d={<><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></>} />;
-    const MessageSquareIcon = (p) => <Icon {...p} d={<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>} />;
-    const MailIcon = (p) => <Icon {...p} d={<><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></>} />;
-    const CalendarIcon = (p) => <Icon {...p} d={<><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></>} />;
-    const BarChart3Icon = (p) => <Icon {...p} d={<><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></>} />;
-    const AlertTriangleIcon = (p) => <Icon {...p} d={<><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></>} />;
-    const ZapIcon = (p) => <Icon {...p} d={<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>} />;
-    const LockIcon = (p) => <Icon {...p} d={<><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></>} />;
-    const ArrowRightIcon = (p) => <Icon {...p} d={<><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></>} />;
-    const HeartIcon = (p) => <Icon {...p} d={<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>} />;
-    const MapPinIcon = (p) => <Icon {...p} d={<><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></>} />;
-    const ChevronDownIcon = (p) => <Icon {...p} d={<polyline points="6 9 12 15 18 9"/>} />;
-
-    // ── Scroll Animation Hook ──
-    function useInView(threshold = 0.15) {
-      const ref = useRef(null);
-      const [visible, setVisible] = useState(false);
-      useEffect(() => {
-        const el = ref.current;
-        if (!el) return;
-        const obs = new IntersectionObserver(([e]) => { if (e.isIntersecting) { setVisible(true); obs.disconnect(); } }, { threshold });
-        obs.observe(el);
-        return () => obs.disconnect();
-      }, []);
-      return [ref, visible];
-    }
-
-    function FadeIn({ children, delay = 0, y = 30, style = {} }) {
-      const [ref, vis] = useInView();
-      return (
-        <div ref={ref} style={{ opacity: vis ? 1 : 0, transform: vis ? "translateY(0)" : `translateY(${y}px)`, transition: `opacity 0.7s ease ${delay}s, transform 0.7s ease ${delay}s`, ...style }}>
-          {children}
-        </div>
-      );
-    }
-
-    // ── Sub-Components ──
-    function ModuleCard({ icon, title, desc, delay }) {
-      return (
-        <FadeIn delay={delay}>
-          <div style={{ background: CB.white, borderRadius: 16, padding: "28px 24px", border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, height: "100%", transition: "transform 0.2s, box-shadow 0.2s", cursor: "default" }}
-            onMouseEnter={e => { e.currentTarget.style.transform = "translateY(-4px)"; e.currentTarget.style.boxShadow = "0 4px 12px rgba(10,30,51,0.12), 0 16px 48px rgba(10,30,51,0.08)"; }}
-            onMouseLeave={e => { e.currentTarget.style.transform = "translateY(0)"; e.currentTarget.style.boxShadow = CB.cardShadow; }}>
-            <div style={{ width: 44, height: 44, borderRadius: 12, background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealLight})`, display: "flex", alignItems: "center", justifyContent: "center", color: CB.white, marginBottom: 16 }}>{icon}</div>
-            <div style={{ fontSize: 17, fontWeight: 700, color: CB.navy, marginBottom: 8, lineHeight: 1.3 }}>{title}</div>
-            <div style={{ fontSize: 14, color: CB.textMid, lineHeight: 1.65 }}>{desc}</div>
-          </div>
-        </FadeIn>
-      );
-    }
-
-    function Stat({ value, label, delay }) {
-      return (
-        <FadeIn delay={delay}>
-          <div style={{ textAlign: "center" }}>
-            <div style={{ fontSize: 48, fontWeight: 800, color: CB.white, lineHeight: 1, letterSpacing: -2 }}>{value}</div>
-            <div style={{ fontSize: 14, color: "rgba(255,255,255,0.7)", marginTop: 8, fontWeight: 500, letterSpacing: 0.5 }}>{label}</div>
-          </div>
-        </FadeIn>
-      );
-    }
-
-    function PricingTier({ tier, clients, price, popular, features, delay }) {
-      return (
-        <FadeIn delay={delay}>
-          <div style={{ background: CB.white, borderRadius: 20, padding: popular ? "36px 28px" : "28px 24px", border: popular ? `2px solid ${CB.teal}` : `1px solid ${CB.border}`, boxShadow: popular ? `0 8px 40px rgba(0,137,123,0.15)` : CB.cardShadow, position: "relative", transform: popular ? "scale(1.04)" : "none" }}>
-            {popular && <div style={{ position: "absolute", top: -14, left: "50%", transform: "translateX(-50%)", background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealLight})`, color: CB.white, fontSize: 12, fontWeight: 700, padding: "5px 18px", borderRadius: 20, letterSpacing: 0.5, textTransform: "uppercase" }}>Most Popular</div>}
-            <div style={{ fontSize: 14, fontWeight: 600, color: CB.teal, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>{tier}</div>
-            <div style={{ fontSize: 13, color: CB.textLight, marginBottom: 16 }}>{clients} clients</div>
-            <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginBottom: 20 }}>
-              <span style={{ fontSize: 48, fontWeight: 800, color: CB.navy, lineHeight: 1, letterSpacing: -2 }}>{price}</span>
-              <span style={{ fontSize: 15, color: CB.textLight }}>/month</span>
-            </div>
-            <div style={{ fontSize: 13, color: CB.textMid, marginBottom: 20, padding: "10px 14px", background: CB.cream, borderRadius: 10, fontWeight: 500 }}>All 16 modules included. No feature-gating.</div>
-            {features.map((f, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 10 }}>
-                <CheckCircleIcon size={16} color={CB.teal} style={{ marginTop: 2 }} />
-                <span style={{ fontSize: 14, color: CB.textMid, lineHeight: 1.5 }}>{f}</span>
-              </div>
-            ))}
-            <a href="/app" style={{ display: "block", width: "100%", padding: "14px 20px", borderRadius: 12, border: popular ? "none" : `2px solid ${CB.navy}`, background: popular ? `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})` : "transparent", color: popular ? CB.white : CB.navy, fontSize: 15, fontWeight: 700, cursor: "pointer", marginTop: 20, transition: "all 0.2s", letterSpacing: 0.3, fontFamily: "inherit", textDecoration: "none", textAlign: "center" }}
-              onMouseEnter={e => { if (!popular) { e.currentTarget.style.background = CB.navy; e.currentTarget.style.color = CB.white; } else { e.currentTarget.style.opacity = "0.9"; }}}
-              onMouseLeave={e => { if (!popular) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = CB.navy; } else { e.currentTarget.style.opacity = "1"; }}}>
-              Start Free Trial <ArrowRightIcon size={16} style={{ verticalAlign: "middle", marginLeft: 4 }} />
-            </a>
-          </div>
-        </FadeIn>
-      );
-    }
-
-    function ComparisonRow({ feature, therap, cb, winner, shade }) {
-      return (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 0, background: shade ? CB.cream : CB.white }}>
-          <div style={{ padding: "14px 20px", fontSize: 14, fontWeight: 600, color: CB.text, borderBottom: `1px solid ${CB.border}` }}>{feature}</div>
-          <div style={{ padding: "14px 20px", fontSize: 14, color: CB.textMid, borderBottom: `1px solid ${CB.border}`, borderLeft: `1px solid ${CB.border}` }}>{therap}</div>
-          <div style={{ padding: "14px 20px", fontSize: 14, color: winner ? CB.tealDark : CB.textMid, fontWeight: winner ? 700 : 400, borderBottom: `1px solid ${CB.border}`, borderLeft: `1px solid ${CB.border}`, background: winner ? "rgba(0,137,123,0.06)" : "transparent" }}>{cb} {winner && <CheckCircleIcon size={14} style={{ verticalAlign: "middle", marginLeft: 4 }} />}</div>
-        </div>
-      );
-    }
-
-    // ── Supabase Client ──
+    // ═══════════════════════════════════════════════════════════════
+    // SUPABASE CLIENT
+    // ═══════════════════════════════════════════════════════════════
     const supabase = window.supabase.createClient(
       'https://zsrnqbmzgypldraifjho.supabase.co',
       'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpzcm5xYm16Z3lwbGRyYWlmamhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM1NTc0NjcsImV4cCI6MjA4OTEzMzQ2N30.-vI3ZvtGKFyoZplqpTt4IxriWEnIPg-PH8eIing93bY'
     );
 
-    // ── Main Landing Page ──
-    function LandingPage() {
-      const [email, setEmail] = useState("");
-      const [orgName, setOrgName] = useState("");
-      const [clientCount, setClientCount] = useState("");
-      const [submitted, setSubmitted] = useState(false);
-      const [submitting, setSubmitting] = useState(false);
-      const [error, setError] = useState("");
+    // ═══════════════════════════════════════════════════════════════
+    // AUTH CONTEXT
+    // ═══════════════════════════════════════════════════════════════
+    const AuthContext = createContext(null);
 
-      const handleSubmit = async () => {
-        if (!email.trim()) return;
-        setSubmitting(true);
+    function AuthProvider({ children }) {
+      const [user, setUser] = useState(null);
+      const [session, setSession] = useState(null);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        supabase.auth.getSession().then(({ data: { session } }) => {
+          setSession(session);
+          setUser(session?.user ?? null);
+          setLoading(false);
+        });
+        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+          setSession(session);
+          setUser(session?.user ?? null);
+        });
+        return () => subscription.unsubscribe();
+      }, []);
+
+      const signIn = (email, password) => supabase.auth.signInWithPassword({ email, password });
+      const signOut = () => supabase.auth.signOut();
+
+      return (
+        <AuthContext.Provider value={{ user, session, loading, signIn, signOut }}>
+          {children}
+        </AuthContext.Provider>
+      );
+    }
+
+    function useAuth() { return useContext(AuthContext); }
+
+    // ═══════════════════════════════════════════════════════════════
+    // SVG ICONS — consistent with landing page
+    // ═══════════════════════════════════════════════════════════════
+    const Icon = ({ d, size = 20, color = "currentColor", style = {} }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, ...style }}>
+        {typeof d === "string" ? <path d={d} /> : d}
+      </svg>
+    );
+
+    const icons = {
+      shield: (p={}) => <Icon {...p} d={<><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></>} />,
+      dashboard: (p={}) => <Icon {...p} d={<><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></>} />,
+      users: (p={}) => <Icon {...p} d={<><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></>} />,
+      heart: (p={}) => <Icon {...p} d={<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>} />,
+      fileText: (p={}) => <Icon {...p} d={<><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></>} />,
+      checkCircle: (p={}) => <Icon {...p} d={<><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></>} />,
+      alertTriangle: (p={}) => <Icon {...p} d={<><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></>} />,
+      barChart: (p={}) => <Icon {...p} d={<><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></>} />,
+      calendar: (p={}) => <Icon {...p} d={<><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></>} />,
+      zap: (p={}) => <Icon {...p} d={<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>} />,
+      lock: (p={}) => <Icon {...p} d={<><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></>} />,
+      logout: (p={}) => <Icon {...p} d={<><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></>} />,
+      clock: (p={}) => <Icon {...p} d={<><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></>} />,
+      book: (p={}) => <Icon {...p} d={<><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></>} />,
+      search: (p={}) => <Icon {...p} d={<><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></>} />,
+      chevDown: (p={}) => <Icon {...p} d={<polyline points="6 9 12 15 18 9"/>} />,
+      mail: (p={}) => <Icon {...p} d={<><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></>} />,
+      mapPin: (p={}) => <Icon {...p} d={<><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></>} />,
+      arrowRight: (p={}) => <Icon {...p} d={<><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></>} />,
+      plus: (p={}) => <Icon {...p} d={<><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></>} />,
+      refresh: (p={}) => <Icon {...p} d={<><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></>} />,
+    };
+
+    // ═══════════════════════════════════════════════════════════════
+    // SPINNER
+    // ═══════════════════════════════════════════════════════════════
+    function Spinner({ size = 20, color = CB.teal }) {
+      return (
+        <div style={{ width: size, height: size, border: `2.5px solid ${CB.border}`, borderTopColor: color, borderRadius: "50%", animation: "spin 0.6s linear infinite" }} />
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // LOGIN PAGE
+    // ═══════════════════════════════════════════════════════════════
+    function LoginPage() {
+      const { signIn } = useAuth();
+      const [email, setEmail] = useState("");
+      const [password, setPassword] = useState("");
+      const [error, setError] = useState("");
+      const [loading, setLoading] = useState(false);
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        if (!email || !password) return;
         setError("");
-        try {
-          const { error: err } = await supabase.from('waitlist').insert({
-            org_name: orgName.trim() || null,
-            email: email.trim(),
-            client_count: clientCount || null
-          });
-          if (err) throw err;
-          setSubmitted(true);
-        } catch (e) {
-          setError("Something went wrong. Please try again.");
-          console.error(e);
-        }
-        setSubmitting(false);
+        setLoading(true);
+        const { error: err } = await signIn(email, password);
+        if (err) setError(err.message);
+        setLoading(false);
       };
 
       return (
-        <div style={{ fontFamily: "'Outfit', 'Manrope', sans-serif", color: CB.text, overflowX: "hidden" }}>
+        <div style={{
+          minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center",
+          background: `radial-gradient(ellipse at 30% 20%, rgba(0,137,123,0.06) 0%, transparent 50%), radial-gradient(ellipse at 80% 80%, rgba(26,115,232,0.04) 0%, transparent 50%), ${CB.cream}`,
+          padding: 24,
+        }}>
+          {/* Decorative orbs — same as landing hero */}
+          <div style={{ position: "fixed", top: "15%", right: "10%", width: 350, height: 350, borderRadius: "50%", background: "radial-gradient(circle, rgba(0,137,123,0.05) 0%, transparent 70%)", pointerEvents: "none" }} />
+          <div style={{ position: "fixed", bottom: "10%", left: "10%", width: 280, height: 280, borderRadius: "50%", background: "radial-gradient(circle, rgba(26,115,232,0.04) 0%, transparent 70%)", pointerEvents: "none" }} />
 
-          {/* ══════ NAV ══════ */}
-          <nav style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 100, background: "rgba(255,255,255,0.92)", backdropFilter: "blur(20px)", borderBottom: `1px solid ${CB.border}` }}>
-            <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 32px", display: "flex", justifyContent: "space-between", alignItems: "center", height: 64 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <div style={{ width: 36, height: 36, borderRadius: 10, background: `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                  <ShieldIcon size={20} color={CB.white} />
-                </div>
-                <span style={{ fontSize: 20, fontWeight: 800, color: CB.navy, letterSpacing: -0.5 }}>Provly</span>
+          <div style={{
+            width: "100%", maxWidth: 420, animation: "fadeIn 0.5s ease",
+          }}>
+            {/* Logo */}
+            <div style={{ textAlign: "center", marginBottom: 36 }}>
+              <div style={{
+                width: 56, height: 56, borderRadius: 16,
+                background: `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})`,
+                display: "inline-flex", alignItems: "center", justifyContent: "center",
+                marginBottom: 16, boxShadow: "0 4px 16px rgba(10,30,51,0.25)",
+              }}>
+                {icons.shield({ size: 28, color: CB.white })}
               </div>
-              <div className="nav-links-desktop" style={{ display: "flex", alignItems: "center", gap: 32 }}>
-                {["Modules", "Pricing", "Compare"].map(item => (
-                  <a key={item} href={`#${item.toLowerCase()}`} style={{ fontSize: 14, fontWeight: 600, color: CB.textMid, textDecoration: "none", transition: "color 0.2s" }}
-                    onMouseEnter={e => e.currentTarget.style.color = CB.navy}
-                    onMouseLeave={e => e.currentTarget.style.color = CB.textMid}>{item}</a>
-                ))}
-                <a href="/app" style={{ fontSize: 14, fontWeight: 600, color: CB.navy, textDecoration: "none", transition: "color 0.2s" }}
-                  onMouseEnter={e => e.currentTarget.style.color = CB.teal}
-                  onMouseLeave={e => e.currentTarget.style.color = CB.navy}>Sign In</a>
-                <a href="#waitlist" style={{ background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})`, color: CB.white, padding: "9px 22px", borderRadius: 10, fontSize: 14, fontWeight: 700, textDecoration: "none", transition: "opacity 0.2s", letterSpacing: 0.3 }}
-                  onMouseEnter={e => e.currentTarget.style.opacity = "0.9"}
-                  onMouseLeave={e => e.currentTarget.style.opacity = "1"}>Join Waitlist</a>
+              <h1 style={{ fontSize: 28, fontWeight: 800, color: CB.navy, letterSpacing: -1 }}>Provly</h1>
+              <p style={{ fontSize: 14, color: CB.textLight, marginTop: 4, fontWeight: 500 }}>
+                DSPD Compliance Platform
+              </p>
+            </div>
+
+            {/* Card */}
+            <div style={{
+              background: CB.white, borderRadius: 20, padding: "36px 32px",
+              border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
+            }}>
+              <h2 style={{ fontSize: 20, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Welcome back</h2>
+              <p style={{ fontSize: 14, color: CB.textMid, marginBottom: 28 }}>Sign in to your account</p>
+
+              {error && (
+                <div style={{
+                  background: "rgba(229,57,53,0.08)", border: "1px solid rgba(229,57,53,0.2)",
+                  borderRadius: 12, padding: "12px 16px", marginBottom: 20,
+                  display: "flex", alignItems: "center", gap: 10,
+                }}>
+                  {icons.alertTriangle({ size: 16, color: CB.red })}
+                  <span style={{ fontSize: 14, color: CB.red, fontWeight: 500 }}>{error}</span>
+                </div>
+              )}
+
+              <div style={{ marginBottom: 18 }}>
+                <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: CB.text, marginBottom: 6 }}>Email</label>
+                <input
+                  type="email" value={email} onChange={e => setEmail(e.target.value)}
+                  placeholder="you@provider.org"
+                  onKeyDown={e => e.key === "Enter" && handleSubmit(e)}
+                  style={{
+                    width: "100%", padding: "12px 16px", borderRadius: 12,
+                    border: `1px solid ${CB.border}`, fontSize: 15, fontFamily: "inherit",
+                    color: CB.text, background: CB.cream, transition: "border 0.2s",
+                  }}
+                />
               </div>
-            </div>
-          </nav>
 
-          {/* ══════ HERO ══════ */}
-          <section style={{ position: "relative", minHeight: "100vh", display: "flex", alignItems: "center", paddingTop: 64, overflow: "hidden" }}>
-            <div style={{ position: "absolute", inset: 0, background: `radial-gradient(ellipse at 30% 20%, rgba(0,137,123,0.06) 0%, transparent 50%), radial-gradient(ellipse at 80% 80%, rgba(26,115,232,0.04) 0%, transparent 50%), ${CB.cream}` }} />
-            <div style={{ position: "absolute", top: "15%", right: "5%", width: 400, height: 400, borderRadius: "50%", background: `radial-gradient(circle, rgba(0,137,123,0.05) 0%, transparent 70%)`, animation: "float 8s ease-in-out infinite" }} />
-            <div style={{ position: "absolute", bottom: "10%", left: "10%", width: 300, height: 300, borderRadius: "50%", background: `radial-gradient(circle, rgba(26,115,232,0.04) 0%, transparent 70%)`, animation: "float 10s ease-in-out infinite 2s" }} />
-            
-            <div style={{ maxWidth: 1200, margin: "0 auto", padding: "80px 32px", position: "relative", zIndex: 1 }}>
-              <div style={{ maxWidth: 720 }}>
-                <FadeIn delay={0}>
-                  <div style={{ display: "inline-flex", alignItems: "center", gap: 8, background: "rgba(0,137,123,0.08)", border: "1px solid rgba(0,137,123,0.15)", borderRadius: 30, padding: "6px 16px", marginBottom: 24 }}>
-                    <div style={{ width: 8, height: 8, borderRadius: 4, background: CB.teal, animation: "pulse 2s ease-in-out infinite" }} />
-                    <span style={{ fontSize: 13, fontWeight: 600, color: CB.tealDark }}>Now accepting early access applications</span>
-                  </div>
-                </FadeIn>
-                
-                <FadeIn delay={0.1}>
-                  <h1 style={{ fontSize: 64, fontWeight: 900, lineHeight: 1.05, letterSpacing: -3, color: CB.navy, marginBottom: 12 }}>
-                    We Got Compliance.
-                  </h1>
-                </FadeIn>
-                <FadeIn delay={0.2}>
-                  <h1 style={{ fontSize: 64, fontWeight: 900, lineHeight: 1.05, letterSpacing: -3, color: CB.teal, marginBottom: 28 }}>
-                    You Got Care.
-                  </h1>
-                </FadeIn>
-                
-                <FadeIn delay={0.3}>
-                  <p style={{ fontSize: 20, lineHeight: 1.7, color: CB.textMid, maxWidth: 580, marginBottom: 36 }}>
-                    The only compliance platform built specifically for DSPD providers. 16 modules. One system. $99/month. Replace Therap, Virtru, and your EVV vendor — and save $10,000+ per year.
-                  </p>
-                </FadeIn>
-                
-                <FadeIn delay={0.4}>
-                  <div className="hero-buttons" style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
-                    <a href="#waitlist" style={{ display: "inline-flex", alignItems: "center", gap: 8, background: `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})`, color: CB.white, padding: "16px 32px", borderRadius: 14, fontSize: 16, fontWeight: 700, textDecoration: "none", boxShadow: "0 4px 16px rgba(10,30,51,0.25)", transition: "transform 0.2s, box-shadow 0.2s", letterSpacing: 0.3 }}
-                      onMouseEnter={e => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 8px 24px rgba(10,30,51,0.3)"; }}
-                      onMouseLeave={e => { e.currentTarget.style.transform = "translateY(0)"; e.currentTarget.style.boxShadow = "0 4px 16px rgba(10,30,51,0.25)"; }}>
-                      Join the Waitlist <ArrowRightIcon size={18} />
-                    </a>
-                    <a href="#modules" style={{ display: "inline-flex", alignItems: "center", gap: 8, background: "transparent", color: CB.navy, padding: "16px 28px", borderRadius: 14, fontSize: 16, fontWeight: 700, textDecoration: "none", border: `2px solid ${CB.border}`, transition: "all 0.2s" }}
-                      onMouseEnter={e => { e.currentTarget.style.borderColor = CB.navy; }}
-                      onMouseLeave={e => { e.currentTarget.style.borderColor = CB.border; }}>
-                      See What's Inside <ChevronDownIcon size={18} />
-                    </a>
-                  </div>
-                </FadeIn>
-
-                <FadeIn delay={0.5}>
-                  <div style={{ display: "flex", gap: 28, marginTop: 48, flexWrap: "wrap" }}>
-                    {[
-                      { icon: <ShieldIcon size={16} />, text: "HIPAA Compliant" },
-                      { icon: <LockIcon size={16} />, text: "SOC 2 Target" },
-                      { icon: <ZapIcon size={16} />, text: "DSPD-Native" },
-                      { icon: <HeartIcon size={16} />, text: "Built by Providers" },
-                    ].map((badge, i) => (
-                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, color: CB.textLight }}>
-                        <span style={{ color: CB.teal }}>{badge.icon}</span> {badge.text}
-                      </div>
-                    ))}
-                  </div>
-                </FadeIn>
+              <div style={{ marginBottom: 28 }}>
+                <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: CB.text, marginBottom: 6 }}>Password</label>
+                <input
+                  type="password" value={password} onChange={e => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  onKeyDown={e => e.key === "Enter" && handleSubmit(e)}
+                  style={{
+                    width: "100%", padding: "12px 16px", borderRadius: 12,
+                    border: `1px solid ${CB.border}`, fontSize: 15, fontFamily: "inherit",
+                    color: CB.text, background: CB.cream, transition: "border 0.2s",
+                  }}
+                />
               </div>
+
+              <button
+                onClick={handleSubmit} disabled={loading}
+                style={{
+                  width: "100%", padding: "14px 24px", borderRadius: 14, border: "none",
+                  background: loading ? CB.textLight : `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})`,
+                  color: CB.white, fontSize: 16, fontWeight: 700, cursor: loading ? "wait" : "pointer",
+                  fontFamily: "inherit", letterSpacing: 0.3, transition: "all 0.2s",
+                  boxShadow: "0 4px 16px rgba(10,30,51,0.25)",
+                  display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
+                }}
+                onMouseEnter={e => { if (!loading) e.currentTarget.style.transform = "translateY(-1px)"; }}
+                onMouseLeave={e => e.currentTarget.style.transform = "translateY(0)"}
+              >
+                {loading ? <Spinner size={18} color={CB.white} /> : "Sign In"}
+              </button>
             </div>
-          </section>
 
-          {/* ══════ STATS BAR ══════ */}
-          <section style={{ background: `linear-gradient(135deg, ${CB.navy} 0%, ${CB.navyLight} 100%)`, padding: "56px 32px" }}>
-            <div className="stats-grid-4" style={{ maxWidth: 1000, margin: "0 auto", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 32 }}>
-              <Stat value="458" label="DSPD Providers in Utah" delay={0} />
-              <Stat value="16" label="Integrated Modules" delay={0.1} />
-              <Stat value="$99" label="Starting Monthly Price" delay={0.2} />
-              <Stat value="33" label="Service Codes Supported" delay={0.3} />
+            {/* Footer */}
+            <div style={{ textAlign: "center", marginTop: 24 }}>
+              <p style={{ fontSize: 13, color: CB.textLight }}>
+                A <span style={{ fontWeight: 600, color: CB.textMid }}>Hope Haven Services Inc.</span> Product
+              </p>
+              <a href="/" style={{ fontSize: 13, color: CB.teal, textDecoration: "none", marginTop: 8, display: "inline-block", fontWeight: 500 }}
+                onMouseEnter={e => e.currentTarget.style.textDecoration = "underline"}
+                onMouseLeave={e => e.currentTarget.style.textDecoration = "none"}>
+                ← Back to getprovly.com
+              </a>
             </div>
-          </section>
-
-          {/* ══════ PROBLEM ══════ */}
-          <section style={{ padding: "100px 32px", background: CB.white }}>
-            <div style={{ maxWidth: 900, margin: "0 auto", textAlign: "center" }}>
-              <FadeIn>
-                <div style={{ fontSize: 13, fontWeight: 700, color: CB.red, textTransform: "uppercase", letterSpacing: 2, marginBottom: 16 }}>The Problem</div>
-                <h2 style={{ fontSize: 40, fontWeight: 800, color: CB.navy, lineHeight: 1.15, letterSpacing: -1.5, marginBottom: 20 }}>
-                  You didn't start a disability services agency to wrestle with software.
-                </h2>
-                <p style={{ fontSize: 18, color: CB.textMid, lineHeight: 1.75, maxWidth: 680, margin: "0 auto 48px" }}>
-                  Right now, you're paying for Therap, Virtru, an EVV vendor, a scheduling tool, and tracking compliance on spreadsheets. Your staff spends more time on paperwork than on the people they serve. That ends now.
-                </p>
-              </FadeIn>
-
-              <FadeIn delay={0.1}>
-                <div className="hero-grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 20, textAlign: "left" }}>
-                  {[
-                    { num: "$1,200+", label: "per month", desc: "What mid-size providers pay across 4+ disconnected systems" },
-                    { num: "8–12", label: "separate tools", desc: "EVV, billing, documentation, scheduling, HR, compliance tracking, email encryption..." },
-                    { num: "83%", label: "need EVV", desc: "Of Utah's 458 DSPD providers deliver EVV-required services and need a compliant solution" },
-                  ].map((item, i) => (
-                    <div key={i} style={{ background: CB.cream, borderRadius: 16, padding: 28, border: `1px solid ${CB.border}` }}>
-                      <div style={{ fontSize: 36, fontWeight: 800, color: CB.red, letterSpacing: -1 }}>{item.num}</div>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>{item.label}</div>
-                      <div style={{ fontSize: 14, color: CB.textMid, lineHeight: 1.6 }}>{item.desc}</div>
-                    </div>
-                  ))}
-                </div>
-              </FadeIn>
-            </div>
-          </section>
-
-          {/* ══════ MODULES ══════ */}
-          <section id="modules" style={{ padding: "100px 32px", background: CB.cream }}>
-            <div style={{ maxWidth: 1200, margin: "0 auto" }}>
-              <FadeIn>
-                <div style={{ textAlign: "center", marginBottom: 56 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: CB.teal, textTransform: "uppercase", letterSpacing: 2, marginBottom: 16 }}>The Solution</div>
-                  <h2 style={{ fontSize: 40, fontWeight: 800, color: CB.navy, lineHeight: 1.15, letterSpacing: -1.5, marginBottom: 16 }}>
-                    16 modules. One platform. Every feature included.
-                  </h2>
-                  <p style={{ fontSize: 18, color: CB.textMid, maxWidth: 600, margin: "0 auto" }}>
-                    Built on the DHHS91172 Scope of Work. When you select your service codes, the entire platform auto-configures to your operations.
-                  </p>
-                </div>
-              </FadeIn>
-
-              <div className="modules-grid" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
-                {[
-                  { icon: <UsersIcon size={22} />, title: "Staff Management", desc: "Training matrix auto-calculated from hire date. 30/90/180-day deadlines. Credential expiration alerts." },
-                  { icon: <HeartIcon size={22} />, title: "Person Management", desc: "Every SOW 1.10 field. Intake workflows. 1056 authorization tracking with utilization alerts." },
-                  { icon: <FileTextIcon size={22} />, title: "Service Documentation", desc: "Dynamic forms per service code. Select RHS, DSI, or MTP — the form auto-loads the right fields." },
-                  { icon: <MapPinIcon size={22} />, title: "EVV Built-In", desc: "GPS clock in/out for all 9 EVV-required codes. Geofence validation. No separate vendor needed." },
-                  { icon: <BarChart3Icon size={22} />, title: "Billing & Claims", desc: "Auto-calculated units from service notes. Billing rules engine enforcing every Article 2 limitation." },
-                  { icon: <ShieldIcon size={22} />, title: "Compliance Dashboard", desc: "Real-time audit readiness score. 38 SOW deadlines tracked automatically. Missing doc alerts." },
-                  { icon: <AlertTriangleIcon size={22} />, title: "Incident Management", desc: "SOW 1.27 workflow with 24-hour and 5-day countdown timers. Fatality protocol built in." },
-                  { icon: <ZapIcon size={22} />, title: "AI Document Engine", desc: "Claude AI drafts quarterly summaries from your service notes. Compliance gap analysis. Shift handoff generation." },
-                  { icon: <CalendarIcon size={22} />, title: "Calendar System", desc: "3-layer calendar: organization, location, individual. Role-scoped. Auto-generated compliance events." },
-                  { icon: <MessageSquareIcon size={22} />, title: "Internal Messaging", desc: "HIPAA-compliant P2P messaging, site channels, shift handoff notes. Replaces texting PHI on personal phones." },
-                  { icon: <MailIcon size={22} />, title: "Secure Email", desc: "Encrypted email to SCs, families, state officials. SOW-compliant templates. Replaces Virtru at $0 cost." },
-                  { icon: <LockIcon size={22} />, title: "Reporting & PDF Export", desc: "Formatted PDFs matching DSPD expectations. Utilization reports. Board report generator. Custom analytics." },
-                ].map((mod, i) => (
-                  <ModuleCard key={i} {...mod} delay={i * 0.05} />
-                ))}
-              </div>
-              
-              <FadeIn delay={0.3}>
-                <div style={{ textAlign: "center", marginTop: 32, fontSize: 15, color: CB.textMid }}>
-                  Plus: <strong>Quarterly Summary Generator</strong> · <strong>Medication Management</strong> · <strong>Notification Preferences</strong> · <strong>Data Import & Migration</strong>
-                </div>
-              </FadeIn>
-            </div>
-          </section>
-
-          {/* ══════ COMPARISON ══════ */}
-          <section id="compare" style={{ padding: "100px 32px", background: CB.white }}>
-            <div style={{ maxWidth: 800, margin: "0 auto" }}>
-              <FadeIn>
-                <div style={{ textAlign: "center", marginBottom: 48 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: CB.blue, textTransform: "uppercase", letterSpacing: 2, marginBottom: 16 }}>The Comparison</div>
-                  <h2 style={{ fontSize: 40, fontWeight: 800, color: CB.navy, lineHeight: 1.15, letterSpacing: -1.5, marginBottom: 16 }}>
-                    Better product. Fraction of the cost.
-                  </h2>
-                  <p style={{ fontSize: 16, color: CB.textMid }}>Provly vs. Therap + Virtru + Sandata combined</p>
-                </div>
-              </FadeIn>
-
-              <FadeIn delay={0.1}>
-                <div style={{ borderRadius: 16, overflow: "hidden", border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow }}>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", background: CB.navy }}>
-                    <div style={{ padding: "16px 20px", fontSize: 14, fontWeight: 700, color: CB.white }}>Feature</div>
-                    <div style={{ padding: "16px 20px", fontSize: 14, fontWeight: 700, color: "rgba(255,255,255,0.6)", borderLeft: "1px solid rgba(255,255,255,0.1)" }}>Therap + Virtru + EVV</div>
-                    <div style={{ padding: "16px 20px", fontSize: 14, fontWeight: 700, color: CB.tealLight, borderLeft: "1px solid rgba(255,255,255,0.1)" }}>Provly</div>
-                  </div>
-                  <ComparisonRow feature="Service Documentation" therap="Generic forms" cb="DSPD-native (33 codes)" winner shade />
-                  <ComparisonRow feature="EVV" therap="Separate vendor ($200-400/mo)" cb="Built-in ($0)" winner />
-                  <ComparisonRow feature="Secure Email" therap="Virtru ($87/user/mo)" cb="Built-in ($0)" winner shade />
-                  <ComparisonRow feature="Compliance Engine" therap="None" cb="38 deadlines, audit score" winner />
-                  <ComparisonRow feature="AI Assistance" therap="None" cb="Claude-powered summaries & analysis" winner shade />
-                  <ComparisonRow feature="Messaging" therap="None / Basic" cb="P2P + channels + shift handoffs" winner />
-                  <ComparisonRow feature="Calendar" therap="None" cb="3-layer, role-scoped" winner shade />
-                  <ComparisonRow feature="UX / Mobile" therap='"Worst, most user unfriendly"' cb="Modern, mobile-first" winner />
-                  <ComparisonRow feature="Total (20 clients)" therap="$1,200–$1,600/month" cb="$299/month" winner shade />
-                </div>
-              </FadeIn>
-              
-              <FadeIn delay={0.2}>
-                <div style={{ textAlign: "center", marginTop: 32, padding: "20px 28px", background: "rgba(0,137,123,0.06)", borderRadius: 14, border: "1px solid rgba(0,137,123,0.12)" }}>
-                  <span style={{ fontSize: 18, fontWeight: 700, color: CB.tealDark }}>Save $10,000–$16,000 per year</span>
-                  <span style={{ fontSize: 15, color: CB.textMid, marginLeft: 8 }}>with a product that's actually better.</span>
-                </div>
-              </FadeIn>
-            </div>
-          </section>
-
-          {/* ══════ PRICING ══════ */}
-          <section id="pricing" style={{ padding: "100px 32px", background: CB.cream }}>
-            <div style={{ maxWidth: 1100, margin: "0 auto" }}>
-              <FadeIn>
-                <div style={{ textAlign: "center", marginBottom: 56 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: CB.teal, textTransform: "uppercase", letterSpacing: 2, marginBottom: 16 }}>Pricing</div>
-                  <h2 style={{ fontSize: 40, fontWeight: 800, color: CB.navy, lineHeight: 1.15, letterSpacing: -1.5, marginBottom: 16 }}>
-                    Exceptional value. Priced with respect.
-                  </h2>
-                  <p style={{ fontSize: 18, color: CB.textMid }}>All features at every tier. No gotchas. 30-day free trial.</p>
-                </div>
-              </FadeIn>
-
-              <div className="pricing-grid" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 20, alignItems: "start" }}>
-                <PricingTier tier="Starter" clients="1–10" price="$99" delay={0}
-                  features={["All 16 modules", "EVV, messaging, secure email", "AI-powered summaries", "Compliance dashboard", "Mobile app access"]} />
-                <PricingTier tier="Growth" clients="11–30" price="$299" popular delay={0.1}
-                  features={["Everything in Starter", "Multi-site management", "Area/region hierarchy", "Priority email support", "Advanced reporting"]} />
-                <PricingTier tier="Professional" clients="31–50" price="$499" delay={0.2}
-                  features={["Everything in Growth", "Full org hierarchy (12 roles)", "Custom report builder", "Priority phone support", "Dedicated onboarding"]} />
-                <PricingTier tier="Enterprise" clients="51+" price="$999+" delay={0.3}
-                  features={["Everything in Professional", "Dedicated success manager", "Custom integrations", "SLA guarantee", "White-glove onboarding"]} />
-              </div>
-              
-              <FadeIn delay={0.3}>
-                <div style={{ textAlign: "center", marginTop: 32, fontSize: 15, color: CB.textMid }}>
-                  30-day free trial · 10% annual discount · No setup fees · No contracts · Cancel anytime
-                </div>
-              </FadeIn>
-            </div>
-          </section>
-
-          {/* ══════ BUILT BY PROVIDERS ══════ */}
-          <section style={{ padding: "80px 32px", background: CB.white }}>
-            <div style={{ maxWidth: 800, margin: "0 auto", textAlign: "center" }}>
-              <FadeIn>
-                <div style={{ fontSize: 13, fontWeight: 700, color: CB.navy, textTransform: "uppercase", letterSpacing: 2, marginBottom: 16 }}>Our Story</div>
-                <h2 style={{ fontSize: 36, fontWeight: 800, color: CB.navy, lineHeight: 1.2, letterSpacing: -1, marginBottom: 20 }}>
-                  Built by a real provider who lives the pain every day.
-                </h2>
-                <p style={{ fontSize: 17, color: CB.textMid, lineHeight: 1.8, maxWidth: 640, margin: "0 auto 28px" }}>
-                  Provly isn't another VC-funded SaaS startup guessing at your problems. It's built by Hope Haven Services Inc. — an active DSPD provider under contract DHHS91172. We use this software ourselves. Every feature exists because we needed it in our own operations.
-                </p>
-                <p style={{ fontSize: 17, color: CB.textMid, lineHeight: 1.8, maxWidth: 640, margin: "0 auto" }}>
-                  We know what a DHHS compliance review feels like. We know what it's like to track training deadlines on spreadsheets. We know the stress of wondering if your documentation will survive an audit. We built Provly so no provider has to feel that again.
-                </p>
-              </FadeIn>
-            </div>
-          </section>
-
-          {/* ══════ WAITLIST ══════ */}
-          <section id="waitlist" style={{ padding: "100px 32px", background: `linear-gradient(135deg, ${CB.navy} 0%, #0D2440 100%)`, position: "relative", overflow: "hidden" }}>
-            <div style={{ position: "absolute", top: "10%", right: "15%", width: 300, height: 300, borderRadius: "50%", background: "radial-gradient(circle, rgba(0,137,123,0.1) 0%, transparent 70%)" }} />
-            <div style={{ maxWidth: 600, margin: "0 auto", position: "relative", zIndex: 1 }}>
-              <FadeIn>
-                <div style={{ textAlign: "center" }}>
-                  <h2 style={{ fontSize: 40, fontWeight: 800, color: CB.white, lineHeight: 1.15, letterSpacing: -1.5, marginBottom: 16 }}>
-                    Join the Waitlist
-                  </h2>
-                  <p style={{ fontSize: 17, color: "rgba(255,255,255,0.7)", marginBottom: 40, lineHeight: 1.7 }}>
-                    Be among the first DSPD providers to access Provly. Early access members get priority onboarding, founding member pricing, and direct input on features.
-                  </p>
-
-                  {!submitted ? (
-                    <div style={{ background: "rgba(255,255,255,0.06)", borderRadius: 20, padding: 32, border: "1px solid rgba(255,255,255,0.1)", backdropFilter: "blur(10px)" }}>
-                      <input value={orgName} onChange={e => setOrgName(e.target.value)} placeholder="Organization Name"
-                        style={{ width: "100%", padding: "14px 18px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.08)", color: CB.white, fontSize: 15, marginBottom: 14, fontFamily: "inherit" }} />
-                      <input value={email} onChange={e => setEmail(e.target.value)} placeholder="Email Address" type="email"
-                        style={{ width: "100%", padding: "14px 18px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.08)", color: CB.white, fontSize: 15, marginBottom: 14, fontFamily: "inherit" }} />
-                      <select value={clientCount} onChange={e => setClientCount(e.target.value)} style={{ width: "100%", padding: "14px 18px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.7)", fontSize: 15, marginBottom: 20, fontFamily: "inherit", appearance: "none" }}>
-                        <option value="">How many clients do you serve?</option>
-                        <option value="1-10">1–10 clients</option>
-                        <option value="11-30">11–30 clients</option>
-                        <option value="31-50">31–50 clients</option>
-                        <option value="51+">51+ clients</option>
-                      </select>
-                      <button onClick={handleSubmit} disabled={submitting}
-                        style={{ width: "100%", padding: "16px 28px", borderRadius: 14, border: "none", background: submitting ? "rgba(0,137,123,0.5)" : `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})`, color: CB.white, fontSize: 17, fontWeight: 700, cursor: submitting ? "wait" : "pointer", transition: "all 0.2s", boxShadow: "0 4px 16px rgba(0,137,123,0.3)", letterSpacing: 0.3, fontFamily: "inherit" }}
-                        onMouseEnter={e => { if (!submitting) e.currentTarget.style.transform = "translateY(-2px)"; }}
-                        onMouseLeave={e => e.currentTarget.style.transform = "translateY(0)"}>
-                        {submitting ? "Submitting..." : "Reserve My Spot"} {!submitting && <ArrowRightIcon size={18} style={{ verticalAlign: "middle", marginLeft: 6 }} />}
-                      </button>
-                      {error && <div style={{ fontSize: 14, color: "#f87171", marginTop: 12 }}>{error}</div>}
-                      <div style={{ fontSize: 13, color: "rgba(255,255,255,0.4)", marginTop: 14 }}>
-                        No commitment. No credit card. We'll notify you when early access opens.
-                      </div>
-                    </div>
-                  ) : (
-                    <div style={{ background: "rgba(0,137,123,0.15)", borderRadius: 20, padding: 40, border: "1px solid rgba(0,137,123,0.3)" }}>
-                      <CheckCircleIcon size={48} color={CB.tealLight} />
-                      <h3 style={{ fontSize: 24, fontWeight: 700, color: CB.white, marginBottom: 12, marginTop: 16 }}>You're on the list!</h3>
-                      <p style={{ fontSize: 15, color: "rgba(255,255,255,0.7)", lineHeight: 1.7 }}>
-                        We'll be in touch soon with early access details. Welcome to the future of DSPD compliance.
-                      </p>
-                    </div>
-                  )}
-                </div>
-              </FadeIn>
-            </div>
-          </section>
-
-          {/* ══════ FOOTER ══════ */}
-          <footer style={{ padding: "48px 32px", background: "#060F1A", borderTop: "1px solid rgba(255,255,255,0.06)" }}>
-            <div className="footer-flex" style={{ maxWidth: 1200, margin: "0 auto", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 20 }}>
-              <div>
-                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-                  <div style={{ width: 28, height: 28, borderRadius: 8, background: `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                    <ShieldIcon size={16} color={CB.tealLight} />
-                  </div>
-                  <span style={{ fontSize: 16, fontWeight: 800, color: "rgba(255,255,255,0.9)" }}>Provly</span>
-                </div>
-                <div style={{ fontSize: 13, color: "rgba(255,255,255,0.35)" }}>
-                  A Hope Haven Services Inc. Product · West Jordan, UT
-                </div>
-                <div style={{ fontSize: 13, color: "rgba(255,255,255,0.35)", marginTop: 4 }}>
-                  We Got Compliance. You Got Care.
-                </div>
-              </div>
-              <div style={{ fontSize: 12, color: "rgba(255,255,255,0.25)" }}>
-                © 2026 Hope Haven Services Inc. All rights reserved.
-              </div>
-            </div>
-          </footer>
+          </div>
         </div>
       );
     }
 
-    // ── Render ──
-    ReactDOM.render(<LandingPage />, document.getElementById("root"));
+    // ═══════════════════════════════════════════════════════════════
+    // SIDEBAR
+    // ═══════════════════════════════════════════════════════════════
+    function Sidebar({ active, onNavigate }) {
+      const { user, signOut } = useAuth();
+
+      const navItems = [
+        { key: "dashboard", label: "Dashboard", icon: icons.dashboard },
+        { key: "staff", label: "Staff", icon: icons.users },
+        { key: "clients", label: "Clients", icon: icons.heart },
+        { key: "training", label: "Training", icon: icons.book },
+        { key: "notes", label: "Service Notes", icon: icons.fileText },
+        { key: "evv", label: "EVV", icon: icons.mapPin },
+        { key: "compliance", label: "Compliance", icon: icons.shield },
+        { key: "billing", label: "Billing", icon: icons.barChart },
+      ];
+
+      return (
+        <aside style={{
+          width: CB.sidebarW, minHeight: "100vh", background: CB.navy,
+          display: "flex", flexDirection: "column", position: "fixed", top: 0, left: 0, bottom: 0,
+          zIndex: 50,
+        }}>
+          {/* Brand */}
+          <div style={{ padding: "24px 20px 20px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{
+                width: 36, height: 36, borderRadius: 10,
+                background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})`,
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}>
+                {icons.shield({ size: 20, color: CB.white })}
+              </div>
+              <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
+            </div>
+          </div>
+
+          {/* Navigation */}
+          <nav style={{ flex: 1, padding: "16px 12px", overflowY: "auto" }}>
+            {navItems.map((item, i) => {
+              const isActive = active === item.key;
+              return (
+                <button
+                  key={item.key}
+                  onClick={() => onNavigate(item.key)}
+                  style={{
+                    width: "100%", display: "flex", alignItems: "center", gap: 12,
+                    padding: "11px 14px", borderRadius: 10, border: "none",
+                    background: isActive ? "rgba(0,137,123,0.15)" : "transparent",
+                    color: isActive ? CB.tealLight : "rgba(255,255,255,0.55)",
+                    fontSize: 14, fontWeight: isActive ? 600 : 500, fontFamily: "inherit",
+                    cursor: "pointer", transition: "all 0.15s", textAlign: "left",
+                    marginBottom: 2, animation: `slideIn 0.3s ease ${i * 0.03}s both`,
+                  }}
+                  onMouseEnter={e => { if (!isActive) { e.currentTarget.style.background = "rgba(255,255,255,0.06)"; e.currentTarget.style.color = "rgba(255,255,255,0.85)"; }}}
+                  onMouseLeave={e => { if (!isActive) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "rgba(255,255,255,0.55)"; }}}
+                >
+                  {item.icon({ size: 18 })}
+                  {item.label}
+                </button>
+              );
+            })}
+          </nav>
+
+          {/* User footer */}
+          <div style={{ padding: "16px 16px 20px", borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+              <div style={{
+                width: 34, height: 34, borderRadius: 10,
+                background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealLight})`,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: 14, fontWeight: 700, color: CB.white,
+              }}>
+                {user?.email?.[0]?.toUpperCase() || "U"}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "rgba(255,255,255,0.9)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {user?.email?.split("@")[0] || "User"}
+                </div>
+                <div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", fontWeight: 500 }}>Owner</div>
+              </div>
+            </div>
+            <button
+              onClick={signOut}
+              style={{
+                width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                padding: "9px 14px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.1)",
+                background: "transparent", color: "rgba(255,255,255,0.5)", fontSize: 13,
+                fontWeight: 600, fontFamily: "inherit", cursor: "pointer", transition: "all 0.15s",
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = "rgba(229,57,53,0.1)"; e.currentTarget.style.color = "#f87171"; e.currentTarget.style.borderColor = "rgba(229,57,53,0.2)"; }}
+              onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "rgba(255,255,255,0.5)"; e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)"; }}
+            >
+              {icons.logout({ size: 15 })} Sign Out
+            </button>
+          </div>
+        </aside>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // STAT CARD COMPONENT
+    // ═══════════════════════════════════════════════════════════════
+    function StatCard({ label, value, icon, color = CB.teal, trend, delay = 0 }) {
+      return (
+        <div style={{
+          background: CB.white, borderRadius: 16, padding: "24px 22px",
+          border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
+          animation: `fadeIn 0.5s ease ${delay}s both`,
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+            <div style={{
+              width: 40, height: 40, borderRadius: 12,
+              background: `${color}12`, display: "flex", alignItems: "center", justifyContent: "center",
+            }}>
+              {icon({ size: 20, color })}
+            </div>
+            {trend && (
+              <span style={{
+                fontSize: 12, fontWeight: 700, color: trend > 0 ? CB.green : CB.red,
+                background: trend > 0 ? "rgba(46,125,50,0.08)" : "rgba(229,57,53,0.08)",
+                padding: "3px 8px", borderRadius: 6,
+              }}>
+                {trend > 0 ? "+" : ""}{trend}%
+              </span>
+            )}
+          </div>
+          <div style={{ fontSize: 28, fontWeight: 800, color: CB.navy, letterSpacing: -1, lineHeight: 1 }}>{value}</div>
+          <div style={{ fontSize: 13, color: CB.textLight, marginTop: 6, fontWeight: 500 }}>{label}</div>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // DATA TABLE COMPONENT
+    // ═══════════════════════════════════════════════════════════════
+    function DataTable({ columns, data, loading, emptyMessage = "No data found" }) {
+      if (loading) {
+        return (
+          <div style={{ display: "flex", justifyContent: "center", padding: 48 }}>
+            <Spinner size={24} />
+          </div>
+        );
+      }
+      return (
+        <div style={{
+          background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`,
+          boxShadow: CB.cardShadow, overflow: "hidden",
+        }}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ background: CB.cream }}>
+                  {columns.map((col, i) => (
+                    <th key={i} style={{
+                      padding: "13px 18px", textAlign: "left", fontSize: 12, fontWeight: 700,
+                      color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.8,
+                      borderBottom: `1px solid ${CB.border}`, whiteSpace: "nowrap",
+                    }}>
+                      {col.label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {data.length === 0 ? (
+                  <tr><td colSpan={columns.length} style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14 }}>{emptyMessage}</td></tr>
+                ) : data.map((row, ri) => (
+                  <tr key={ri} style={{ borderBottom: `1px solid ${CB.border}` }}
+                    onMouseEnter={e => e.currentTarget.style.background = CB.cream}
+                    onMouseLeave={e => e.currentTarget.style.background = CB.white}>
+                    {columns.map((col, ci) => (
+                      <td key={ci} style={{ padding: "14px 18px", fontSize: 14, color: CB.text, fontWeight: col.bold ? 600 : 400 }}>
+                        {col.render ? col.render(row) : row[col.key]}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // STATUS BADGE
+    // ═══════════════════════════════════════════════════════════════
+    function Badge({ text, color = CB.teal }) {
+      return (
+        <span style={{
+          display: "inline-block", fontSize: 12, fontWeight: 600, color,
+          background: `${color}12`, padding: "3px 10px", borderRadius: 6, whiteSpace: "nowrap",
+        }}>
+          {text}
+        </span>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // PAGE HEADER
+    // ═══════════════════════════════════════════════════════════════
+    function PageHeader({ title, subtitle, action }) {
+      return (
+        <div style={{
+          display: "flex", justifyContent: "space-between", alignItems: "flex-start",
+          marginBottom: 28, animation: "fadeIn 0.4s ease",
+        }}>
+          <div>
+            <h1 style={{ fontSize: 26, fontWeight: 800, color: CB.navy, letterSpacing: -0.8, lineHeight: 1.2 }}>{title}</h1>
+            {subtitle && <p style={{ fontSize: 14, color: CB.textMid, marginTop: 4 }}>{subtitle}</p>}
+          </div>
+          {action}
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // DASHBOARD PAGE
+    // ═══════════════════════════════════════════════════════════════
+    function DashboardPage() {
+      const [stats, setStats] = useState({ staff: 0, clients: 0, trainings: 0, auths: 0 });
+      const [loading, setLoading] = useState(true);
+      const [recentAlerts, setRecentAlerts] = useState([]);
+
+      useEffect(() => {
+        loadDashboard();
+      }, []);
+
+      const loadDashboard = async () => {
+        setLoading(true);
+        try {
+          const [staffRes, clientRes, trainingRes, authRes] = await Promise.all([
+            supabase.from("staff").select("id", { count: "exact", head: true }).eq("is_active", true),
+            supabase.from("persons").select("id", { count: "exact", head: true }).eq("is_active", true),
+            supabase.from("staff_trainings").select("id, status").eq("status", "overdue"),
+            supabase.from("person_service_authorizations").select("id", { count: "exact", head: true }),
+          ]);
+          setStats({
+            staff: staffRes.count || 0,
+            clients: clientRes.count || 0,
+            trainings: trainingRes.data?.length || 0,
+            auths: authRes.count || 0,
+          });
+        } catch (e) {
+          console.error("Dashboard load error:", e);
+        }
+        setLoading(false);
+      };
+
+      return (
+        <div>
+          <PageHeader
+            title="Dashboard"
+            subtitle="Hope Haven Services Inc. — DHHS91172"
+            action={
+              <button onClick={loadDashboard} style={{
+                display: "flex", alignItems: "center", gap: 8, padding: "10px 18px",
+                borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.white,
+                color: CB.textMid, fontSize: 13, fontWeight: 600, cursor: "pointer",
+                fontFamily: "inherit", transition: "all 0.15s",
+              }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor = CB.navy; e.currentTarget.style.color = CB.navy; }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = CB.border; e.currentTarget.style.color = CB.textMid; }}
+              >
+                {icons.refresh({ size: 15 })} Refresh
+              </button>
+            }
+          />
+
+          {loading ? (
+            <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><Spinner size={28} /></div>
+          ) : (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 18, marginBottom: 28 }}>
+                <StatCard label="Active Staff" value={stats.staff} icon={icons.users} color={CB.blue} delay={0} />
+                <StatCard label="Active Clients" value={stats.clients} icon={icons.heart} color={CB.teal} delay={0.05} />
+                <StatCard label="Overdue Trainings" value={stats.trainings} icon={icons.alertTriangle} color={stats.trainings > 0 ? CB.red : CB.green} delay={0.1} />
+                <StatCard label="Authorizations" value={stats.auths} icon={icons.fileText} color={CB.navy} delay={0.15} />
+              </div>
+
+              {/* Quick Actions */}
+              <div style={{
+                background: CB.white, borderRadius: 16, padding: 24,
+                border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
+                animation: "fadeIn 0.5s ease 0.2s both",
+              }}>
+                <h3 style={{ fontSize: 16, fontWeight: 700, color: CB.navy, marginBottom: 16 }}>Quick Actions</h3>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+                  {[
+                    { label: "New Service Note", icon: icons.fileText, color: CB.teal },
+                    { label: "Clock In (EVV)", icon: icons.mapPin, color: CB.blue },
+                    { label: "Log Incident", icon: icons.alertTriangle, color: CB.amber },
+                    { label: "Run Compliance Check", icon: icons.shield, color: CB.navy },
+                  ].map((action, i) => (
+                    <button key={i} style={{
+                      display: "flex", alignItems: "center", gap: 10,
+                      padding: "14px 16px", borderRadius: 12, border: `1px solid ${CB.border}`,
+                      background: CB.cream, cursor: "pointer", fontFamily: "inherit",
+                      fontSize: 13, fontWeight: 600, color: CB.text, transition: "all 0.15s",
+                    }}
+                      onMouseEnter={e => { e.currentTarget.style.borderColor = action.color; e.currentTarget.style.background = `${action.color}08`; }}
+                      onMouseLeave={e => { e.currentTarget.style.borderColor = CB.border; e.currentTarget.style.background = CB.cream; }}
+                    >
+                      <div style={{
+                        width: 32, height: 32, borderRadius: 8,
+                        background: `${action.color}12`, display: "flex",
+                        alignItems: "center", justifyContent: "center",
+                      }}>
+                        {action.icon({ size: 16, color: action.color })}
+                      </div>
+                      {action.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // STAFF PAGE
+    // ═══════════════════════════════════════════════════════════════
+    function StaffPage() {
+      const [staff, setStaff] = useState([]);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        loadStaff();
+      }, []);
+
+      const loadStaff = async () => {
+        setLoading(true);
+        const { data, error } = await supabase
+          .from("staff")
+          .select("id, first_name, last_name, role, hire_date, is_active, email, phone")
+          .order("last_name");
+        if (!error) setStaff(data || []);
+        setLoading(false);
+      };
+
+      const columns = [
+        { label: "Name", key: "name", bold: true, render: (r) => `${r.first_name} ${r.last_name}` },
+        { label: "Role", key: "role", render: (r) => <Badge text={r.role?.replace(/_/g, " ") || "—"} color={CB.navy} /> },
+        { label: "Hire Date", key: "hire_date", render: (r) => r.hire_date ? new Date(r.hire_date).toLocaleDateString() : "—" },
+        { label: "Status", key: "is_active", render: (r) => <Badge text={r.is_active ? "Active" : "Inactive"} color={r.is_active ? CB.green : CB.textLight} /> },
+        { label: "Email", key: "email", render: (r) => r.email || "—" },
+      ];
+
+      return (
+        <div>
+          <PageHeader
+            title="Staff"
+            subtitle="Manage team members, credentials, and training compliance"
+            action={
+              <button style={{
+                display: "flex", alignItems: "center", gap: 8, padding: "10px 20px",
+                borderRadius: 12, border: "none",
+                background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})`,
+                color: CB.white, fontSize: 14, fontWeight: 700, cursor: "pointer",
+                fontFamily: "inherit", boxShadow: "0 4px 16px rgba(0,137,123,0.25)",
+                transition: "all 0.2s",
+              }}
+                onMouseEnter={e => e.currentTarget.style.transform = "translateY(-1px)"}
+                onMouseLeave={e => e.currentTarget.style.transform = "translateY(0)"}
+              >
+                {icons.plus({ size: 16 })} Add Staff
+              </button>
+            }
+          />
+          <DataTable columns={columns} data={staff} loading={loading} emptyMessage="No staff members found" />
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // CLIENTS PAGE
+    // ═══════════════════════════════════════════════════════════════
+    function ClientsPage() {
+      const [clients, setClients] = useState([]);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        loadClients();
+      }, []);
+
+      const loadClients = async () => {
+        setLoading(true);
+        const { data, error } = await supabase
+          .from("persons")
+          .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, person_service_authorizations(id, service_code_id, authorized_units, used_units, service_code_definitions(code))")
+          .order("last_name");
+        if (!error) setClients(data || []);
+        setLoading(false);
+      };
+
+      const columns = [
+        { label: "Name", bold: true, render: (r) => `${r.first_name} ${r.last_name}` },
+        { label: "Medicaid #", render: (r) => r.medicaid_number || "—" },
+        { label: "DOB", render: (r) => r.date_of_birth ? new Date(r.date_of_birth).toLocaleDateString() : "—" },
+        { label: "Status", render: (r) => <Badge text={r.is_active ? "Active" : "Inactive"} color={r.is_active ? CB.green : CB.textLight} /> },
+        { label: "Authorizations", render: (r) => {
+          const auths = r.person_service_authorizations || [];
+          return auths.length > 0 ? (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {auths.map((a, i) => <Badge key={i} text={a.service_code_definitions?.code || "?"} color={CB.blue} />)}
+            </div>
+          ) : "—";
+        }},
+      ];
+
+      return (
+        <div>
+          <PageHeader
+            title="Clients"
+            subtitle="Person management, authorizations, and service tracking"
+            action={
+              <button style={{
+                display: "flex", alignItems: "center", gap: 8, padding: "10px 20px",
+                borderRadius: 12, border: "none",
+                background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})`,
+                color: CB.white, fontSize: 14, fontWeight: 700, cursor: "pointer",
+                fontFamily: "inherit", boxShadow: "0 4px 16px rgba(0,137,123,0.25)",
+                transition: "all 0.2s",
+              }}
+                onMouseEnter={e => e.currentTarget.style.transform = "translateY(-1px)"}
+                onMouseLeave={e => e.currentTarget.style.transform = "translateY(0)"}
+              >
+                {icons.plus({ size: 16 })} Add Client
+              </button>
+            }
+          />
+          <DataTable columns={columns} data={clients} loading={loading} emptyMessage="No clients found" />
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // TRAINING PAGE
+    // ═══════════════════════════════════════════════════════════════
+    function TrainingPage() {
+      const [trainings, setTrainings] = useState([]);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        loadTrainings();
+      }, []);
+
+      const loadTrainings = async () => {
+        setLoading(true);
+        const { data, error } = await supabase
+          .from("training_topic_definitions")
+          .select("id, topic_name, category, deadline_days, renewal_months, requires_certification")
+          .order("category, topic_name");
+        if (!error) setTrainings(data || []);
+        setLoading(false);
+      };
+
+      const categoryColors = {
+        "30_day": CB.blue,
+        "90_day": CB.amber,
+        "180_day": CB.red,
+        "abi": CB.teal,
+        "annual": CB.navy,
+        "ongoing": CB.textMid,
+      };
+
+      const columns = [
+        { label: "Training Topic", bold: true, render: (r) => r.topic_name },
+        { label: "Category", render: (r) => <Badge text={r.category?.replace(/_/g, " ") || "—"} color={categoryColors[r.category] || CB.textLight} /> },
+        { label: "Certification", render: (r) => r.requires_certification ? <Badge text="Cert Required" color={CB.red} /> : <Badge text="No Cert" color={CB.textLight} /> },
+        { label: "Due Within", render: (r) => r.deadline_days ? `${r.deadline_days} days` : "—" },
+        { label: "Renewal", render: (r) => r.renewal_months ? `Every ${r.renewal_months} mo` : "One-time" },
+      ];
+
+      return (
+        <div>
+          <PageHeader
+            title="Training Tracker"
+            subtitle="27 SOW-required training topics with automated deadline tracking"
+          />
+          <DataTable columns={columns} data={trainings} loading={loading} emptyMessage="No training topics found" />
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // COMING SOON STUB
+    // ═══════════════════════════════════════════════════════════════
+    function ComingSoon({ title, subtitle, icon }) {
+      return (
+        <div>
+          <PageHeader title={title} subtitle={subtitle} />
+          <div style={{
+            background: CB.white, borderRadius: 20, padding: "80px 40px", textAlign: "center",
+            border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
+            animation: "fadeIn 0.5s ease",
+          }}>
+            <div style={{
+              width: 64, height: 64, borderRadius: 16,
+              background: `linear-gradient(135deg, ${CB.teal}12, ${CB.tealLight}12)`,
+              display: "inline-flex", alignItems: "center", justifyContent: "center",
+              marginBottom: 20,
+            }}>
+              {icon ? icon({ size: 28, color: CB.teal }) : icons.zap({ size: 28, color: CB.teal })}
+            </div>
+            <h3 style={{ fontSize: 20, fontWeight: 700, color: CB.navy, marginBottom: 8 }}>Coming Soon</h3>
+            <p style={{ fontSize: 15, color: CB.textMid, maxWidth: 400, margin: "0 auto", lineHeight: 1.7 }}>
+              This module is under active development. It will be available in the next sprint.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // APP SHELL
+    // ═══════════════════════════════════════════════════════════════
+    function AppShell() {
+      const [page, setPage] = useState("dashboard");
+
+      const renderPage = () => {
+        switch (page) {
+          case "dashboard": return <DashboardPage />;
+          case "staff": return <StaffPage />;
+          case "clients": return <ClientsPage />;
+          case "training": return <TrainingPage />;
+          case "notes": return <ComingSoon title="Service Notes" subtitle="Dynamic forms per service code — auto-loads RHS, DSI, MTP fields" icon={icons.fileText} />;
+          case "evv": return <ComingSoon title="EVV" subtitle="GPS clock in/out for all 9 EVV-required codes with geofence validation" icon={icons.mapPin} />;
+          case "compliance": return <ComingSoon title="Compliance Dashboard" subtitle="Real-time audit readiness score with 38 SOW deadline tracking" icon={icons.shield} />;
+          case "billing": return <ComingSoon title="Billing & Claims" subtitle="Auto-calculated units from service notes with Article 2 billing rules" icon={icons.barChart} />;
+          default: return <DashboardPage />;
+        }
+      };
+
+      return (
+        <div style={{ display: "flex", minHeight: "100vh", background: CB.cream }}>
+          <Sidebar active={page} onNavigate={setPage} />
+          <main style={{
+            marginLeft: CB.sidebarW, flex: 1, padding: "32px 36px",
+            maxWidth: `calc(100vw - ${CB.sidebarW}px)`,
+          }}>
+            {renderPage()}
+          </main>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // APP ROOT
+    // ═══════════════════════════════════════════════════════════════
+    function App() {
+      const { user, loading } = useAuth();
+
+      if (loading) {
+        return (
+          <div style={{
+            minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center",
+            background: CB.cream, flexDirection: "column", gap: 16,
+          }}>
+            <div style={{
+              width: 48, height: 48, borderRadius: 14,
+              background: `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})`,
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}>
+              {icons.shield({ size: 24, color: CB.white })}
+            </div>
+            <Spinner size={22} />
+          </div>
+        );
+      }
+
+      return user ? <AppShell /> : <LoginPage />;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // RENDER
+    // ═══════════════════════════════════════════════════════════════
+    ReactDOM.render(
+      <AuthProvider><App /></AuthProvider>,
+      document.getElementById("root")
+    );
   </script>
 </body>
 </html>
