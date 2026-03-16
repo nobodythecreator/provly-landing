@@ -142,11 +142,11 @@
                 <span style={{ fontSize: 14, color: CB.textMid, lineHeight: 1.5 }}>{f}</span>
               </div>
             ))}
-            <button style={{ width: "100%", padding: "14px 20px", borderRadius: 12, border: popular ? "none" : `2px solid ${CB.navy}`, background: popular ? `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})` : "transparent", color: popular ? CB.white : CB.navy, fontSize: 15, fontWeight: 700, cursor: "pointer", marginTop: 20, transition: "all 0.2s", letterSpacing: 0.3, fontFamily: "inherit" }}
+            <a href="/app" style={{ display: "block", width: "100%", padding: "14px 20px", borderRadius: 12, border: popular ? "none" : `2px solid ${CB.navy}`, background: popular ? `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})` : "transparent", color: popular ? CB.white : CB.navy, fontSize: 15, fontWeight: 700, cursor: "pointer", marginTop: 20, transition: "all 0.2s", letterSpacing: 0.3, fontFamily: "inherit", textDecoration: "none", textAlign: "center" }}
               onMouseEnter={e => { if (!popular) { e.currentTarget.style.background = CB.navy; e.currentTarget.style.color = CB.white; } else { e.currentTarget.style.opacity = "0.9"; }}}
               onMouseLeave={e => { if (!popular) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = CB.navy; } else { e.currentTarget.style.opacity = "1"; }}}>
               Start Free Trial <ArrowRightIcon size={16} style={{ verticalAlign: "middle", marginLeft: 4 }} />
-            </button>
+            </a>
           </div>
         </FadeIn>
       );
@@ -214,6 +214,9 @@
                     onMouseEnter={e => e.currentTarget.style.color = CB.navy}
                     onMouseLeave={e => e.currentTarget.style.color = CB.textMid}>{item}</a>
                 ))}
+                <a href="/app" style={{ fontSize: 14, fontWeight: 600, color: CB.navy, textDecoration: "none", transition: "color 0.2s" }}
+                  onMouseEnter={e => e.currentTarget.style.color = CB.teal}
+                  onMouseLeave={e => e.currentTarget.style.color = CB.navy}>Sign In</a>
                 <a href="#waitlist" style={{ background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})`, color: CB.white, padding: "9px 22px", borderRadius: 10, fontSize: 14, fontWeight: 700, textDecoration: "none", transition: "opacity 0.2s", letterSpacing: 0.3 }}
                   onMouseEnter={e => e.currentTarget.style.opacity = "0.9"}
                   onMouseLeave={e => e.currentTarget.style.opacity = "1"}>Join Waitlist</a>
