@@ -66,16 +66,25 @@
       const [user, setUser] = useState(null);
       const [session, setSession] = useState(null);
       const [loading, setLoading] = useState(true);
+      const [orgId, setOrgId] = useState(null);
+
+      const fetchOrgId = async () => {
+        const { data, error } = await supabase.rpc('org_id');
+        if (!error && data) setOrgId(data);
+      };
 
       useEffect(() => {
         supabase.auth.getSession().then(({ data: { session } }) => {
           setSession(session);
           setUser(session?.user ?? null);
+          if (session?.user) fetchOrgId();
           setLoading(false);
         });
         const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
           setSession(session);
           setUser(session?.user ?? null);
+          if (session?.user) fetchOrgId();
+          else setOrgId(null);
         });
         return () => subscription.unsubscribe();
       }, []);
@@ -84,7 +93,7 @@
       const signOut = () => supabase.auth.signOut();
 
       return (
-        <AuthContext.Provider value={{ user, session, loading, signIn, signOut }}>
+        <AuthContext.Provider value={{ user, session, loading, signIn, signOut, orgId }}>
           {children}
         </AuthContext.Provider>
       );
@@ -645,6 +654,7 @@
 
     function StaffForm({ open, onClose, onSaved, editing }) {
       const { addToast } = useToast();
+      const { orgId } = useAuth();
       const [saving, setSaving] = useState(false);
       const [form, setForm] = useState({
         first_name: "", last_name: "", email: "", phone: "",
@@ -681,6 +691,7 @@
         if (editing) {
           result = await supabase.from("staff").update(payload).eq("id", editing.id);
         } else {
+          payload.org_id = orgId;
           result = await supabase.from("staff").insert(payload);
         }
         setSaving(false);
@@ -802,6 +813,7 @@
     // ═══════════════════════════════════════════════════════════════
     function ClientForm({ open, onClose, onSaved, editing }) {
       const { addToast } = useToast();
+      const { orgId } = useAuth();
       const [saving, setSaving] = useState(false);
       const [serviceCodes, setServiceCodes] = useState([]);
       const [form, setForm] = useState({
@@ -835,6 +847,7 @@
         if (!newAuth.service_code_id || !newAuth.authorized_units) return addToast("Select a service code and enter units", "error");
         if (!editing) return addToast("Save the client first, then add authorizations", "warning");
         const { error } = await supabase.from("person_service_authorizations").insert({
+          org_id: orgId,
           person_id: editing.id,
           service_code_id: newAuth.service_code_id,
           authorized_units: parseInt(newAuth.authorized_units),
@@ -868,6 +881,7 @@
         if (editing) {
           result = await supabase.from("persons").update(payload).eq("id", editing.id);
         } else {
+          payload.org_id = orgId;
           result = await supabase.from("persons").insert(payload);
         }
         setSaving(false);
@@ -1035,6 +1049,7 @@
     // ═══════════════════════════════════════════════════════════════
     function TrainingLogForm({ open, onClose, onSaved }) {
       const { addToast } = useToast();
+      const { orgId } = useAuth();
       const [saving, setSaving] = useState(false);
       const [staffList, setStaffList] = useState([]);
       const [topics, setTopics] = useState([]);
@@ -1061,6 +1076,7 @@
           expiration_date = d.toISOString().split("T")[0];
         }
         const { error } = await supabase.from("staff_trainings").insert({
+          org_id: orgId,
           staff_id: form.staff_id,
           training_topic_id: form.training_topic_id,
           completed_date: form.completed_date,
@@ -1216,6 +1232,7 @@
 
     function ServiceNoteForm({ open, onClose, onSaved }) {
       const { addToast } = useToast();
+      const { orgId } = useAuth();
       const [saving, setSaving] = useState(false);
       const [staffList, setStaffList] = useState([]);
       const [clients, setClients] = useState([]);
@@ -1280,6 +1297,7 @@
         }
 
         const { error } = await supabase.from("service_notes").insert({
+          org_id: orgId,
           staff_id: form.staff_id,
           person_id: form.person_id,
           service_code_id: form.service_code_id,
@@ -1426,6 +1444,7 @@
     // ═══════════════════════════════════════════════════════════════
     function EVVPage() {
       const { addToast } = useToast();
+      const { orgId } = useAuth();
       const [sessions, setSessions] = useState([]);
       const [loading, setLoading] = useState(true);
       const [staffList, setStaffList] = useState([]);
@@ -1494,6 +1513,7 @@
             }
           }
           const { error } = await supabase.from("evv_sessions").insert({
+            org_id: orgId,
             staff_id: clockForm.staff_id,
             person_id: clockForm.person_id,
             service_code_id: clockForm.service_code_id,
