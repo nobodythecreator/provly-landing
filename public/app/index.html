@@ -23,14 +23,17 @@
     ::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
     @keyframes slideIn { from { opacity: 0; transform: translateX(-12px); } to { opacity: 1; transform: translateX(0); } }
+    @keyframes modalIn { from { opacity: 0; transform: scale(0.96) translateY(8px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+    @keyframes overlayIn { from { opacity: 0; } to { opacity: 1; } }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
     @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes successPop { 0% { transform: scale(0.8); opacity: 0; } 50% { transform: scale(1.05); } 100% { transform: scale(1); opacity: 1; } }
   </style>
 </head>
 <body>
   <div id="root"></div>
   <script type="text/babel">
-    const { useState, useEffect, useContext, createContext, useCallback } = React;
+    const { useState, useEffect, useContext, createContext, useCallback, useRef, useMemo } = React;
 
     // ═══════════════════════════════════════════════════════════════
     // DESIGN TOKENS — matched exactly to landing page
@@ -90,6 +93,44 @@
     function useAuth() { return useContext(AuthContext); }
 
     // ═══════════════════════════════════════════════════════════════
+    // TOAST CONTEXT — global notifications
+    // ═══════════════════════════════════════════════════════════════
+    const ToastContext = createContext(null);
+
+    function ToastProvider({ children }) {
+      const [toasts, setToasts] = useState([]);
+
+      const addToast = useCallback((message, type = "success") => {
+        const id = Date.now();
+        setToasts(prev => [...prev, { id, message, type }]);
+        setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3500);
+      }, []);
+
+      return (
+        <ToastContext.Provider value={{ addToast }}>
+          {children}
+          <div style={{ position: "fixed", bottom: 24, right: 24, zIndex: 9999, display: "flex", flexDirection: "column", gap: 8 }}>
+            {toasts.map(t => (
+              <div key={t.id} style={{
+                background: t.type === "error" ? CB.red : t.type === "warning" ? CB.amber : CB.green,
+                color: CB.white, padding: "12px 20px", borderRadius: 12, fontSize: 14, fontWeight: 600,
+                boxShadow: "0 8px 32px rgba(0,0,0,0.18)", animation: "successPop 0.3s ease",
+                display: "flex", alignItems: "center", gap: 8, maxWidth: 360,
+              }}>
+                {t.type === "error" ? icons.alertTriangle({ size: 16, color: CB.white }) :
+                 t.type === "warning" ? icons.clock({ size: 16, color: CB.white }) :
+                 icons.checkCircle({ size: 16, color: CB.white })}
+                {t.message}
+              </div>
+            ))}
+          </div>
+        </ToastContext.Provider>
+      );
+    }
+
+    function useToast() { return useContext(ToastContext); }
+
+    // ═══════════════════════════════════════════════════════════════
     // SVG ICONS — consistent with landing page
     // ═══════════════════════════════════════════════════════════════
     const Icon = ({ d, size = 20, color = "currentColor", style = {} }) => (
@@ -120,6 +161,14 @@
       arrowRight: (p={}) => <Icon {...p} d={<><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></>} />,
       plus: (p={}) => <Icon {...p} d={<><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></>} />,
       refresh: (p={}) => <Icon {...p} d={<><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></>} />,
+      x: (p={}) => <Icon {...p} d={<><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></>} />,
+      edit: (p={}) => <Icon {...p} d={<><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></>} />,
+      trash: (p={}) => <Icon {...p} d={<><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></>} />,
+      play: (p={}) => <Icon {...p} d={<polygon points="5 3 19 12 5 21 5 3"/>} />,
+      stop: (p={}) => <Icon {...p} d={<rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>} />,
+      save: (p={}) => <Icon {...p} d={<><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></>} />,
+      eye: (p={}) => <Icon {...p} d={<><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></>} />,
+      crosshair: (p={}) => <Icon {...p} d={<><circle cx="12" cy="12" r="10"/><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/></>} />,
     };
 
     // ═══════════════════════════════════════════════════════════════
@@ -128,6 +177,110 @@
     function Spinner({ size = 20, color = CB.teal }) {
       return (
         <div style={{ width: size, height: size, border: `2.5px solid ${CB.border}`, borderTopColor: color, borderRadius: "50%", animation: "spin 0.6s linear infinite" }} />
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // MODAL COMPONENT — reusable overlay
+    // ═══════════════════════════════════════════════════════════════
+    function Modal({ open, onClose, title, subtitle, width = 520, children }) {
+      if (!open) return null;
+      return (
+        <div onClick={onClose} style={{
+          position: "fixed", inset: 0, zIndex: 1000,
+          background: "rgba(10,30,51,0.45)", backdropFilter: "blur(4px)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          padding: 24, animation: "overlayIn 0.2s ease",
+        }}>
+          <div onClick={e => e.stopPropagation()} style={{
+            width: "100%", maxWidth: width, maxHeight: "90vh",
+            background: CB.white, borderRadius: 20, boxShadow: "0 24px 80px rgba(10,30,51,0.2)",
+            animation: "modalIn 0.25s ease", display: "flex", flexDirection: "column",
+          }}>
+            {/* Header */}
+            <div style={{
+              padding: "22px 28px 18px", borderBottom: `1px solid ${CB.border}`,
+              display: "flex", justifyContent: "space-between", alignItems: "flex-start",
+            }}>
+              <div>
+                <h2 style={{ fontSize: 20, fontWeight: 800, color: CB.navy, letterSpacing: -0.5 }}>{title}</h2>
+                {subtitle && <p style={{ fontSize: 13, color: CB.textMid, marginTop: 2 }}>{subtitle}</p>}
+              </div>
+              <button onClick={onClose} style={{
+                width: 32, height: 32, borderRadius: 8, border: "none",
+                background: CB.cream, cursor: "pointer", display: "flex",
+                alignItems: "center", justifyContent: "center", transition: "all 0.15s",
+              }}
+                onMouseEnter={e => e.currentTarget.style.background = "#E2E8F0"}
+                onMouseLeave={e => e.currentTarget.style.background = CB.cream}
+              >
+                {icons.x({ size: 16, color: CB.textMid })}
+              </button>
+            </div>
+            {/* Body */}
+            <div style={{ padding: "24px 28px 28px", overflowY: "auto", flex: 1 }}>
+              {children}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // FORM FIELD COMPONENT
+    // ═══════════════════════════════════════════════════════════════
+    const fieldStyle = {
+      width: "100%", padding: "11px 14px", borderRadius: 10,
+      border: `1px solid ${CB.border}`, fontSize: 14, fontFamily: "inherit",
+      color: CB.text, background: CB.cream, transition: "border 0.2s",
+    };
+
+    function FormField({ label, required, children, half, style: wrapStyle }) {
+      return (
+        <div style={{ marginBottom: 16, width: half ? "calc(50% - 8px)" : "100%", ...wrapStyle }}>
+          <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: CB.text, marginBottom: 5, textTransform: "uppercase", letterSpacing: 0.5 }}>
+            {label}{required && <span style={{ color: CB.red, marginLeft: 2 }}>*</span>}
+          </label>
+          {children}
+        </div>
+      );
+    }
+
+    function FormRow({ children }) {
+      return <div style={{ display: "flex", gap: 16 }}>{children}</div>;
+    }
+
+    function PrimaryButton({ onClick, loading: btnLoading, children, disabled, fullWidth, color = CB.teal }) {
+      return (
+        <button onClick={onClick} disabled={disabled || btnLoading} style={{
+          display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
+          padding: "12px 24px", borderRadius: 12, border: "none",
+          background: disabled ? CB.textLight : `linear-gradient(135deg, ${color}, ${color}DD)`,
+          color: CB.white, fontSize: 14, fontWeight: 700, cursor: disabled ? "not-allowed" : "pointer",
+          fontFamily: "inherit", boxShadow: `0 4px 16px ${color}40`,
+          transition: "all 0.2s", width: fullWidth ? "100%" : "auto", opacity: disabled ? 0.6 : 1,
+        }}
+          onMouseEnter={e => { if (!disabled) e.currentTarget.style.transform = "translateY(-1px)"; }}
+          onMouseLeave={e => e.currentTarget.style.transform = "translateY(0)"}
+        >
+          {btnLoading ? <Spinner size={16} color={CB.white} /> : children}
+        </button>
+      );
+    }
+
+    function SecondaryButton({ onClick, children, color = CB.textMid }) {
+      return (
+        <button onClick={onClick} style={{
+          display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
+          padding: "12px 24px", borderRadius: 12, border: `1px solid ${CB.border}`,
+          background: CB.white, color, fontSize: 14, fontWeight: 600, cursor: "pointer",
+          fontFamily: "inherit", transition: "all 0.15s",
+        }}
+          onMouseEnter={e => { e.currentTarget.style.borderColor = CB.navy; e.currentTarget.style.color = CB.navy; }}
+          onMouseLeave={e => { e.currentTarget.style.borderColor = CB.border; e.currentTarget.style.color = color; }}
+        >
+          {children}
+        </button>
       );
     }
 
@@ -157,14 +310,10 @@
           background: `radial-gradient(ellipse at 30% 20%, rgba(0,137,123,0.06) 0%, transparent 50%), radial-gradient(ellipse at 80% 80%, rgba(26,115,232,0.04) 0%, transparent 50%), ${CB.cream}`,
           padding: 24,
         }}>
-          {/* Decorative orbs — same as landing hero */}
           <div style={{ position: "fixed", top: "15%", right: "10%", width: 350, height: 350, borderRadius: "50%", background: "radial-gradient(circle, rgba(0,137,123,0.05) 0%, transparent 70%)", pointerEvents: "none" }} />
           <div style={{ position: "fixed", bottom: "10%", left: "10%", width: 280, height: 280, borderRadius: "50%", background: "radial-gradient(circle, rgba(26,115,232,0.04) 0%, transparent 70%)", pointerEvents: "none" }} />
 
-          <div style={{
-            width: "100%", maxWidth: 420, animation: "fadeIn 0.5s ease",
-          }}>
-            {/* Logo */}
+          <div style={{ width: "100%", maxWidth: 420, animation: "fadeIn 0.5s ease" }}>
             <div style={{ textAlign: "center", marginBottom: 36 }}>
               <div style={{
                 width: 56, height: 56, borderRadius: 16,
@@ -175,12 +324,9 @@
                 {icons.shield({ size: 28, color: CB.white })}
               </div>
               <h1 style={{ fontSize: 28, fontWeight: 800, color: CB.navy, letterSpacing: -1 }}>Provly</h1>
-              <p style={{ fontSize: 14, color: CB.textLight, marginTop: 4, fontWeight: 500 }}>
-                DSPD Compliance Platform
-              </p>
+              <p style={{ fontSize: 14, color: CB.textLight, marginTop: 4, fontWeight: 500 }}>DSPD Compliance Platform</p>
             </div>
 
-            {/* Card */}
             <div style={{
               background: CB.white, borderRadius: 20, padding: "36px 32px",
               border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
@@ -201,42 +347,22 @@
 
               <div style={{ marginBottom: 18 }}>
                 <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: CB.text, marginBottom: 6 }}>Email</label>
-                <input
-                  type="email" value={email} onChange={e => setEmail(e.target.value)}
-                  placeholder="you@provider.org"
-                  onKeyDown={e => e.key === "Enter" && handleSubmit(e)}
-                  style={{
-                    width: "100%", padding: "12px 16px", borderRadius: 12,
-                    border: `1px solid ${CB.border}`, fontSize: 15, fontFamily: "inherit",
-                    color: CB.text, background: CB.cream, transition: "border 0.2s",
-                  }}
-                />
+                <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@provider.org" onKeyDown={e => e.key === "Enter" && handleSubmit(e)}
+                  style={{ width: "100%", padding: "12px 16px", borderRadius: 12, border: `1px solid ${CB.border}`, fontSize: 15, fontFamily: "inherit", color: CB.text, background: CB.cream }} />
               </div>
-
               <div style={{ marginBottom: 28 }}>
                 <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: CB.text, marginBottom: 6 }}>Password</label>
-                <input
-                  type="password" value={password} onChange={e => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                  onKeyDown={e => e.key === "Enter" && handleSubmit(e)}
-                  style={{
-                    width: "100%", padding: "12px 16px", borderRadius: 12,
-                    border: `1px solid ${CB.border}`, fontSize: 15, fontFamily: "inherit",
-                    color: CB.text, background: CB.cream, transition: "border 0.2s",
-                  }}
-                />
+                <input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" onKeyDown={e => e.key === "Enter" && handleSubmit(e)}
+                  style={{ width: "100%", padding: "12px 16px", borderRadius: 12, border: `1px solid ${CB.border}`, fontSize: 15, fontFamily: "inherit", color: CB.text, background: CB.cream }} />
               </div>
 
-              <button
-                onClick={handleSubmit} disabled={loading}
-                style={{
-                  width: "100%", padding: "14px 24px", borderRadius: 14, border: "none",
-                  background: loading ? CB.textLight : `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})`,
-                  color: CB.white, fontSize: 16, fontWeight: 700, cursor: loading ? "wait" : "pointer",
-                  fontFamily: "inherit", letterSpacing: 0.3, transition: "all 0.2s",
-                  boxShadow: "0 4px 16px rgba(10,30,51,0.25)",
-                  display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
-                }}
+              <button onClick={handleSubmit} disabled={loading} style={{
+                width: "100%", padding: "14px 24px", borderRadius: 14, border: "none",
+                background: loading ? CB.textLight : `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})`,
+                color: CB.white, fontSize: 16, fontWeight: 700, cursor: loading ? "wait" : "pointer",
+                fontFamily: "inherit", letterSpacing: 0.3, boxShadow: "0 4px 16px rgba(10,30,51,0.25)",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
+              }}
                 onMouseEnter={e => { if (!loading) e.currentTarget.style.transform = "translateY(-1px)"; }}
                 onMouseLeave={e => e.currentTarget.style.transform = "translateY(0)"}
               >
@@ -244,16 +370,11 @@
               </button>
             </div>
 
-            {/* Footer */}
             <div style={{ textAlign: "center", marginTop: 24 }}>
               <p style={{ fontSize: 13, color: CB.textLight }}>
                 A <span style={{ fontWeight: 600, color: CB.textMid }}>Hope Haven Services Inc.</span> Product
               </p>
-              <a href="/" style={{ fontSize: 13, color: CB.teal, textDecoration: "none", marginTop: 8, display: "inline-block", fontWeight: 500 }}
-                onMouseEnter={e => e.currentTarget.style.textDecoration = "underline"}
-                onMouseLeave={e => e.currentTarget.style.textDecoration = "none"}>
-                ← Back to getprovly.com
-              </a>
+              <a href="/" style={{ fontSize: 13, color: CB.teal, textDecoration: "none", marginTop: 8, display: "inline-block", fontWeight: 500 }}>← Back to getprovly.com</a>
             </div>
           </div>
         </div>
@@ -265,7 +386,6 @@
     // ═══════════════════════════════════════════════════════════════
     function Sidebar({ active, onNavigate }) {
       const { user, signOut } = useAuth();
-
       const navItems = [
         { key: "dashboard", label: "Dashboard", icon: icons.dashboard },
         { key: "staff", label: "Staff", icon: icons.users },
@@ -276,55 +396,40 @@
         { key: "compliance", label: "Compliance", icon: icons.shield },
         { key: "billing", label: "Billing", icon: icons.barChart },
       ];
-
       return (
         <aside style={{
           width: CB.sidebarW, minHeight: "100vh", background: CB.navy,
-          display: "flex", flexDirection: "column", position: "fixed", top: 0, left: 0, bottom: 0,
-          zIndex: 50,
+          display: "flex", flexDirection: "column", position: "fixed", top: 0, left: 0, bottom: 0, zIndex: 50,
         }}>
-          {/* Brand */}
           <div style={{ padding: "24px 20px 20px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <div style={{
-                width: 36, height: 36, borderRadius: 10,
-                background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})`,
-                display: "flex", alignItems: "center", justifyContent: "center",
-              }}>
+              <div style={{ width: 36, height: 36, borderRadius: 10, background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
                 {icons.shield({ size: 20, color: CB.white })}
               </div>
               <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
             </div>
           </div>
-
-          {/* Navigation */}
           <nav style={{ flex: 1, padding: "16px 12px", overflowY: "auto" }}>
             {navItems.map((item, i) => {
               const isActive = active === item.key;
               return (
-                <button
-                  key={item.key}
-                  onClick={() => onNavigate(item.key)}
-                  style={{
-                    width: "100%", display: "flex", alignItems: "center", gap: 12,
-                    padding: "11px 14px", borderRadius: 10, border: "none",
-                    background: isActive ? "rgba(0,137,123,0.15)" : "transparent",
-                    color: isActive ? CB.tealLight : "rgba(255,255,255,0.55)",
-                    fontSize: 14, fontWeight: isActive ? 600 : 500, fontFamily: "inherit",
-                    cursor: "pointer", transition: "all 0.15s", textAlign: "left",
-                    marginBottom: 2, animation: `slideIn 0.3s ease ${i * 0.03}s both`,
-                  }}
+                <button key={item.key} onClick={() => onNavigate(item.key)} style={{
+                  width: "100%", display: "flex", alignItems: "center", gap: 12,
+                  padding: "11px 14px", borderRadius: 10, border: "none",
+                  background: isActive ? "rgba(0,137,123,0.15)" : "transparent",
+                  color: isActive ? CB.tealLight : "rgba(255,255,255,0.55)",
+                  fontSize: 14, fontWeight: isActive ? 600 : 500, fontFamily: "inherit",
+                  cursor: "pointer", transition: "all 0.15s", textAlign: "left",
+                  marginBottom: 2, animation: `slideIn 0.3s ease ${i * 0.03}s both`,
+                }}
                   onMouseEnter={e => { if (!isActive) { e.currentTarget.style.background = "rgba(255,255,255,0.06)"; e.currentTarget.style.color = "rgba(255,255,255,0.85)"; }}}
                   onMouseLeave={e => { if (!isActive) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "rgba(255,255,255,0.55)"; }}}
                 >
-                  {item.icon({ size: 18 })}
-                  {item.label}
+                  {item.icon({ size: 18 })} {item.label}
                 </button>
               );
             })}
           </nav>
-
-          {/* User footer */}
           <div style={{ padding: "16px 16px 20px", borderTop: "1px solid rgba(255,255,255,0.08)" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
               <div style={{
@@ -332,9 +437,7 @@
                 background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealLight})`,
                 display: "flex", alignItems: "center", justifyContent: "center",
                 fontSize: 14, fontWeight: 700, color: CB.white,
-              }}>
-                {user?.email?.[0]?.toUpperCase() || "U"}
-              </div>
+              }}>{user?.email?.[0]?.toUpperCase() || "U"}</div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: "rgba(255,255,255,0.9)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {user?.email?.split("@")[0] || "User"}
@@ -342,26 +445,22 @@
                 <div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", fontWeight: 500 }}>Owner</div>
               </div>
             </div>
-            <button
-              onClick={signOut}
-              style={{
-                width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-                padding: "9px 14px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.1)",
-                background: "transparent", color: "rgba(255,255,255,0.5)", fontSize: 13,
-                fontWeight: 600, fontFamily: "inherit", cursor: "pointer", transition: "all 0.15s",
-              }}
+            <button onClick={signOut} style={{
+              width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+              padding: "9px 14px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.1)",
+              background: "transparent", color: "rgba(255,255,255,0.5)", fontSize: 13,
+              fontWeight: 600, fontFamily: "inherit", cursor: "pointer", transition: "all 0.15s",
+            }}
               onMouseEnter={e => { e.currentTarget.style.background = "rgba(229,57,53,0.1)"; e.currentTarget.style.color = "#f87171"; e.currentTarget.style.borderColor = "rgba(229,57,53,0.2)"; }}
               onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "rgba(255,255,255,0.5)"; e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)"; }}
-            >
-              {icons.logout({ size: 15 })} Sign Out
-            </button>
+            >{icons.logout({ size: 15 })} Sign Out</button>
           </div>
         </aside>
       );
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // STAT CARD COMPONENT
+    // SHARED COMPONENTS — StatCard, DataTable, Badge, PageHeader
     // ═══════════════════════════════════════════════════════════════
     function StatCard({ label, value, icon, color = CB.teal, trend, delay = 0 }) {
       return (
@@ -371,18 +470,11 @@
           animation: `fadeIn 0.5s ease ${delay}s both`,
         }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
-            <div style={{
-              width: 40, height: 40, borderRadius: 12,
-              background: `${color}12`, display: "flex", alignItems: "center", justifyContent: "center",
-            }}>
+            <div style={{ width: 40, height: 40, borderRadius: 12, background: `${color}12`, display: "flex", alignItems: "center", justifyContent: "center" }}>
               {icon({ size: 20, color })}
             </div>
             {trend && (
-              <span style={{
-                fontSize: 12, fontWeight: 700, color: trend > 0 ? CB.green : CB.red,
-                background: trend > 0 ? "rgba(46,125,50,0.08)" : "rgba(229,57,53,0.08)",
-                padding: "3px 8px", borderRadius: 6,
-              }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: trend > 0 ? CB.green : CB.red, background: trend > 0 ? "rgba(46,125,50,0.08)" : "rgba(229,57,53,0.08)", padding: "3px 8px", borderRadius: 6 }}>
                 {trend > 0 ? "+" : ""}{trend}%
               </span>
             )}
@@ -393,32 +485,16 @@
       );
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // DATA TABLE COMPONENT
-    // ═══════════════════════════════════════════════════════════════
-    function DataTable({ columns, data, loading, emptyMessage = "No data found" }) {
-      if (loading) {
-        return (
-          <div style={{ display: "flex", justifyContent: "center", padding: 48 }}>
-            <Spinner size={24} />
-          </div>
-        );
-      }
+    function DataTable({ columns, data, loading, emptyMessage = "No data found", onRowClick }) {
+      if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 48 }}><Spinner size={24} /></div>;
       return (
-        <div style={{
-          background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`,
-          boxShadow: CB.cardShadow, overflow: "hidden",
-        }}>
+        <div style={{ background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, overflow: "hidden" }}>
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead>
                 <tr style={{ background: CB.cream }}>
                   {columns.map((col, i) => (
-                    <th key={i} style={{
-                      padding: "13px 18px", textAlign: "left", fontSize: 12, fontWeight: 700,
-                      color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.8,
-                      borderBottom: `1px solid ${CB.border}`, whiteSpace: "nowrap",
-                    }}>
+                    <th key={i} style={{ padding: "13px 18px", textAlign: "left", fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.8, borderBottom: `1px solid ${CB.border}`, whiteSpace: "nowrap" }}>
                       {col.label}
                     </th>
                   ))}
@@ -428,7 +504,8 @@
                 {data.length === 0 ? (
                   <tr><td colSpan={columns.length} style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14 }}>{emptyMessage}</td></tr>
                 ) : data.map((row, ri) => (
-                  <tr key={ri} style={{ borderBottom: `1px solid ${CB.border}` }}
+                  <tr key={row.id || ri} style={{ borderBottom: `1px solid ${CB.border}`, cursor: onRowClick ? "pointer" : "default" }}
+                    onClick={() => onRowClick && onRowClick(row)}
                     onMouseEnter={e => e.currentTarget.style.background = CB.cream}
                     onMouseLeave={e => e.currentTarget.style.background = CB.white}>
                     {columns.map((col, ci) => (
@@ -445,29 +522,17 @@
       );
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // STATUS BADGE
-    // ═══════════════════════════════════════════════════════════════
     function Badge({ text, color = CB.teal }) {
       return (
-        <span style={{
-          display: "inline-block", fontSize: 12, fontWeight: 600, color,
-          background: `${color}12`, padding: "3px 10px", borderRadius: 6, whiteSpace: "nowrap",
-        }}>
+        <span style={{ display: "inline-block", fontSize: 12, fontWeight: 600, color, background: `${color}12`, padding: "3px 10px", borderRadius: 6, whiteSpace: "nowrap" }}>
           {text}
         </span>
       );
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // PAGE HEADER
-    // ═══════════════════════════════════════════════════════════════
     function PageHeader({ title, subtitle, action }) {
       return (
-        <div style={{
-          display: "flex", justifyContent: "space-between", alignItems: "flex-start",
-          marginBottom: 28, animation: "fadeIn 0.4s ease",
-        }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 28, animation: "fadeIn 0.4s ease" }}>
           <div>
             <h1 style={{ fontSize: 26, fontWeight: 800, color: CB.navy, letterSpacing: -0.8, lineHeight: 1.2 }}>{title}</h1>
             {subtitle && <p style={{ fontSize: 14, color: CB.textMid, marginTop: 4 }}>{subtitle}</p>}
@@ -483,11 +548,8 @@
     function DashboardPage() {
       const [stats, setStats] = useState({ staff: 0, clients: 0, trainings: 0, auths: 0 });
       const [loading, setLoading] = useState(true);
-      const [recentAlerts, setRecentAlerts] = useState([]);
 
-      useEffect(() => {
-        loadDashboard();
-      }, []);
+      useEffect(() => { loadDashboard(); }, []);
 
       const loadDashboard = async () => {
         setLoading(true);
@@ -504,32 +566,24 @@
             trainings: trainingRes.data?.length || 0,
             auths: authRes.count || 0,
           });
-        } catch (e) {
-          console.error("Dashboard load error:", e);
-        }
+        } catch (e) { console.error("Dashboard load error:", e); }
         setLoading(false);
       };
 
       return (
         <div>
-          <PageHeader
-            title="Dashboard"
-            subtitle="Hope Haven Services Inc. — DHHS91172"
+          <PageHeader title="Dashboard" subtitle="Hope Haven Services Inc. — DHHS91172"
             action={
               <button onClick={loadDashboard} style={{
                 display: "flex", alignItems: "center", gap: 8, padding: "10px 18px",
                 borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.white,
-                color: CB.textMid, fontSize: 13, fontWeight: 600, cursor: "pointer",
-                fontFamily: "inherit", transition: "all 0.15s",
+                color: CB.textMid, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
               }}
                 onMouseEnter={e => { e.currentTarget.style.borderColor = CB.navy; e.currentTarget.style.color = CB.navy; }}
                 onMouseLeave={e => { e.currentTarget.style.borderColor = CB.border; e.currentTarget.style.color = CB.textMid; }}
-              >
-                {icons.refresh({ size: 15 })} Refresh
-              </button>
+              >{icons.refresh({ size: 15 })} Refresh</button>
             }
           />
-
           {loading ? (
             <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><Spinner size={28} /></div>
           ) : (
@@ -540,8 +594,6 @@
                 <StatCard label="Overdue Trainings" value={stats.trainings} icon={icons.alertTriangle} color={stats.trainings > 0 ? CB.red : CB.green} delay={0.1} />
                 <StatCard label="Authorizations" value={stats.auths} icon={icons.fileText} color={CB.navy} delay={0.15} />
               </div>
-
-              {/* Quick Actions */}
               <div style={{
                 background: CB.white, borderRadius: 16, padding: 24,
                 border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
@@ -556,19 +608,15 @@
                     { label: "Run Compliance Check", icon: icons.shield, color: CB.navy },
                   ].map((action, i) => (
                     <button key={i} style={{
-                      display: "flex", alignItems: "center", gap: 10,
-                      padding: "14px 16px", borderRadius: 12, border: `1px solid ${CB.border}`,
-                      background: CB.cream, cursor: "pointer", fontFamily: "inherit",
-                      fontSize: 13, fontWeight: 600, color: CB.text, transition: "all 0.15s",
+                      display: "flex", alignItems: "center", gap: 10, padding: "14px 16px",
+                      borderRadius: 12, border: `1px solid ${CB.border}`, background: CB.cream,
+                      cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600,
+                      color: CB.text, transition: "all 0.15s",
                     }}
                       onMouseEnter={e => { e.currentTarget.style.borderColor = action.color; e.currentTarget.style.background = `${action.color}08`; }}
                       onMouseLeave={e => { e.currentTarget.style.borderColor = CB.border; e.currentTarget.style.background = CB.cream; }}
                     >
-                      <div style={{
-                        width: 32, height: 32, borderRadius: 8,
-                        background: `${action.color}12`, display: "flex",
-                        alignItems: "center", justifyContent: "center",
-                      }}>
+                      <div style={{ width: 32, height: 32, borderRadius: 8, background: `${action.color}12`, display: "flex", alignItems: "center", justifyContent: "center" }}>
                         {action.icon({ size: 16, color: action.color })}
                       </div>
                       {action.label}
@@ -583,153 +631,516 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // STAFF PAGE
+    // MODULE 1: STAFF CRUD
     // ═══════════════════════════════════════════════════════════════
+    const STAFF_ROLES = [
+      { value: "dsp", label: "Direct Support Professional" },
+      { value: "compliance_director", label: "Compliance Director" },
+      { value: "residential_director", label: "Residential Director" },
+      { value: "day_program_director", label: "Day Program Director" },
+      { value: "admin", label: "Administrator" },
+      { value: "bcba", label: "BCBA" },
+      { value: "rn", label: "Registered Nurse" },
+    ];
+
+    function StaffForm({ open, onClose, onSaved, editing }) {
+      const { addToast } = useToast();
+      const [saving, setSaving] = useState(false);
+      const [form, setForm] = useState({
+        first_name: "", last_name: "", email: "", phone: "",
+        role: "dsp", hire_date: "", is_active: true,
+      });
+
+      useEffect(() => {
+        if (editing) {
+          setForm({
+            first_name: editing.first_name || "",
+            last_name: editing.last_name || "",
+            email: editing.email || "",
+            phone: editing.phone || "",
+            role: editing.role || "dsp",
+            hire_date: editing.hire_date || "",
+            is_active: editing.is_active !== false,
+          });
+        } else {
+          setForm({ first_name: "", last_name: "", email: "", phone: "", role: "dsp", hire_date: "", is_active: true });
+        }
+      }, [editing, open]);
+
+      const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
+
+      const handleSave = async () => {
+        if (!form.first_name || !form.last_name) return addToast("First and last name are required", "error");
+        setSaving(true);
+        const payload = { ...form };
+        if (!payload.hire_date) delete payload.hire_date;
+        if (!payload.email) delete payload.email;
+        if (!payload.phone) delete payload.phone;
+
+        let result;
+        if (editing) {
+          result = await supabase.from("staff").update(payload).eq("id", editing.id);
+        } else {
+          result = await supabase.from("staff").insert(payload);
+        }
+        setSaving(false);
+        if (result.error) {
+          addToast(result.error.message, "error");
+        } else {
+          addToast(editing ? "Staff member updated" : "Staff member added", "success");
+          onSaved();
+          onClose();
+        }
+      };
+
+      return (
+        <Modal open={open} onClose={onClose} title={editing ? "Edit Staff Member" : "Add Staff Member"} subtitle="All fields marked * are required">
+          <FormRow>
+            <FormField label="First Name" required half>
+              <input style={fieldStyle} value={form.first_name} onChange={e => set("first_name", e.target.value)} placeholder="First name" />
+            </FormField>
+            <FormField label="Last Name" required half>
+              <input style={fieldStyle} value={form.last_name} onChange={e => set("last_name", e.target.value)} placeholder="Last name" />
+            </FormField>
+          </FormRow>
+          <FormRow>
+            <FormField label="Email" half>
+              <input style={fieldStyle} type="email" value={form.email} onChange={e => set("email", e.target.value)} placeholder="email@example.com" />
+            </FormField>
+            <FormField label="Phone" half>
+              <input style={fieldStyle} type="tel" value={form.phone} onChange={e => set("phone", e.target.value)} placeholder="(801) 555-0000" />
+            </FormField>
+          </FormRow>
+          <FormRow>
+            <FormField label="Role" required half>
+              <select style={fieldStyle} value={form.role} onChange={e => set("role", e.target.value)}>
+                {STAFF_ROLES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
+              </select>
+            </FormField>
+            <FormField label="Hire Date" half>
+              <input style={fieldStyle} type="date" value={form.hire_date} onChange={e => set("hire_date", e.target.value)} />
+            </FormField>
+          </FormRow>
+          {editing && (
+            <FormField label="Status">
+              <div style={{ display: "flex", gap: 12 }}>
+                {[true, false].map(val => (
+                  <label key={String(val)} style={{
+                    display: "flex", alignItems: "center", gap: 8, padding: "10px 16px",
+                    borderRadius: 10, border: `1px solid ${form.is_active === val ? (val ? CB.green : CB.red) : CB.border}`,
+                    background: form.is_active === val ? (val ? "rgba(46,125,50,0.06)" : "rgba(229,57,53,0.06)") : CB.white,
+                    cursor: "pointer", fontSize: 14, fontWeight: 600, color: form.is_active === val ? (val ? CB.green : CB.red) : CB.textMid,
+                    transition: "all 0.15s",
+                  }}>
+                    <input type="radio" name="status" checked={form.is_active === val} onChange={() => set("is_active", val)} style={{ display: "none" }} />
+                    {val ? icons.checkCircle({ size: 16, color: form.is_active === val ? CB.green : CB.textLight }) : icons.x({ size: 16, color: form.is_active === val ? CB.red : CB.textLight })}
+                    {val ? "Active" : "Inactive"}
+                  </label>
+                ))}
+              </div>
+            </FormField>
+          )}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 8 }}>
+            <SecondaryButton onClick={onClose}>Cancel</SecondaryButton>
+            <PrimaryButton onClick={handleSave} loading={saving}>{icons.save({ size: 16 })} {editing ? "Update" : "Add Staff"}</PrimaryButton>
+          </div>
+        </Modal>
+      );
+    }
+
     function StaffPage() {
       const [staff, setStaff] = useState([]);
       const [loading, setLoading] = useState(true);
+      const [formOpen, setFormOpen] = useState(false);
+      const [editing, setEditing] = useState(null);
 
-      useEffect(() => {
-        loadStaff();
-      }, []);
+      useEffect(() => { loadStaff(); }, []);
 
       const loadStaff = async () => {
         setLoading(true);
-        const { data, error } = await supabase
-          .from("staff")
-          .select("id, first_name, last_name, role, hire_date, is_active, email, phone")
-          .order("last_name");
+        const { data, error } = await supabase.from("staff").select("id, first_name, last_name, role, hire_date, is_active, email, phone").order("last_name");
         if (!error) setStaff(data || []);
         setLoading(false);
       };
 
+      const openEdit = (row) => { setEditing(row); setFormOpen(true); };
+      const openAdd = () => { setEditing(null); setFormOpen(true); };
+
       const columns = [
-        { label: "Name", key: "name", bold: true, render: (r) => `${r.first_name} ${r.last_name}` },
-        { label: "Role", key: "role", render: (r) => <Badge text={r.role?.replace(/_/g, " ") || "—"} color={CB.navy} /> },
-        { label: "Hire Date", key: "hire_date", render: (r) => r.hire_date ? new Date(r.hire_date).toLocaleDateString() : "—" },
-        { label: "Status", key: "is_active", render: (r) => <Badge text={r.is_active ? "Active" : "Inactive"} color={r.is_active ? CB.green : CB.textLight} /> },
-        { label: "Email", key: "email", render: (r) => r.email || "—" },
+        { label: "Name", bold: true, render: (r) => `${r.first_name} ${r.last_name}` },
+        { label: "Role", render: (r) => <Badge text={STAFF_ROLES.find(x => x.value === r.role)?.label || r.role?.replace(/_/g, " ") || "—"} color={CB.navy} /> },
+        { label: "Hire Date", render: (r) => r.hire_date ? new Date(r.hire_date + "T00:00:00").toLocaleDateString() : "—" },
+        { label: "Status", render: (r) => <Badge text={r.is_active ? "Active" : "Inactive"} color={r.is_active ? CB.green : CB.textLight} /> },
+        { label: "Email", render: (r) => r.email || "—" },
+        { label: "", render: (r) => (
+          <button onClick={(e) => { e.stopPropagation(); openEdit(r); }} style={{
+            display: "flex", alignItems: "center", gap: 6, padding: "6px 12px",
+            borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
+            color: CB.textMid, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+          }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = CB.teal; e.currentTarget.style.color = CB.teal; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = CB.border; e.currentTarget.style.color = CB.textMid; }}
+          >{icons.edit({ size: 13 })} Edit</button>
+        )},
       ];
 
       return (
         <div>
-          <PageHeader
-            title="Staff"
-            subtitle="Manage team members, credentials, and training compliance"
+          <PageHeader title="Staff" subtitle="Manage team members, credentials, and training compliance"
             action={
-              <button style={{
-                display: "flex", alignItems: "center", gap: 8, padding: "10px 20px",
-                borderRadius: 12, border: "none",
-                background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})`,
-                color: CB.white, fontSize: 14, fontWeight: 700, cursor: "pointer",
-                fontFamily: "inherit", boxShadow: "0 4px 16px rgba(0,137,123,0.25)",
-                transition: "all 0.2s",
-              }}
-                onMouseEnter={e => e.currentTarget.style.transform = "translateY(-1px)"}
-                onMouseLeave={e => e.currentTarget.style.transform = "translateY(0)"}
-              >
-                {icons.plus({ size: 16 })} Add Staff
-              </button>
+              <PrimaryButton onClick={openAdd}>{icons.plus({ size: 16 })} Add Staff</PrimaryButton>
             }
           />
           <DataTable columns={columns} data={staff} loading={loading} emptyMessage="No staff members found" />
+          <StaffForm open={formOpen} onClose={() => setFormOpen(false)} onSaved={loadStaff} editing={editing} />
         </div>
       );
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // CLIENTS PAGE
+    // MODULE 2: CLIENT CRUD + AUTHORIZATION MANAGEMENT
     // ═══════════════════════════════════════════════════════════════
+    function ClientForm({ open, onClose, onSaved, editing }) {
+      const { addToast } = useToast();
+      const [saving, setSaving] = useState(false);
+      const [serviceCodes, setServiceCodes] = useState([]);
+      const [form, setForm] = useState({
+        first_name: "", last_name: "", date_of_birth: "", medicaid_number: "", is_active: true,
+      });
+      const [auths, setAuths] = useState([]);
+      const [newAuth, setNewAuth] = useState({ service_code_id: "", authorized_units: "", start_date: "", end_date: "" });
+
+      useEffect(() => {
+        supabase.from("service_code_definitions").select("id, code, name").order("code").then(({ data }) => setServiceCodes(data || []));
+      }, []);
+
+      useEffect(() => {
+        if (editing) {
+          setForm({
+            first_name: editing.first_name || "", last_name: editing.last_name || "",
+            date_of_birth: editing.date_of_birth || "", medicaid_number: editing.medicaid_number || "",
+            is_active: editing.is_active !== false,
+          });
+          setAuths(editing.person_service_authorizations || []);
+        } else {
+          setForm({ first_name: "", last_name: "", date_of_birth: "", medicaid_number: "", is_active: true });
+          setAuths([]);
+        }
+        setNewAuth({ service_code_id: "", authorized_units: "", start_date: "", end_date: "" });
+      }, [editing, open]);
+
+      const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
+
+      const addAuth = async () => {
+        if (!newAuth.service_code_id || !newAuth.authorized_units) return addToast("Select a service code and enter units", "error");
+        if (!editing) return addToast("Save the client first, then add authorizations", "warning");
+        const { error } = await supabase.from("person_service_authorizations").insert({
+          person_id: editing.id,
+          service_code_id: newAuth.service_code_id,
+          authorized_units: parseInt(newAuth.authorized_units),
+          used_units: 0,
+          start_date: newAuth.start_date || null,
+          end_date: newAuth.end_date || null,
+        });
+        if (error) return addToast(error.message, "error");
+        addToast("Authorization added", "success");
+        // Reload auths
+        const { data } = await supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code)").eq("person_id", editing.id);
+        setAuths(data || []);
+        setNewAuth({ service_code_id: "", authorized_units: "", start_date: "", end_date: "" });
+      };
+
+      const removeAuth = async (authId) => {
+        const { error } = await supabase.from("person_service_authorizations").delete().eq("id", authId);
+        if (error) return addToast(error.message, "error");
+        setAuths(prev => prev.filter(a => a.id !== authId));
+        addToast("Authorization removed", "success");
+      };
+
+      const handleSave = async () => {
+        if (!form.first_name || !form.last_name) return addToast("First and last name are required", "error");
+        setSaving(true);
+        const payload = { ...form };
+        if (!payload.date_of_birth) delete payload.date_of_birth;
+        if (!payload.medicaid_number) delete payload.medicaid_number;
+
+        let result;
+        if (editing) {
+          result = await supabase.from("persons").update(payload).eq("id", editing.id);
+        } else {
+          result = await supabase.from("persons").insert(payload);
+        }
+        setSaving(false);
+        if (result.error) {
+          addToast(result.error.message, "error");
+        } else {
+          addToast(editing ? "Client updated" : "Client added", "success");
+          onSaved();
+          onClose();
+        }
+      };
+
+      return (
+        <Modal open={open} onClose={onClose} title={editing ? "Edit Client" : "Add Client"} subtitle="Person management and service authorizations" width={600}>
+          <FormRow>
+            <FormField label="First Name" required half>
+              <input style={fieldStyle} value={form.first_name} onChange={e => set("first_name", e.target.value)} placeholder="First name" />
+            </FormField>
+            <FormField label="Last Name" required half>
+              <input style={fieldStyle} value={form.last_name} onChange={e => set("last_name", e.target.value)} placeholder="Last name" />
+            </FormField>
+          </FormRow>
+          <FormRow>
+            <FormField label="Date of Birth" half>
+              <input style={fieldStyle} type="date" value={form.date_of_birth} onChange={e => set("date_of_birth", e.target.value)} />
+            </FormField>
+            <FormField label="Medicaid Number" half>
+              <input style={fieldStyle} value={form.medicaid_number} onChange={e => set("medicaid_number", e.target.value)} placeholder="Medicaid ID" />
+            </FormField>
+          </FormRow>
+          {editing && (
+            <FormField label="Status">
+              <div style={{ display: "flex", gap: 12 }}>
+                {[true, false].map(val => (
+                  <label key={String(val)} style={{
+                    display: "flex", alignItems: "center", gap: 8, padding: "10px 16px",
+                    borderRadius: 10, border: `1px solid ${form.is_active === val ? (val ? CB.green : CB.red) : CB.border}`,
+                    background: form.is_active === val ? (val ? "rgba(46,125,50,0.06)" : "rgba(229,57,53,0.06)") : CB.white,
+                    cursor: "pointer", fontSize: 14, fontWeight: 600, color: form.is_active === val ? (val ? CB.green : CB.red) : CB.textMid,
+                  }}>
+                    <input type="radio" name="client_status" checked={form.is_active === val} onChange={() => set("is_active", val)} style={{ display: "none" }} />
+                    {val ? "Active" : "Inactive"}
+                  </label>
+                ))}
+              </div>
+            </FormField>
+          )}
+
+          {/* Authorizations Section */}
+          {editing && (
+            <div style={{ marginTop: 8, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
+              <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 12 }}>Service Authorizations</h3>
+              {auths.length > 0 && (
+                <div style={{ marginBottom: 16 }}>
+                  {auths.map(a => (
+                    <div key={a.id} style={{
+                      display: "flex", alignItems: "center", justifyContent: "space-between",
+                      padding: "10px 14px", borderRadius: 10, background: CB.cream, marginBottom: 6,
+                      border: `1px solid ${CB.border}`,
+                    }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <Badge text={a.service_code_definitions?.code || "?"} color={CB.blue} />
+                        <span style={{ fontSize: 13, color: CB.text, fontWeight: 600 }}>{a.used_units || 0} / {a.authorized_units} units</span>
+                        {a.end_date && <span style={{ fontSize: 12, color: CB.textLight }}>exp {new Date(a.end_date + "T00:00:00").toLocaleDateString()}</span>}
+                      </div>
+                      <button onClick={() => removeAuth(a.id)} style={{
+                        padding: "4px 8px", borderRadius: 6, border: "none", background: "rgba(229,57,53,0.08)",
+                        color: CB.red, cursor: "pointer", fontSize: 12, fontWeight: 600, fontFamily: "inherit",
+                      }}>{icons.trash({ size: 13, color: CB.red })}</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+                <div style={{ flex: "1 1 140px" }}>
+                  <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>Service Code</label>
+                  <select style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} value={newAuth.service_code_id} onChange={e => setNewAuth(p => ({ ...p, service_code_id: e.target.value }))}>
+                    <option value="">Select...</option>
+                    {serviceCodes.map(sc => <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}</option>)}
+                  </select>
+                </div>
+                <div style={{ flex: "0 0 80px" }}>
+                  <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>Units</label>
+                  <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} type="number" value={newAuth.authorized_units} onChange={e => setNewAuth(p => ({ ...p, authorized_units: e.target.value }))} placeholder="0" />
+                </div>
+                <div style={{ flex: "0 0 130px" }}>
+                  <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>End Date</label>
+                  <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} type="date" value={newAuth.end_date} onChange={e => setNewAuth(p => ({ ...p, end_date: e.target.value }))} />
+                </div>
+                <button onClick={addAuth} style={{
+                  padding: "9px 14px", borderRadius: 10, border: "none",
+                  background: CB.teal, color: CB.white, fontSize: 13, fontWeight: 700,
+                  cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap", marginBottom: 16,
+                }}>{icons.plus({ size: 14 })} Add</button>
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 16 }}>
+            <SecondaryButton onClick={onClose}>Cancel</SecondaryButton>
+            <PrimaryButton onClick={handleSave} loading={saving}>{icons.save({ size: 16 })} {editing ? "Update" : "Add Client"}</PrimaryButton>
+          </div>
+        </Modal>
+      );
+    }
+
     function ClientsPage() {
       const [clients, setClients] = useState([]);
       const [loading, setLoading] = useState(true);
+      const [formOpen, setFormOpen] = useState(false);
+      const [editing, setEditing] = useState(null);
 
-      useEffect(() => {
-        loadClients();
-      }, []);
+      useEffect(() => { loadClients(); }, []);
 
       const loadClients = async () => {
         setLoading(true);
-        const { data, error } = await supabase
-          .from("persons")
-          .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, person_service_authorizations(id, service_code_id, authorized_units, used_units, service_code_definitions(code))")
+        const { data, error } = await supabase.from("persons")
+          .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, person_service_authorizations(id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code))")
           .order("last_name");
         if (!error) setClients(data || []);
         setLoading(false);
       };
 
+      const openEdit = (row) => { setEditing(row); setFormOpen(true); };
+      const openAdd = () => { setEditing(null); setFormOpen(true); };
+
       const columns = [
         { label: "Name", bold: true, render: (r) => `${r.first_name} ${r.last_name}` },
         { label: "Medicaid #", render: (r) => r.medicaid_number || "—" },
-        { label: "DOB", render: (r) => r.date_of_birth ? new Date(r.date_of_birth).toLocaleDateString() : "—" },
+        { label: "DOB", render: (r) => r.date_of_birth ? new Date(r.date_of_birth + "T00:00:00").toLocaleDateString() : "—" },
         { label: "Status", render: (r) => <Badge text={r.is_active ? "Active" : "Inactive"} color={r.is_active ? CB.green : CB.textLight} /> },
         { label: "Authorizations", render: (r) => {
-          const auths = r.person_service_authorizations || [];
-          return auths.length > 0 ? (
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              {auths.map((a, i) => <Badge key={i} text={a.service_code_definitions?.code || "?"} color={CB.blue} />)}
+          const a = r.person_service_authorizations || [];
+          return a.length > 0 ? (
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+              {a.map((x, i) => <Badge key={i} text={x.service_code_definitions?.code || "?"} color={CB.blue} />)}
             </div>
           ) : "—";
         }},
+        { label: "", render: (r) => (
+          <button onClick={(e) => { e.stopPropagation(); openEdit(r); }} style={{
+            display: "flex", alignItems: "center", gap: 6, padding: "6px 12px",
+            borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
+            color: CB.textMid, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+          }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = CB.teal; e.currentTarget.style.color = CB.teal; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = CB.border; e.currentTarget.style.color = CB.textMid; }}
+          >{icons.edit({ size: 13 })} Edit</button>
+        )},
       ];
 
       return (
         <div>
-          <PageHeader
-            title="Clients"
-            subtitle="Person management, authorizations, and service tracking"
-            action={
-              <button style={{
-                display: "flex", alignItems: "center", gap: 8, padding: "10px 20px",
-                borderRadius: 12, border: "none",
-                background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})`,
-                color: CB.white, fontSize: 14, fontWeight: 700, cursor: "pointer",
-                fontFamily: "inherit", boxShadow: "0 4px 16px rgba(0,137,123,0.25)",
-                transition: "all 0.2s",
-              }}
-                onMouseEnter={e => e.currentTarget.style.transform = "translateY(-1px)"}
-                onMouseLeave={e => e.currentTarget.style.transform = "translateY(0)"}
-              >
-                {icons.plus({ size: 16 })} Add Client
-              </button>
-            }
+          <PageHeader title="Clients" subtitle="Person management, authorizations, and service tracking"
+            action={<PrimaryButton onClick={openAdd}>{icons.plus({ size: 16 })} Add Client</PrimaryButton>}
           />
           <DataTable columns={columns} data={clients} loading={loading} emptyMessage="No clients found" />
+          <ClientForm open={formOpen} onClose={() => setFormOpen(false)} onSaved={loadClients} editing={editing} />
         </div>
       );
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // TRAINING PAGE
+    // MODULE 3: TRAINING TRACKER — per-staff completion logging
     // ═══════════════════════════════════════════════════════════════
-    function TrainingPage() {
-      const [trainings, setTrainings] = useState([]);
-      const [loading, setLoading] = useState(true);
+    function TrainingLogForm({ open, onClose, onSaved }) {
+      const { addToast } = useToast();
+      const [saving, setSaving] = useState(false);
+      const [staffList, setStaffList] = useState([]);
+      const [topics, setTopics] = useState([]);
+      const [form, setForm] = useState({ staff_id: "", training_topic_id: "", completed_date: "", certificate_number: "" });
 
       useEffect(() => {
-        loadTrainings();
-      }, []);
+        if (open) {
+          supabase.from("staff").select("id, first_name, last_name").eq("is_active", true).order("last_name").then(({ data }) => setStaffList(data || []));
+          supabase.from("training_topic_definitions").select("id, topic_name, renewal_months").order("topic_name").then(({ data }) => setTopics(data || []));
+          setForm({ staff_id: "", training_topic_id: "", completed_date: new Date().toISOString().split("T")[0], certificate_number: "" });
+        }
+      }, [open]);
 
-      const loadTrainings = async () => {
+      const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
+
+      const handleSave = async () => {
+        if (!form.staff_id || !form.training_topic_id || !form.completed_date) return addToast("Staff, topic, and date are required", "error");
+        setSaving(true);
+        const topic = topics.find(t => t.id === form.training_topic_id);
+        let expiration_date = null;
+        if (topic?.renewal_months) {
+          const d = new Date(form.completed_date);
+          d.setMonth(d.getMonth() + topic.renewal_months);
+          expiration_date = d.toISOString().split("T")[0];
+        }
+        const { error } = await supabase.from("staff_trainings").insert({
+          staff_id: form.staff_id,
+          training_topic_id: form.training_topic_id,
+          completed_date: form.completed_date,
+          expiration_date,
+          status: "completed",
+          certificate_number: form.certificate_number || null,
+        });
+        setSaving(false);
+        if (error) return addToast(error.message, "error");
+        addToast("Training logged successfully", "success");
+        onSaved();
+        onClose();
+      };
+
+      return (
+        <Modal open={open} onClose={onClose} title="Log Training Completion" subtitle="Record a staff member's completed training">
+          <FormField label="Staff Member" required>
+            <select style={fieldStyle} value={form.staff_id} onChange={e => set("staff_id", e.target.value)}>
+              <option value="">Select staff member...</option>
+              {staffList.map(s => <option key={s.id} value={s.id}>{s.first_name} {s.last_name}</option>)}
+            </select>
+          </FormField>
+          <FormField label="Training Topic" required>
+            <select style={fieldStyle} value={form.training_topic_id} onChange={e => set("training_topic_id", e.target.value)}>
+              <option value="">Select topic...</option>
+              {topics.map(t => <option key={t.id} value={t.id}>{t.topic_name}</option>)}
+            </select>
+          </FormField>
+          <FormRow>
+            <FormField label="Completion Date" required half>
+              <input style={fieldStyle} type="date" value={form.completed_date} onChange={e => set("completed_date", e.target.value)} />
+            </FormField>
+            <FormField label="Certificate #" half>
+              <input style={fieldStyle} value={form.certificate_number} onChange={e => set("certificate_number", e.target.value)} placeholder="Optional" />
+            </FormField>
+          </FormRow>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 8 }}>
+            <SecondaryButton onClick={onClose}>Cancel</SecondaryButton>
+            <PrimaryButton onClick={handleSave} loading={saving}>{icons.checkCircle({ size: 16 })} Log Training</PrimaryButton>
+          </div>
+        </Modal>
+      );
+    }
+
+    function TrainingPage() {
+      const [tab, setTab] = useState("completions");
+      const [completions, setCompletions] = useState([]);
+      const [topics, setTopics] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [formOpen, setFormOpen] = useState(false);
+
+      useEffect(() => { loadAll(); }, []);
+
+      const loadAll = async () => {
         setLoading(true);
-        const { data, error } = await supabase
-          .from("training_topic_definitions")
-          .select("id, topic_name, category, deadline_days, renewal_months, requires_certification")
-          .order("category, topic_name");
-        if (!error) setTrainings(data || []);
+        const [compRes, topicRes] = await Promise.all([
+          supabase.from("staff_trainings").select("id, completed_date, expiration_date, status, certificate_number, staff(first_name, last_name), training_topic_definitions(topic_name, category)").order("completed_date", { ascending: false }).limit(100),
+          supabase.from("training_topic_definitions").select("id, topic_name, category, deadline_days, renewal_months, requires_certification").order("category, topic_name"),
+        ]);
+        if (!compRes.error) setCompletions(compRes.data || []);
+        if (!topicRes.error) setTopics(topicRes.data || []);
         setLoading(false);
       };
 
-      const categoryColors = {
-        "30_day": CB.blue,
-        "90_day": CB.amber,
-        "180_day": CB.red,
-        "abi": CB.teal,
-        "annual": CB.navy,
-        "ongoing": CB.textMid,
-      };
+      const categoryColors = { "30_day": CB.blue, "90_day": CB.amber, "180_day": CB.red, "abi": CB.teal, "annual": CB.navy, "ongoing": CB.textMid };
 
-      const columns = [
+      const compColumns = [
+        { label: "Staff Member", bold: true, render: (r) => r.staff ? `${r.staff.first_name} ${r.staff.last_name}` : "—" },
+        { label: "Training", render: (r) => r.training_topic_definitions?.topic_name || "—" },
+        { label: "Category", render: (r) => <Badge text={r.training_topic_definitions?.category?.replace(/_/g, " ") || "—"} color={categoryColors[r.training_topic_definitions?.category] || CB.textLight} /> },
+        { label: "Completed", render: (r) => r.completed_date ? new Date(r.completed_date + "T00:00:00").toLocaleDateString() : "—" },
+        { label: "Expires", render: (r) => r.expiration_date ? new Date(r.expiration_date + "T00:00:00").toLocaleDateString() : "N/A" },
+        { label: "Status", render: (r) => {
+          const s = r.status || "completed";
+          const c = s === "overdue" ? CB.red : s === "expiring_soon" ? CB.amber : CB.green;
+          return <Badge text={s.replace(/_/g, " ")} color={c} />;
+        }},
+      ];
+
+      const topicColumns = [
         { label: "Training Topic", bold: true, render: (r) => r.topic_name },
         { label: "Category", render: (r) => <Badge text={r.category?.replace(/_/g, " ") || "—"} color={categoryColors[r.category] || CB.textLight} /> },
         { label: "Certification", render: (r) => r.requires_certification ? <Badge text="Cert Required" color={CB.red} /> : <Badge text="No Cert" color={CB.textLight} /> },
@@ -737,19 +1148,522 @@
         { label: "Renewal", render: (r) => r.renewal_months ? `Every ${r.renewal_months} mo` : "One-time" },
       ];
 
+      const TabButton = ({ value, label }) => (
+        <button onClick={() => setTab(value)} style={{
+          padding: "9px 18px", borderRadius: 8, border: "none", fontSize: 13, fontWeight: 700,
+          background: tab === value ? CB.navy : "transparent",
+          color: tab === value ? CB.white : CB.textMid,
+          cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s",
+        }}>{label}</button>
+      );
+
       return (
         <div>
-          <PageHeader
-            title="Training Tracker"
-            subtitle="27 SOW-required training topics with automated deadline tracking"
+          <PageHeader title="Training Tracker" subtitle="27 SOW-required training topics with automated deadline tracking"
+            action={<PrimaryButton onClick={() => setFormOpen(true)}>{icons.plus({ size: 16 })} Log Training</PrimaryButton>}
           />
-          <DataTable columns={columns} data={trainings} loading={loading} emptyMessage="No training topics found" />
+          <div style={{ display: "flex", gap: 4, marginBottom: 20, background: CB.cream, padding: 4, borderRadius: 10, width: "fit-content" }}>
+            <TabButton value="completions" label="Completions" />
+            <TabButton value="topics" label="Topic Definitions" />
+          </div>
+          {tab === "completions" ? (
+            <DataTable columns={compColumns} data={completions} loading={loading} emptyMessage="No training completions logged yet" />
+          ) : (
+            <DataTable columns={topicColumns} data={topics} loading={loading} emptyMessage="No training topics found" />
+          )}
+          <TrainingLogForm open={formOpen} onClose={() => setFormOpen(false)} onSaved={loadAll} />
         </div>
       );
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // COMING SOON STUB
+    // MODULE 4: SERVICE NOTE ENTRY — dynamic forms per service code
+    // ═══════════════════════════════════════════════════════════════
+    const SERVICE_NOTE_FIELDS = {
+      RHS: [
+        { key: "goals_addressed", label: "Goals Addressed", type: "textarea", placeholder: "Which ISP goals were worked on this shift?" },
+        { key: "daily_living_activities", label: "Daily Living Activities", type: "textarea", placeholder: "ADL assistance provided (hygiene, meals, medication, etc.)" },
+        { key: "behavioral_observations", label: "Behavioral Observations", type: "textarea", placeholder: "Noteworthy behaviors, triggers, or responses" },
+        { key: "community_access", label: "Community Access", type: "text", placeholder: "Outings or community activities" },
+      ],
+      DSI: [
+        { key: "activities", label: "Activities Completed", type: "textarea", placeholder: "Individual day support activities" },
+        { key: "skill_building", label: "Skill Building Goals", type: "textarea", placeholder: "Skills worked on and progress" },
+        { key: "community_integration", label: "Community Integration", type: "textarea", placeholder: "Community participation and social interactions" },
+      ],
+      DSG: [
+        { key: "group_activities", label: "Group Activities", type: "textarea", placeholder: "Group activities and programming" },
+        { key: "participation_level", label: "Participation Level", type: "select", options: ["Full", "Partial", "Minimal", "Refused"] },
+        { key: "goals_progress", label: "Goals Progress", type: "textarea", placeholder: "Progress on ISP goals during group" },
+      ],
+      MTP: [
+        { key: "monthly_summary", label: "Monthly Summary", type: "textarea", placeholder: "Comprehensive summary of the month's services" },
+        { key: "goal_progress", label: "Goal Progress", type: "textarea", placeholder: "Detailed progress on each ISP goal" },
+        { key: "recommendations", label: "Recommendations", type: "textarea", placeholder: "Recommendations for next month" },
+        { key: "medical_updates", label: "Medical Updates", type: "textarea", placeholder: "Any medical changes or appointments" },
+      ],
+      PBA: [
+        { key: "behavior_data", label: "Behavior Data", type: "textarea", placeholder: "Frequency, duration, intensity of target behaviors" },
+        { key: "intervention_notes", label: "Intervention Notes", type: "textarea", placeholder: "Interventions used and effectiveness" },
+        { key: "bcba_supervision", label: "BCBA Supervision Notes", type: "textarea", placeholder: "Supervision observations (if applicable)" },
+      ],
+      SLN: [
+        { key: "independent_living", label: "Independent Living Skills", type: "textarea", placeholder: "Skills practiced (cooking, cleaning, budgeting, etc.)" },
+        { key: "community_access", label: "Community Access", type: "textarea", placeholder: "Community activities and navigation" },
+        { key: "safety_skills", label: "Safety Skills", type: "textarea", placeholder: "Emergency and safety skill practice" },
+      ],
+    };
+
+    function ServiceNoteForm({ open, onClose, onSaved }) {
+      const { addToast } = useToast();
+      const [saving, setSaving] = useState(false);
+      const [staffList, setStaffList] = useState([]);
+      const [clients, setClients] = useState([]);
+      const [serviceCodes, setServiceCodes] = useState([]);
+      const [selectedCode, setSelectedCode] = useState(null);
+      const [form, setForm] = useState({
+        staff_id: "", person_id: "", service_code_id: "",
+        service_date: new Date().toISOString().split("T")[0],
+        start_time: "", end_time: "", note_text: "",
+      });
+      const [extraFields, setExtraFields] = useState({});
+
+      useEffect(() => {
+        if (open) {
+          Promise.all([
+            supabase.from("staff").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
+            supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
+            supabase.from("service_code_definitions").select("id, code, name").order("code"),
+          ]).then(([s, c, sc]) => {
+            setStaffList(s.data || []);
+            setClients(c.data || []);
+            setServiceCodes(sc.data || []);
+          });
+          setForm({ staff_id: "", person_id: "", service_code_id: "", service_date: new Date().toISOString().split("T")[0], start_time: "", end_time: "", note_text: "" });
+          setExtraFields({});
+          setSelectedCode(null);
+        }
+      }, [open]);
+
+      const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
+
+      const handleCodeChange = (scId) => {
+        set("service_code_id", scId);
+        const code = serviceCodes.find(s => s.id === scId);
+        setSelectedCode(code?.code || null);
+        setExtraFields({});
+      };
+
+      const dynamicFields = SERVICE_NOTE_FIELDS[selectedCode] || [];
+
+      const handleSave = async () => {
+        if (!form.staff_id || !form.person_id || !form.service_code_id || !form.service_date) {
+          return addToast("Staff, client, service code, and date are required", "error");
+        }
+        setSaving(true);
+        // Calculate duration
+        let duration_minutes = null;
+        if (form.start_time && form.end_time) {
+          const [sh, sm] = form.start_time.split(":").map(Number);
+          const [eh, em] = form.end_time.split(":").map(Number);
+          duration_minutes = (eh * 60 + em) - (sh * 60 + sm);
+          if (duration_minutes < 0) duration_minutes += 1440;
+        }
+        // Combine note_text with extra fields
+        let fullNote = form.note_text || "";
+        if (Object.keys(extraFields).length > 0) {
+          const sections = dynamicFields
+            .filter(f => extraFields[f.key])
+            .map(f => `[${f.label}]\n${extraFields[f.key]}`)
+            .join("\n\n");
+          fullNote = sections + (fullNote ? `\n\n[Additional Notes]\n${fullNote}` : "");
+        }
+
+        const { error } = await supabase.from("service_notes").insert({
+          staff_id: form.staff_id,
+          person_id: form.person_id,
+          service_code_id: form.service_code_id,
+          service_date: form.service_date,
+          start_time: form.start_time || null,
+          end_time: form.end_time || null,
+          duration_minutes,
+          note_text: fullNote,
+          status: "draft",
+        });
+        setSaving(false);
+        if (error) return addToast(error.message, "error");
+        addToast("Service note saved", "success");
+        onSaved();
+        onClose();
+      };
+
+      return (
+        <Modal open={open} onClose={onClose} title="New Service Note" subtitle={selectedCode ? `Dynamic fields for ${selectedCode}` : "Select a service code to load specific fields"} width={640}>
+          <FormRow>
+            <FormField label="Staff Member" required half>
+              <select style={fieldStyle} value={form.staff_id} onChange={e => set("staff_id", e.target.value)}>
+                <option value="">Select staff...</option>
+                {staffList.map(s => <option key={s.id} value={s.id}>{s.first_name} {s.last_name}</option>)}
+              </select>
+            </FormField>
+            <FormField label="Client" required half>
+              <select style={fieldStyle} value={form.person_id} onChange={e => set("person_id", e.target.value)}>
+                <option value="">Select client...</option>
+                {clients.map(c => <option key={c.id} value={c.id}>{c.first_name} {c.last_name}</option>)}
+              </select>
+            </FormField>
+          </FormRow>
+          <FormField label="Service Code" required>
+            <select style={fieldStyle} value={form.service_code_id} onChange={e => handleCodeChange(e.target.value)}>
+              <option value="">Select service code...</option>
+              {serviceCodes.map(sc => <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}</option>)}
+            </select>
+          </FormField>
+          <FormRow>
+            <FormField label="Service Date" required half>
+              <input style={fieldStyle} type="date" value={form.service_date} onChange={e => set("service_date", e.target.value)} />
+            </FormField>
+            <FormField label="Start Time" half>
+              <input style={fieldStyle} type="time" value={form.start_time} onChange={e => set("start_time", e.target.value)} />
+            </FormField>
+          </FormRow>
+          <FormRow>
+            <FormField label="End Time" half>
+              <input style={fieldStyle} type="time" value={form.end_time} onChange={e => set("end_time", e.target.value)} />
+            </FormField>
+            <FormField label="Duration" half>
+              <div style={{ ...fieldStyle, background: "#F1F5F9", color: CB.textMid, display: "flex", alignItems: "center" }}>
+                {form.start_time && form.end_time ? (() => {
+                  const [sh, sm] = form.start_time.split(":").map(Number);
+                  const [eh, em] = form.end_time.split(":").map(Number);
+                  let mins = (eh * 60 + em) - (sh * 60 + sm);
+                  if (mins < 0) mins += 1440;
+                  const h = Math.floor(mins / 60);
+                  return `${h}h ${mins % 60}m (${(mins / 15).toFixed(1)} units)`;
+                })() : "Auto-calculated"}
+              </div>
+            </FormField>
+          </FormRow>
+
+          {/* Dynamic fields per service code */}
+          {dynamicFields.length > 0 && (
+            <div style={{ marginTop: 8, padding: "16px 0 0", borderTop: `1px solid ${CB.border}` }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+                <Badge text={selectedCode} color={CB.blue} />
+                <span style={{ fontSize: 13, fontWeight: 700, color: CB.navy }}>Required Documentation</span>
+              </div>
+              {dynamicFields.map(field => (
+                <FormField key={field.key} label={field.label}>
+                  {field.type === "textarea" ? (
+                    <textarea style={{ ...fieldStyle, minHeight: 72, resize: "vertical" }} value={extraFields[field.key] || ""} onChange={e => setExtraFields(p => ({ ...p, [field.key]: e.target.value }))} placeholder={field.placeholder} />
+                  ) : field.type === "select" ? (
+                    <select style={fieldStyle} value={extraFields[field.key] || ""} onChange={e => setExtraFields(p => ({ ...p, [field.key]: e.target.value }))}>
+                      <option value="">Select...</option>
+                      {field.options.map(o => <option key={o} value={o}>{o}</option>)}
+                    </select>
+                  ) : (
+                    <input style={fieldStyle} value={extraFields[field.key] || ""} onChange={e => setExtraFields(p => ({ ...p, [field.key]: e.target.value }))} placeholder={field.placeholder} />
+                  )}
+                </FormField>
+              ))}
+            </div>
+          )}
+
+          <FormField label="Additional Notes">
+            <textarea style={{ ...fieldStyle, minHeight: 64, resize: "vertical" }} value={form.note_text} onChange={e => set("note_text", e.target.value)} placeholder="Any additional observations or notes..." />
+          </FormField>
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 8 }}>
+            <SecondaryButton onClick={onClose}>Cancel</SecondaryButton>
+            <PrimaryButton onClick={handleSave} loading={saving}>{icons.save({ size: 16 })} Save Note</PrimaryButton>
+          </div>
+        </Modal>
+      );
+    }
+
+    function ServiceNotesPage() {
+      const [notes, setNotes] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [formOpen, setFormOpen] = useState(false);
+
+      useEffect(() => { loadNotes(); }, []);
+
+      const loadNotes = async () => {
+        setLoading(true);
+        const { data, error } = await supabase.from("service_notes")
+          .select("id, service_date, start_time, end_time, duration_minutes, status, note_text, staff(first_name, last_name), persons(first_name, last_name), service_code_definitions(code, name)")
+          .order("service_date", { ascending: false })
+          .limit(100);
+        if (!error) setNotes(data || []);
+        setLoading(false);
+      };
+
+      const statusColors = { draft: CB.amber, submitted: CB.blue, approved: CB.green, rejected: CB.red };
+
+      const columns = [
+        { label: "Date", bold: true, render: (r) => r.service_date ? new Date(r.service_date + "T00:00:00").toLocaleDateString() : "—" },
+        { label: "Staff", render: (r) => r.staff ? `${r.staff.first_name} ${r.staff.last_name}` : "—" },
+        { label: "Client", render: (r) => r.persons ? `${r.persons.first_name} ${r.persons.last_name}` : "—" },
+        { label: "Code", render: (r) => <Badge text={r.service_code_definitions?.code || "?"} color={CB.blue} /> },
+        { label: "Time", render: (r) => r.start_time && r.end_time ? `${r.start_time.slice(0,5)} – ${r.end_time.slice(0,5)}` : "—" },
+        { label: "Units", render: (r) => r.duration_minutes ? (r.duration_minutes / 15).toFixed(1) : "—" },
+        { label: "Status", render: (r) => <Badge text={r.status || "draft"} color={statusColors[r.status] || CB.textLight} /> },
+      ];
+
+      return (
+        <div>
+          <PageHeader title="Service Notes" subtitle="Dynamic documentation forms per service code — RHS, DSI, MTP auto-load different fields"
+            action={<PrimaryButton onClick={() => setFormOpen(true)}>{icons.plus({ size: 16 })} New Service Note</PrimaryButton>}
+          />
+          <DataTable columns={columns} data={notes} loading={loading} emptyMessage="No service notes yet — create your first one" />
+          <ServiceNoteForm open={formOpen} onClose={() => setFormOpen(false)} onSaved={loadNotes} />
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // MODULE 5: EVV CLOCK IN / OUT — GPS-based with geofence
+    // ═══════════════════════════════════════════════════════════════
+    function EVVPage() {
+      const { addToast } = useToast();
+      const [sessions, setSessions] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [staffList, setStaffList] = useState([]);
+      const [clients, setClients] = useState([]);
+      const [serviceCodes, setServiceCodes] = useState([]);
+      const [sites, setSites] = useState([]);
+      const [clockingIn, setClockingIn] = useState(false);
+      const [clockingOut, setClockingOut] = useState(null);
+      const [gpsStatus, setGpsStatus] = useState(null);
+      const [showClockIn, setShowClockIn] = useState(false);
+      const [clockForm, setClockForm] = useState({ staff_id: "", person_id: "", service_code_id: "", site_id: "" });
+
+      useEffect(() => { loadAll(); }, []);
+
+      const loadAll = async () => {
+        setLoading(true);
+        const [sessRes, staffRes, clientRes, scRes, siteRes] = await Promise.all([
+          supabase.from("evv_sessions").select("id, clock_in_time, clock_out_time, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, status, staff(first_name, last_name), persons(first_name, last_name), service_code_definitions(code), sites(name)").order("clock_in_time", { ascending: false }).limit(50),
+          supabase.from("staff").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
+          supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
+          supabase.from("service_code_definitions").select("id, code, name, requires_evv").order("code"),
+          supabase.from("sites").select("id, name, latitude, longitude, geofence_radius_meters"),
+        ]);
+        if (!sessRes.error) setSessions(sessRes.data || []);
+        setStaffList(staffRes.data || []);
+        setClients(clientRes.data || []);
+        setServiceCodes((scRes.data || []).filter(sc => sc.requires_evv));
+        setSites(siteRes.data || []);
+        setLoading(false);
+      };
+
+      const getGPS = () => new Promise((resolve, reject) => {
+        if (!navigator.geolocation) return reject(new Error("Geolocation not supported"));
+        setGpsStatus("locating");
+        navigator.geolocation.getCurrentPosition(
+          pos => { setGpsStatus("found"); resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }); },
+          err => { setGpsStatus("error"); reject(err); },
+          { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+        );
+      });
+
+      const checkGeofence = (lat, lng, site) => {
+        if (!site?.latitude || !site?.longitude) return { inRange: true, distance: 0 };
+        const R = 6371000;
+        const dLat = (site.latitude - lat) * Math.PI / 180;
+        const dLng = (site.longitude - lng) * Math.PI / 180;
+        const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat * Math.PI / 180) * Math.cos(site.latitude * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+        const distance = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        const radius = site.geofence_radius_meters || 150;
+        return { inRange: distance <= radius, distance: Math.round(distance) };
+      };
+
+      const handleClockIn = async () => {
+        if (!clockForm.staff_id || !clockForm.person_id || !clockForm.service_code_id) {
+          return addToast("Select staff, client, and service code", "error");
+        }
+        setClockingIn(true);
+        try {
+          const gps = await getGPS();
+          // Check geofence if site selected
+          if (clockForm.site_id) {
+            const site = sites.find(s => s.id === clockForm.site_id);
+            const { inRange, distance } = checkGeofence(gps.lat, gps.lng, site);
+            if (!inRange) {
+              addToast(`Outside geofence: ${distance}m from ${site.name}`, "warning");
+            }
+          }
+          const { error } = await supabase.from("evv_sessions").insert({
+            staff_id: clockForm.staff_id,
+            person_id: clockForm.person_id,
+            service_code_id: clockForm.service_code_id,
+            site_id: clockForm.site_id || null,
+            clock_in_time: new Date().toISOString(),
+            clock_in_lat: gps.lat,
+            clock_in_lng: gps.lng,
+            status: "active",
+          });
+          if (error) throw error;
+          addToast("Clocked in successfully", "success");
+          setShowClockIn(false);
+          loadAll();
+        } catch (e) {
+          addToast(e.message || "Clock-in failed", "error");
+        }
+        setClockingIn(false);
+        setGpsStatus(null);
+      };
+
+      const handleClockOut = async (sessionId) => {
+        setClockingOut(sessionId);
+        try {
+          const gps = await getGPS();
+          const { error } = await supabase.from("evv_sessions").update({
+            clock_out_time: new Date().toISOString(),
+            clock_out_lat: gps.lat,
+            clock_out_lng: gps.lng,
+            status: "completed",
+          }).eq("id", sessionId);
+          if (error) throw error;
+          addToast("Clocked out successfully", "success");
+          loadAll();
+        } catch (e) {
+          addToast(e.message || "Clock-out failed", "error");
+        }
+        setClockingOut(null);
+        setGpsStatus(null);
+      };
+
+      const activeSessions = sessions.filter(s => s.status === "active");
+      const completedSessions = sessions.filter(s => s.status !== "active");
+
+      const formatTime = (iso) => {
+        if (!iso) return "—";
+        const d = new Date(iso);
+        return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      };
+
+      const formatDate = (iso) => {
+        if (!iso) return "—";
+        return new Date(iso).toLocaleDateString();
+      };
+
+      const columns = [
+        { label: "Date", bold: true, render: (r) => formatDate(r.clock_in_time) },
+        { label: "Staff", render: (r) => r.staff ? `${r.staff.first_name} ${r.staff.last_name}` : "—" },
+        { label: "Client", render: (r) => r.persons ? `${r.persons.first_name} ${r.persons.last_name}` : "—" },
+        { label: "Code", render: (r) => <Badge text={r.service_code_definitions?.code || "?"} color={CB.blue} /> },
+        { label: "In", render: (r) => formatTime(r.clock_in_time) },
+        { label: "Out", render: (r) => formatTime(r.clock_out_time) },
+        { label: "Site", render: (r) => r.sites?.name || "—" },
+        { label: "Status", render: (r) => {
+          if (r.status === "active") return (
+            <button onClick={() => handleClockOut(r.id)} disabled={clockingOut === r.id} style={{
+              display: "flex", alignItems: "center", gap: 6, padding: "6px 12px",
+              borderRadius: 8, border: "none", background: CB.red, color: CB.white,
+              fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+            }}>
+              {clockingOut === r.id ? <Spinner size={12} color={CB.white} /> : icons.stop({ size: 13, color: CB.white })} Clock Out
+            </button>
+          );
+          return <Badge text="Completed" color={CB.green} />;
+        }},
+      ];
+
+      return (
+        <div>
+          <PageHeader title="EVV" subtitle="GPS clock in/out for all 9 EVV-required codes with geofence validation"
+            action={<PrimaryButton onClick={() => setShowClockIn(true)} color={CB.blue}>{icons.play({ size: 16 })} Clock In</PrimaryButton>}
+          />
+
+          {/* Active sessions banner */}
+          {activeSessions.length > 0 && (
+            <div style={{
+              background: `linear-gradient(135deg, ${CB.blue}08, ${CB.teal}08)`,
+              border: `1px solid ${CB.blue}20`, borderRadius: 14, padding: "16px 20px",
+              marginBottom: 20, animation: "fadeIn 0.3s ease",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                <div style={{ width: 8, height: 8, borderRadius: "50%", background: CB.green, animation: "pulse 2s infinite" }} />
+                <span style={{ fontSize: 14, fontWeight: 700, color: CB.navy }}>{activeSessions.length} Active Session{activeSessions.length > 1 ? "s" : ""}</span>
+              </div>
+              {activeSessions.map(s => (
+                <div key={s.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 0" }}>
+                  <span style={{ fontSize: 13, color: CB.text }}>
+                    {s.staff?.first_name} {s.staff?.last_name} → {s.persons?.first_name} {s.persons?.last_name} ({s.service_code_definitions?.code}) — clocked in {formatTime(s.clock_in_time)}
+                  </span>
+                  <button onClick={() => handleClockOut(s.id)} disabled={clockingOut === s.id} style={{
+                    display: "flex", alignItems: "center", gap: 6, padding: "7px 14px",
+                    borderRadius: 8, border: "none", background: CB.red, color: CB.white,
+                    fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                  }}>
+                    {clockingOut === s.id ? <Spinner size={12} color={CB.white} /> : icons.stop({ size: 14, color: CB.white })} Clock Out
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <DataTable columns={columns} data={sessions} loading={loading} emptyMessage="No EVV sessions recorded" />
+
+          {/* Clock-in Modal */}
+          <Modal open={showClockIn} onClose={() => setShowClockIn(false)} title="Clock In" subtitle="GPS coordinates will be captured automatically">
+            <FormField label="Staff Member" required>
+              <select style={fieldStyle} value={clockForm.staff_id} onChange={e => setClockForm(p => ({ ...p, staff_id: e.target.value }))}>
+                <option value="">Select staff...</option>
+                {staffList.map(s => <option key={s.id} value={s.id}>{s.first_name} {s.last_name}</option>)}
+              </select>
+            </FormField>
+            <FormField label="Client" required>
+              <select style={fieldStyle} value={clockForm.person_id} onChange={e => setClockForm(p => ({ ...p, person_id: e.target.value }))}>
+                <option value="">Select client...</option>
+                {clients.map(c => <option key={c.id} value={c.id}>{c.first_name} {c.last_name}</option>)}
+              </select>
+            </FormField>
+            <FormRow>
+              <FormField label="Service Code (EVV)" required half>
+                <select style={fieldStyle} value={clockForm.service_code_id} onChange={e => setClockForm(p => ({ ...p, service_code_id: e.target.value }))}>
+                  <option value="">Select code...</option>
+                  {serviceCodes.map(sc => <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}</option>)}
+                </select>
+              </FormField>
+              <FormField label="Service Site" half>
+                <select style={fieldStyle} value={clockForm.site_id} onChange={e => setClockForm(p => ({ ...p, site_id: e.target.value }))}>
+                  <option value="">Select site...</option>
+                  {sites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </FormField>
+            </FormRow>
+
+            {gpsStatus && (
+              <div style={{
+                display: "flex", alignItems: "center", gap: 10, padding: "12px 16px",
+                borderRadius: 10, marginBottom: 16,
+                background: gpsStatus === "found" ? "rgba(46,125,50,0.06)" : gpsStatus === "error" ? "rgba(229,57,53,0.06)" : "rgba(26,115,232,0.06)",
+                border: `1px solid ${gpsStatus === "found" ? CB.green : gpsStatus === "error" ? CB.red : CB.blue}20`,
+              }}>
+                {gpsStatus === "locating" && <Spinner size={14} color={CB.blue} />}
+                {gpsStatus === "found" && icons.checkCircle({ size: 16, color: CB.green })}
+                {gpsStatus === "error" && icons.alertTriangle({ size: 16, color: CB.red })}
+                <span style={{ fontSize: 13, fontWeight: 600, color: gpsStatus === "found" ? CB.green : gpsStatus === "error" ? CB.red : CB.blue }}>
+                  {gpsStatus === "locating" ? "Acquiring GPS..." : gpsStatus === "found" ? "GPS location captured" : "GPS error — check permissions"}
+                </span>
+              </div>
+            )}
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 8 }}>
+              <SecondaryButton onClick={() => setShowClockIn(false)}>Cancel</SecondaryButton>
+              <PrimaryButton onClick={handleClockIn} loading={clockingIn} color={CB.blue}>
+                {icons.crosshair({ size: 16 })} Clock In with GPS
+              </PrimaryButton>
+            </div>
+          </Modal>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // COMING SOON STUB (for remaining modules)
     // ═══════════════════════════════════════════════════════════════
     function ComingSoon({ title, subtitle, icon }) {
       return (
@@ -757,14 +1671,12 @@
           <PageHeader title={title} subtitle={subtitle} />
           <div style={{
             background: CB.white, borderRadius: 20, padding: "80px 40px", textAlign: "center",
-            border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
-            animation: "fadeIn 0.5s ease",
+            border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, animation: "fadeIn 0.5s ease",
           }}>
             <div style={{
               width: 64, height: 64, borderRadius: 16,
               background: `linear-gradient(135deg, ${CB.teal}12, ${CB.tealLight}12)`,
-              display: "inline-flex", alignItems: "center", justifyContent: "center",
-              marginBottom: 20,
+              display: "inline-flex", alignItems: "center", justifyContent: "center", marginBottom: 20,
             }}>
               {icon ? icon({ size: 28, color: CB.teal }) : icons.zap({ size: 28, color: CB.teal })}
             </div>
@@ -789,8 +1701,8 @@
           case "staff": return <StaffPage />;
           case "clients": return <ClientsPage />;
           case "training": return <TrainingPage />;
-          case "notes": return <ComingSoon title="Service Notes" subtitle="Dynamic forms per service code — auto-loads RHS, DSI, MTP fields" icon={icons.fileText} />;
-          case "evv": return <ComingSoon title="EVV" subtitle="GPS clock in/out for all 9 EVV-required codes with geofence validation" icon={icons.mapPin} />;
+          case "notes": return <ServiceNotesPage />;
+          case "evv": return <EVVPage />;
           case "compliance": return <ComingSoon title="Compliance Dashboard" subtitle="Real-time audit readiness score with 38 SOW deadline tracking" icon={icons.shield} />;
           case "billing": return <ComingSoon title="Billing & Claims" subtitle="Auto-calculated units from service notes with Article 2 billing rules" icon={icons.barChart} />;
           default: return <DashboardPage />;
@@ -800,10 +1712,7 @@
       return (
         <div style={{ display: "flex", minHeight: "100vh", background: CB.cream }}>
           <Sidebar active={page} onNavigate={setPage} />
-          <main style={{
-            marginLeft: CB.sidebarW, flex: 1, padding: "32px 36px",
-            maxWidth: `calc(100vw - ${CB.sidebarW}px)`,
-          }}>
+          <main style={{ marginLeft: CB.sidebarW, flex: 1, padding: "32px 36px", maxWidth: `calc(100vw - ${CB.sidebarW}px)` }}>
             {renderPage()}
           </main>
         </div>
@@ -815,25 +1724,16 @@
     // ═══════════════════════════════════════════════════════════════
     function App() {
       const { user, loading } = useAuth();
-
       if (loading) {
         return (
-          <div style={{
-            minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center",
-            background: CB.cream, flexDirection: "column", gap: 16,
-          }}>
-            <div style={{
-              width: 48, height: 48, borderRadius: 14,
-              background: `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})`,
-              display: "flex", alignItems: "center", justifyContent: "center",
-            }}>
+          <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: CB.cream, flexDirection: "column", gap: 16 }}>
+            <div style={{ width: 48, height: 48, borderRadius: 14, background: `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
               {icons.shield({ size: 24, color: CB.white })}
             </div>
             <Spinner size={22} />
           </div>
         );
       }
-
       return user ? <AppShell /> : <LoginPage />;
     }
 
@@ -841,7 +1741,7 @@
     // RENDER
     // ═══════════════════════════════════════════════════════════════
     ReactDOM.render(
-      <AuthProvider><App /></AuthProvider>,
+      <AuthProvider><ToastProvider><App /></ToastProvider></AuthProvider>,
       document.getElementById("root")
     );
   </script>
