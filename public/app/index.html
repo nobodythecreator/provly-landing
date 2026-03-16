@@ -566,7 +566,7 @@
           const [staffRes, clientRes, trainingRes, authRes] = await Promise.all([
             supabase.from("staff").select("id", { count: "exact", head: true }).eq("is_active", true),
             supabase.from("persons").select("id", { count: "exact", head: true }).eq("is_active", true),
-            supabase.from("staff_trainings").select("id, status").eq("status", "overdue"),
+            supabase.from("staff_trainings").select("id, expires_at").lt("expires_at", new Date().toISOString()),
             supabase.from("person_service_authorizations").select("id", { count: "exact", head: true }),
           ]);
           setStats({
@@ -1086,10 +1086,9 @@
           org_id: orgId,
           staff_id: form.staff_id,
           training_topic_id: form.training_topic_id,
-          completed_date: form.completed_date,
-          expiration_date,
-          status: "completed",
-          certificate_number: form.certificate_number || null,
+          completed_at: form.completed_date,
+          expires_at: expiration_date,
+          certificate_url: form.certificate_number || null,
         });
         setSaving(false);
         if (error) return addToast(error.message, "error");
@@ -1140,7 +1139,7 @@
       const loadAll = async () => {
         setLoading(true);
         const [compRes, topicRes] = await Promise.all([
-          supabase.from("staff_trainings").select("id, completed_date, expiration_date, status, certificate_number, staff(first_name, last_name), training_topic_definitions(topic_name, category)").order("completed_date", { ascending: false }).limit(100),
+          supabase.from("staff_trainings").select("id, completed_at, expires_at, certificate_url, staff(first_name, last_name), training_topic_definitions(topic_name, category)").order("completed_at", { ascending: false }).limit(100),
           supabase.from("training_topic_definitions").select("id, topic_name, category, deadline_days, renewal_months, requires_certification").order("category, topic_name"),
         ]);
         if (!compRes.error) setCompletions(compRes.data || []);
@@ -1154,12 +1153,16 @@
         { label: "Staff Member", bold: true, render: (r) => r.staff ? `${r.staff.first_name} ${r.staff.last_name}` : "—" },
         { label: "Training", render: (r) => r.training_topic_definitions?.topic_name || "—" },
         { label: "Category", render: (r) => <Badge text={r.training_topic_definitions?.category?.replace(/_/g, " ") || "—"} color={categoryColors[r.training_topic_definitions?.category] || CB.textLight} /> },
-        { label: "Completed", render: (r) => r.completed_date ? new Date(r.completed_date + "T00:00:00").toLocaleDateString() : "—" },
-        { label: "Expires", render: (r) => r.expiration_date ? new Date(r.expiration_date + "T00:00:00").toLocaleDateString() : "N/A" },
+        { label: "Completed", render: (r) => r.completed_at ? new Date(r.completed_at).toLocaleDateString() : "—" },
+        { label: "Expires", render: (r) => r.expires_at ? new Date(r.expires_at).toLocaleDateString() : "N/A" },
         { label: "Status", render: (r) => {
-          const s = r.status || "completed";
-          const c = s === "overdue" ? CB.red : s === "expiring_soon" ? CB.amber : CB.green;
-          return <Badge text={s.replace(/_/g, " ")} color={c} />;
+          if (!r.expires_at) return <Badge text="No Expiry" color={CB.textLight} />;
+          const exp = new Date(r.expires_at);
+          const now = new Date();
+          const daysLeft = Math.ceil((exp - now) / (1000 * 60 * 60 * 24));
+          if (daysLeft < 0) return <Badge text="Expired" color={CB.red} />;
+          if (daysLeft < 30) return <Badge text="Expiring Soon" color={CB.amber} />;
+          return <Badge text="Current" color={CB.green} />;
         }},
       ];
 
