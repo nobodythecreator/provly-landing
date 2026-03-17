@@ -827,7 +827,7 @@
         first_name: "", last_name: "", date_of_birth: "", medicaid_number: "", is_active: true,
       });
       const [auths, setAuths] = useState([]);
-      const [newAuth, setNewAuth] = useState({ service_code_id: "", authorized_units: "", start_date: "", end_date: "" });
+      const [newAuth, setNewAuth] = useState({ service_code_id: "", authorized_units: "", start_date: "", end_date: "", rate_per_unit: "" });
 
       useEffect(() => {
         supabase.from("service_code_definitions").select("id, code, name").order("code").then(({ data }) => setServiceCodes(data || []));
@@ -845,15 +845,20 @@
           setForm({ first_name: "", last_name: "", date_of_birth: "", medicaid_number: "", is_active: true });
           setAuths([]);
         }
-        setNewAuth({ service_code_id: "", authorized_units: "", start_date: "", end_date: "" });
+        setNewAuth({ service_code_id: "", authorized_units: "", start_date: "", end_date: "", rate_per_unit: "" });
       }, [editing, open]);
 
       const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
 
+      // Get the code string for the selected new auth
+      const newAuthCode = serviceCodes.find(sc => sc.id === newAuth.service_code_id)?.code;
+      const newAuthRule = BILLING_RULES[newAuthCode];
+      const isWorksheet = newAuthRule?.worksheet;
+
       const addAuth = async () => {
         if (!newAuth.service_code_id || !newAuth.authorized_units) return addToast("Select a service code and enter units", "error");
         if (!editing) return addToast("Save the client first, then add authorizations", "warning");
-        const { error } = await supabase.from("person_service_authorizations").insert({
+        const payload = {
           org_id: orgId,
           person_id: editing.id,
           service_code_id: newAuth.service_code_id,
@@ -861,13 +866,28 @@
           used_units: 0,
           start_date: newAuth.start_date || null,
           end_date: newAuth.end_date || null,
-        });
-        if (error) return addToast(error.message, "error");
-        addToast("Authorization added", "success");
+        };
+        // Try to include rate_per_unit (requires DB column)
+        if (newAuth.rate_per_unit) payload.rate_per_unit = parseFloat(newAuth.rate_per_unit);
+        const { error } = await supabase.from("person_service_authorizations").insert(payload);
+        if (error) {
+          // If rate_per_unit column doesn't exist, retry without it
+          if (error.message?.includes("rate_per_unit")) {
+            delete payload.rate_per_unit;
+            const retry = await supabase.from("person_service_authorizations").insert(payload);
+            if (retry.error) return addToast(retry.error.message, "error");
+            addToast("Authorization added (rate column needs DB setup — see console)", "warning");
+            console.warn("Add rate_per_unit column: ALTER TABLE person_service_authorizations ADD COLUMN rate_per_unit NUMERIC(10,2);");
+          } else {
+            return addToast(error.message, "error");
+          }
+        } else {
+          addToast("Authorization added", "success");
+        }
         // Reload auths
-        const { data } = await supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code)").eq("person_id", editing.id);
+        const { data } = await supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code)").eq("person_id", editing.id);
         setAuths(data || []);
-        setNewAuth({ service_code_id: "", authorized_units: "", start_date: "", end_date: "" });
+        setNewAuth({ service_code_id: "", authorized_units: "", start_date: "", end_date: "", rate_per_unit: "" });
       };
 
       const removeAuth = async (authId) => {
@@ -943,15 +963,21 @@
               <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 12 }}>Service Authorizations</h3>
               {auths.length > 0 && (
                 <div style={{ marginBottom: 16 }}>
-                  {auths.map(a => (
+                  {auths.map(a => {
+                    const aCode = a.service_code_definitions?.code || serviceCodes.find(sc => sc.id === a.service_code_id)?.code || "?";
+                    const aRule = BILLING_RULES[aCode];
+                    return (
                     <div key={a.id} style={{
                       display: "flex", alignItems: "center", justifyContent: "space-between",
                       padding: "10px 14px", borderRadius: 10, background: CB.cream, marginBottom: 6,
                       border: `1px solid ${CB.border}`,
                     }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                        <Badge text={a.service_code_definitions?.code || serviceCodes.find(sc => sc.id === a.service_code_id)?.code || "?"} color={CB.blue} />
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                        <Badge text={aCode} color={CB.blue} />
+                        {aRule && <span style={{ fontSize: 11, color: CB.textLight, fontWeight: 600 }}>{aRule.label}</span>}
+                        {aRule?.worksheet && <span style={{ fontSize: 10, color: CB.amber, fontWeight: 700, background: `${CB.amber}12`, padding: "1px 6px", borderRadius: 4 }}>WORKSHEET</span>}
                         <span style={{ fontSize: 13, color: CB.text, fontWeight: 600 }}>{a.used_units || 0} / {a.authorized_units} units</span>
+                        {a.rate_per_unit && <span style={{ fontSize: 12, color: CB.teal, fontWeight: 700 }}>@ ${Number(a.rate_per_unit).toFixed(2)}</span>}
                         {a.end_date && <span style={{ fontSize: 12, color: CB.textLight }}>exp {new Date(a.end_date + "T00:00:00").toLocaleDateString()}</span>}
                       </div>
                       <button onClick={() => removeAuth(a.id)} style={{
@@ -959,7 +985,8 @@
                         color: CB.red, cursor: "pointer", fontSize: 12, fontWeight: 600, fontFamily: "inherit",
                       }}>{icons.trash({ size: 13, color: CB.red })}</button>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
               <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
@@ -974,6 +1001,15 @@
                   <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>Units</label>
                   <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} type="number" value={newAuth.authorized_units} onChange={e => setNewAuth(p => ({ ...p, authorized_units: e.target.value }))} placeholder="0" />
                 </div>
+                <div style={{ flex: "0 0 100px" }}>
+                  <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: isWorksheet ? CB.amber : CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>
+                    {isWorksheet ? "Rate *" : "Rate"}
+                  </label>
+                  <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13, borderColor: isWorksheet ? `${CB.amber}40` : CB.border }}
+                    type="number" step="0.01" value={newAuth.rate_per_unit}
+                    onChange={e => setNewAuth(p => ({ ...p, rate_per_unit: e.target.value }))}
+                    placeholder={newAuthRule ? (isWorksheet ? `≤${newAuthRule.max_rate || "?"}` : `$${newAuthRule.rate || "?"}`) : "$0.00"} />
+                </div>
                 <div style={{ flex: "0 0 130px" }}>
                   <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>End Date</label>
                   <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} type="date" value={newAuth.end_date} onChange={e => setNewAuth(p => ({ ...p, end_date: e.target.value }))} />
@@ -984,6 +1020,17 @@
                   cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap", marginBottom: 16,
                 }}>{icons.plus({ size: 14 })} Add</button>
               </div>
+              {isWorksheet && (
+                <div style={{ fontSize: 12, color: CB.amber, fontWeight: 500, marginTop: -8, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
+                  {icons.alertTriangle({ size: 13, color: CB.amber })}
+                  Worksheet service — rate is person-specific (max ${newAuthRule?.max_rate?.toFixed(2) || "N/A"}/unit). Enter the rate from the support coordinator's worksheet.
+                </div>
+              )}
+              {newAuthRule && !isWorksheet && newAuthRule.rate && (
+                <div style={{ fontSize: 12, color: CB.textLight, marginTop: -8, marginBottom: 8 }}>
+                  Fixed rate: ${newAuthRule.rate.toFixed(2)} / {newAuthRule.label?.toLowerCase()}
+                </div>
+              )}
             </div>
           )}
 
@@ -1008,7 +1055,7 @@
         setLoading(true);
         const [clientRes, scRes] = await Promise.all([
           supabase.from("persons")
-            .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, person_service_authorizations(id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code))")
+            .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, person_service_authorizations(id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code))")
             .order("last_name"),
           supabase.from("service_code_definitions").select("id, code").order("code"),
         ]);
@@ -1239,46 +1286,107 @@
     // MODULE 4: SERVICE NOTE ENTRY — dynamic forms per service code
     // ═══════════════════════════════════════════════════════════════
     // ═══════════════════════════════════════════════════════════════
-    // DHHS91172 BILLING RULES — rate table per service code
-    // unit_type: "quarter_hour" (15min=1u), "daily" (1 day=1u), "monthly" (1 month=1u), "per_session"
+    // DHHS91172 BILLING RULES — unit types from SOW Rate Table
+    // worksheet: true = rate varies per person (negotiated by support coordinator)
+    // max_rate = SOW ceiling; actual rate stored on person_service_authorizations
     // ═══════════════════════════════════════════════════════════════
     const BILLING_RULES = {
-      RHS:  { unit_type: "quarter_hour", mins_per_unit: 15, label: "Quarter-Hour", rate: 4.54 },
-      SLN:  { unit_type: "quarter_hour", mins_per_unit: 15, label: "Quarter-Hour", rate: 4.54 },
-      DSI:  { unit_type: "quarter_hour", mins_per_unit: 15, label: "Quarter-Hour", rate: 5.72 },
-      DSG:  { unit_type: "quarter_hour", mins_per_unit: 15, label: "Quarter-Hour", rate: 3.62 },
-      PBA:  { unit_type: "quarter_hour", mins_per_unit: 15, label: "Quarter-Hour (Tiered)", rate: null },
-      BC1:  { unit_type: "quarter_hour", mins_per_unit: 15, label: "Quarter-Hour", rate: 25.00 },
-      BC2:  { unit_type: "quarter_hour", mins_per_unit: 15, label: "Quarter-Hour", rate: 18.75 },
-      BC3:  { unit_type: "quarter_hour", mins_per_unit: 15, label: "Quarter-Hour", rate: 12.50 },
-      PN1:  { unit_type: "quarter_hour", mins_per_unit: 15, label: "Quarter-Hour (RN)", rate: 18.75 },
-      PN2:  { unit_type: "quarter_hour", mins_per_unit: 15, label: "Quarter-Hour (LPN)", rate: 14.06 },
-      HH1:  { unit_type: "daily", mins_per_unit: null, label: "Daily", rate: 88.61 },
-      HH2:  { unit_type: "daily", mins_per_unit: null, label: "Daily", rate: 143.47 },
-      HH3:  { unit_type: "daily", mins_per_unit: null, label: "Daily", rate: 202.25 },
-      MTP:  { unit_type: "monthly", mins_per_unit: null, label: "Monthly", rate: null },
-      PE:   { unit_type: "per_session", mins_per_unit: null, label: "Per Session", rate: null },
-      RS:   { unit_type: "per_session", mins_per_unit: null, label: "Per Session", rate: null },
+      // Behavior Consultation — quarter hour, fixed
+      BC1:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 8.67 },
+      BC2:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 14.83 },
+      BC3:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 22.68 },
+      // Homemaker — quarter hour, fixed
+      HSQ:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 6.65 },
+      // Companion — quarter hour, fixed (also has daily $151.04)
+      COM:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 6.30, alt_daily: 151.04 },
+      // Day Supports Group — DAILY, *worksheet*
+      DSG:  { unit_type: "daily", label: "Daily", worksheet: true, max_rate: 242.70 },
+      // Day Supports Group (quarter hour variant — DSP code), *worksheet*
+      DSP:  { unit_type: "quarter_hour", label: "Quarter-Hour", worksheet: true, max_rate: 10.09, alt_daily: 397.00 },
+      // Day Supports Individual — TIERED DAILY, *worksheet* (rate varies by hours AND person)
+      DSI:  { unit_type: "tiered_daily", label: "Daily (Tiered)", worksheet: true,
+              tiers: [ { maxHours: 1, max_rate: 54.18 }, { maxHours: 2, max_rate: 77.68 }, { maxHours: 3, max_rate: 101.14 },
+                        { maxHours: 4, max_rate: 124.64 }, { maxHours: 5, max_rate: 148.12 }, { maxHours: 6, max_rate: 171.60 } ] },
+      // Employment Preparation — *worksheet*
+      EPR:  { unit_type: "quarter_hour", label: "Quarter-Hour", worksheet: true, max_rate: 10.09, alt_daily: 242.70 },
+      // Motor Transportation — daily, fixed
+      MTP:  { unit_type: "daily", label: "Daily", rate: 20.80 },
+      // Family & Individual Training — quarter hour, fixed
+      TFB:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 8.67 },
+      // Host Home Supports — daily, *worksheet*
+      HHS:  { unit_type: "daily", label: "Daily", worksheet: true, max_rate: 372.92 },
+      // Extended Living Supports — quarter hour, fixed
+      ELS:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 6.25 },
+      // Personal Assistance — quarter hour, fixed (also has daily $183.10)
+      PAC:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 5.73, alt_daily: 183.10 },
+      // Personal Budget Assistant — quarter hour, fixed (also has session $18.30)
+      PBA:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 9.16, alt_session: 18.30 },
+      // Professional Medication Monitoring — session, fixed
+      PM1:  { unit_type: "session", label: "Per Session", rate: 8.32 },
+      PM2:  { unit_type: "session", label: "Per Session", rate: 12.03 },
+      // Professional Nursing — daily, fixed
+      PN1:  { unit_type: "daily", label: "Daily", rate: 41.68 },
+      PN2:  { unit_type: "daily", label: "Daily", rate: 117.60 },
+      // Professional Parent Supports — daily, *worksheet*
+      PPS:  { unit_type: "daily", label: "Daily", worksheet: true, max_rate: 372.92 },
+      // *** RESIDENTIAL HABILITATION SUPPORTS — DAILY, *worksheet* ***
+      RHS:  { unit_type: "daily", label: "Daily", worksheet: true, max_rate: 592.29 },
+      // Respite — various, fixed
+      RP2:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 4.58, alt_daily: 110.42 },
+      RP3:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 5.72, alt_daily: 137.06 },
+      RP4:  { unit_type: "daily", label: "Daily", rate: 123.94 },
+      RP5:  { unit_type: "daily", label: "Daily", rate: 150.58 },
+      RPS:  { unit_type: "session", label: "Per Session", rate: 650.45 },
+      // Supported Employment
+      SEC:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 1.83 },
+      SED:  { unit_type: "daily", label: "Daily", rate: 55.67 },
+      SEE:  { unit_type: "tiered_daily", label: "Daily (Tiered)", worksheet: true,
+              tiers: [ { maxHours: 1, max_rate: 54.18 }, { maxHours: 2, max_rate: 77.68 }, { maxHours: 3, max_rate: 101.14 },
+                        { maxHours: 4, max_rate: 124.64 }, { maxHours: 5, max_rate: 148.12 }, { maxHours: 6, max_rate: 171.60 } ] },
+      SEI:  { unit_type: "tiered_daily", label: "Daily (Tiered)", worksheet: true,
+              tiers: [ { maxHours: 1, max_rate: 54.18 }, { maxHours: 2, max_rate: 77.68 }, { maxHours: 3, max_rate: 101.14 },
+                        { maxHours: 4, max_rate: 124.64 }, { maxHours: 5, max_rate: 148.12 }, { maxHours: 6, max_rate: 171.60 } ] },
+      // Supported Living — quarter hour, fixed
+      SLH:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 9.16 },
+      SLN:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 8.27 },
+      // Caregiver Compensation — quarter hour, fixed
+      CMS:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 6.85 },
+      CMP:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 6.85 },
     };
+
+    // Get the effective rate for a service code — either fixed or from client auth
+    function getEffectiveRate(serviceCode, authRate) {
+      const rule = BILLING_RULES[serviceCode];
+      if (!rule) return null;
+      // Worksheet services use the client-specific rate from their authorization
+      if (rule.worksheet) return authRate || null;
+      // Fixed rate codes use the SOW rate
+      return rule.rate || null;
+    }
 
     function calculateBillableUnits(serviceCode, durationMinutes) {
       const rule = BILLING_RULES[serviceCode];
-      if (!rule) {
-        // Default: quarter-hour
-        return durationMinutes ? Math.ceil(durationMinutes / 15) : null;
-      }
+      if (!rule) return durationMinutes ? Math.ceil(durationMinutes / 15) : null;
       switch (rule.unit_type) {
         case "quarter_hour":
           return durationMinutes ? Math.ceil(durationMinutes / 15) : null;
         case "daily":
-          return 1; // always 1 unit per day
-        case "monthly":
-          return 1; // always 1 unit per month
-        case "per_session":
-          return 1; // 1 unit per session
+          return 1;
+        case "session":
+          return 1;
+        case "tiered_daily":
+          return 1;
         default:
           return durationMinutes ? Math.ceil(durationMinutes / 15) : null;
       }
+    }
+
+    function getTieredRate(serviceCode, durationMinutes) {
+      const rule = BILLING_RULES[serviceCode];
+      if (!rule || rule.unit_type !== "tiered_daily" || !rule.tiers) return null;
+      const hours = Math.ceil((durationMinutes || 0) / 60);
+      const tier = rule.tiers.find(t => hours <= t.maxHours) || rule.tiers[rule.tiers.length - 1];
+      return tier;
     }
 
     function getBillingLabel(serviceCode, durationMinutes) {
@@ -1290,10 +1398,12 @@
           return units != null ? `${units} unit${units !== 1 ? "s" : ""} (${rule.label})` : "—";
         case "daily":
           return `1 unit (${rule.label})`;
-        case "monthly":
+        case "session":
           return `1 unit (${rule.label})`;
-        case "per_session":
-          return `1 unit (${rule.label})`;
+        case "tiered_daily": {
+          const tier = getTieredRate(serviceCode, durationMinutes);
+          return tier ? `1 unit (${Math.ceil((durationMinutes||0)/60)}hr tier)` : `1 unit (${rule.label})`;
+        }
         default:
           return "—";
       }
@@ -1342,6 +1452,7 @@
       const [clients, setClients] = useState([]);
       const [serviceCodes, setServiceCodes] = useState([]);
       const [selectedCode, setSelectedCode] = useState(null);
+      const [clientAuths, setClientAuths] = useState([]);
       const [form, setForm] = useState({
         staff_id: "", person_id: "", service_code_id: "",
         service_date: new Date().toISOString().split("T")[0],
@@ -1363,8 +1474,28 @@
           setForm({ staff_id: "", person_id: "", service_code_id: "", service_date: new Date().toISOString().split("T")[0], start_time: "", end_time: "", note_text: "" });
           setExtraFields({});
           setSelectedCode(null);
+          setClientAuths([]);
         }
       }, [open]);
+
+      // Load client auths when person changes
+      const handleClientChange = async (personId) => {
+        setForm(prev => ({ ...prev, person_id: personId }));
+        if (personId) {
+          const { data } = await supabase.from("person_service_authorizations")
+            .select("id, service_code_id, authorized_units, used_units, rate_per_unit, service_code_definitions(code)")
+            .eq("person_id", personId);
+          setClientAuths(data || []);
+        } else {
+          setClientAuths([]);
+        }
+      };
+
+      // Find the active auth for the selected client + code combo
+      const activeAuth = useMemo(() => {
+        if (!form.service_code_id || !clientAuths.length) return null;
+        return clientAuths.find(a => a.service_code_id === form.service_code_id) || null;
+      }, [form.service_code_id, clientAuths]);
 
       const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
 
@@ -1430,7 +1561,7 @@
               </select>
             </FormField>
             <FormField label="Client" required half>
-              <select style={fieldStyle} value={form.person_id} onChange={e => set("person_id", e.target.value)}>
+              <select style={fieldStyle} value={form.person_id} onChange={e => handleClientChange(e.target.value)}>
                 <option value="">Select client...</option>
                 {clients.map(c => <option key={c.id} value={c.id}>{c.first_name} {c.last_name}</option>)}
               </select>
@@ -1439,8 +1570,19 @@
           <FormField label="Service Code" required>
             <select style={fieldStyle} value={form.service_code_id} onChange={e => handleCodeChange(e.target.value)}>
               <option value="">Select service code...</option>
-              {serviceCodes.map(sc => <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}</option>)}
+              {serviceCodes.map(sc => {
+                // If client selected, mark which codes they have auths for
+                const hasAuth = clientAuths.some(a => a.service_code_id === sc.id);
+                return <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}{hasAuth ? " ✓" : ""}</option>;
+              })}
             </select>
+            {activeAuth && (
+              <div style={{ marginTop: 6, fontSize: 12, color: CB.teal, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
+                {icons.checkCircle({ size: 13, color: CB.teal })}
+                Auth: {activeAuth.used_units || 0}/{activeAuth.authorized_units} units used
+                {activeAuth.rate_per_unit && <span>@ ${Number(activeAuth.rate_per_unit).toFixed(2)}/unit</span>}
+              </div>
+            )}
           </FormField>
           <FormRow>
             <FormField label="Service Date" required half>
@@ -1458,32 +1600,77 @@
               <div style={{ ...fieldStyle, background: "#F1F5F9", color: CB.textMid, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                 {(() => {
                   const rule = BILLING_RULES[selectedCode];
-                  if (rule && (rule.unit_type === "daily" || rule.unit_type === "monthly" || rule.unit_type === "per_session")) {
+                  const authRate = activeAuth?.rate_per_unit ? Number(activeAuth.rate_per_unit) : null;
+                  const effectiveRate = rule ? (rule.worksheet ? authRate : rule.rate) : null;
+
+                  if (!rule) {
+                    if (form.start_time && form.end_time) {
+                      const [sh, sm] = form.start_time.split(":").map(Number);
+                      const [eh, em] = form.end_time.split(":").map(Number);
+                      let mins = (eh * 60 + em) - (sh * 60 + sm);
+                      if (mins < 0) mins += 1440;
+                      return `${Math.floor(mins/60)}h ${mins%60}m → ${Math.ceil(mins/15)} units`;
+                    }
+                    return "Select a service code";
+                  }
+                  // Daily / Session — always 1 unit
+                  if (rule.unit_type === "daily" || rule.unit_type === "session") {
                     return (
                       <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         <span style={{ background: `${CB.teal}15`, color: CB.teal, padding: "2px 8px", borderRadius: 6, fontSize: 12, fontWeight: 700 }}>{rule.label}</span>
                         <span style={{ fontWeight: 600, color: CB.navy }}>1 unit</span>
-                        {rule.rate && <span style={{ fontSize: 12, color: CB.textLight }}>@ ${rule.rate.toFixed(2)}</span>}
+                        {effectiveRate ? (
+                          <span style={{ fontSize: 12, color: CB.teal, fontWeight: 600 }}>@ ${effectiveRate.toFixed(2)}</span>
+                        ) : rule.worksheet ? (
+                          <span style={{ fontSize: 11, color: CB.amber }}>rate from auth</span>
+                        ) : null}
                       </span>
                     );
                   }
+                  // Tiered daily
+                  if (rule.unit_type === "tiered_daily") {
+                    if (form.start_time && form.end_time) {
+                      const [sh, sm] = form.start_time.split(":").map(Number);
+                      const [eh, em] = form.end_time.split(":").map(Number);
+                      let mins = (eh * 60 + em) - (sh * 60 + sm);
+                      if (mins < 0) mins += 1440;
+                      const tier = getTieredRate(selectedCode, mins);
+                      return (
+                        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <span style={{ background: `${CB.amber}15`, color: CB.amber, padding: "2px 8px", borderRadius: 6, fontSize: 12, fontWeight: 700 }}>Tiered</span>
+                          <span>{Math.floor(mins/60)}h {mins%60}m</span>
+                          <span style={{ fontWeight: 700, color: CB.navy }}>→ 1 unit</span>
+                          <span style={{ fontSize: 11, color: CB.textLight }}>({Math.ceil(mins/60)}hr tier, max ${tier?.max_rate?.toFixed(2) || "?"})</span>
+                        </span>
+                      );
+                    }
+                    return (
+                      <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ background: `${CB.amber}15`, color: CB.amber, padding: "2px 8px", borderRadius: 6, fontSize: 12, fontWeight: 700 }}>Tiered Daily</span>
+                        <span style={{ fontSize: 12 }}>Enter times → rate by hours</span>
+                      </span>
+                    );
+                  }
+                  // Quarter hour
                   if (form.start_time && form.end_time) {
                     const [sh, sm] = form.start_time.split(":").map(Number);
                     const [eh, em] = form.end_time.split(":").map(Number);
                     let mins = (eh * 60 + em) - (sh * 60 + sm);
                     if (mins < 0) mins += 1440;
-                    const h = Math.floor(mins / 60);
-                    const units = calculateBillableUnits(selectedCode, mins);
-                    const billingRule = BILLING_RULES[selectedCode];
+                    const units = Math.ceil(mins / 15);
                     return (
                       <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                        <span>{h}h {mins % 60}m</span>
+                        <span>{Math.floor(mins/60)}h {mins%60}m</span>
                         <span style={{ fontWeight: 700, color: CB.navy }}>→ {units} unit{units !== 1 ? "s" : ""}</span>
-                        {billingRule?.rate && <span style={{ fontSize: 12, color: CB.textLight }}>@ ${billingRule.rate.toFixed(2)}</span>}
+                        {effectiveRate ? (
+                          <span style={{ fontSize: 12, color: CB.teal, fontWeight: 600 }}>@ ${effectiveRate.toFixed(2)}</span>
+                        ) : rule.worksheet ? (
+                          <span style={{ fontSize: 11, color: CB.amber }}>rate from auth</span>
+                        ) : null}
                       </span>
                     );
                   }
-                  return "Auto-calculated";
+                  return "Enter start/end times";
                 })()}
               </div>
             </FormField>
@@ -1553,13 +1740,28 @@
         { label: "Units", render: (r) => {
           const code = r.service_code_definitions?.code;
           const rule = BILLING_RULES[code];
-          const units = r.billable_units || (r.duration_minutes ? calculateBillableUnits(code, r.duration_minutes) : null);
+          if (!rule) {
+            const units = r.billable_units || (r.duration_minutes ? Math.ceil(r.duration_minutes / 15) : null);
+            return units ? <span><span style={{ fontWeight: 600 }}>{units}</span> <span style={{ fontSize: 11, color: CB.textLight }}>qtr-hr</span></span> : "—";
+          }
+          if (rule.unit_type === "tiered_daily") {
+            const tier = getTieredRate(code, r.duration_minutes);
+            return (
+              <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <span style={{ fontWeight: 600 }}>1</span>
+                <span style={{ fontSize: 11, color: CB.amber, fontWeight: 600 }}>
+                  {tier ? `${Math.ceil((r.duration_minutes||0)/60)}hr tier` : "tiered"}
+                </span>
+              </span>
+            );
+          }
+          const units = r.billable_units || calculateBillableUnits(code, r.duration_minutes);
           if (!units && units !== 0) return "—";
-          const typeLabel = rule ? rule.label : "qtr-hr";
           return (
-            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
               <span style={{ fontWeight: 600 }}>{units}</span>
-              <span style={{ fontSize: 11, color: CB.textLight }}>{typeLabel}</span>
+              <span style={{ fontSize: 11, color: CB.textLight }}>{rule.label}</span>
+              {rule.worksheet && <span style={{ fontSize: 10, color: CB.amber, fontWeight: 700 }}>*</span>}
             </span>
           );
         }},
