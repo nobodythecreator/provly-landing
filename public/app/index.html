@@ -950,7 +950,7 @@
                       border: `1px solid ${CB.border}`,
                     }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                        <Badge text={a.service_code_definitions?.code || "?"} color={CB.blue} />
+                        <Badge text={a.service_code_definitions?.code || serviceCodes.find(sc => sc.id === a.service_code_id)?.code || "?"} color={CB.blue} />
                         <span style={{ fontSize: 13, color: CB.text, fontWeight: 600 }}>{a.used_units || 0} / {a.authorized_units} units</span>
                         {a.end_date && <span style={{ fontSize: 12, color: CB.textLight }}>exp {new Date(a.end_date + "T00:00:00").toLocaleDateString()}</span>}
                       </div>
@@ -1000,15 +1000,23 @@
       const [loading, setLoading] = useState(true);
       const [formOpen, setFormOpen] = useState(false);
       const [editing, setEditing] = useState(null);
+      const [scLookup, setScLookup] = useState({});
 
       useEffect(() => { loadClients(); }, []);
 
       const loadClients = async () => {
         setLoading(true);
-        const { data, error } = await supabase.from("persons")
-          .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, person_service_authorizations(id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code))")
-          .order("last_name");
-        if (!error) setClients(data || []);
+        const [clientRes, scRes] = await Promise.all([
+          supabase.from("persons")
+            .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, person_service_authorizations(id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code))")
+            .order("last_name"),
+          supabase.from("service_code_definitions").select("id, code").order("code"),
+        ]);
+        if (!clientRes.error) setClients(clientRes.data || []);
+        // Build lookup map as fallback for nested join failures
+        const lookup = {};
+        (scRes.data || []).forEach(sc => { lookup[sc.id] = sc.code; });
+        setScLookup(lookup);
         setLoading(false);
       };
 
@@ -1024,7 +1032,7 @@
           const a = r.person_service_authorizations || [];
           return a.length > 0 ? (
             <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-              {a.map((x, i) => <Badge key={i} text={x.service_code_definitions?.code || "?"} color={CB.blue} />)}
+              {a.map((x, i) => <Badge key={i} text={x.service_code_definitions?.code || scLookup[x.service_code_id] || "?"} color={CB.blue} />)}
             </div>
           ) : "—";
         }},
@@ -1065,7 +1073,15 @@
       useEffect(() => {
         if (open) {
           supabase.from("staff").select("id, first_name, last_name").eq("is_active", true).order("last_name").then(({ data }) => setStaffList(data || []));
-          supabase.from("training_topic_definitions").select("id, topic_name, renewal_months").order("topic_name").then(({ data }) => setTopics(data || []));
+          supabase.from("training_topic_definitions").select("id, topic_name, renewal_months").order("topic_name").then(({ data }) => {
+            // Deduplicate by name
+            const seen = new Map();
+            (data || []).forEach(t => {
+              const key = t.topic_name?.trim().toLowerCase();
+              if (key && !seen.has(key)) seen.set(key, t);
+            });
+            setTopics(Array.from(seen.values()));
+          });
           setForm({ staff_id: "", training_topic_id: "", completed_date: new Date().toISOString().split("T")[0], certificate_number: "" });
         }
       }, [open]);
@@ -1143,7 +1159,24 @@
           supabase.from("training_topic_definitions").select("id, topic_name, category, deadline_days, renewal_months, requires_certification").order("category, topic_name"),
         ]);
         if (!compRes.error) setCompletions(compRes.data || []);
-        if (!topicRes.error) setTopics(topicRes.data || []);
+        if (!topicRes.error) {
+          // Deduplicate topics by normalized name (DB may have duplicates from multiple seed runs)
+          const raw = topicRes.data || [];
+          const seen = new Map();
+          raw.forEach(t => {
+            const key = t.topic_name?.trim().toLowerCase();
+            if (!key) return;
+            if (!seen.has(key)) {
+              seen.set(key, t);
+            } else {
+              // Keep the one with more data (has renewal_months, deadline_days, etc.)
+              const existing = seen.get(key);
+              const score = (x) => (x.renewal_months ? 1 : 0) + (x.deadline_days ? 1 : 0) + (x.requires_certification ? 1 : 0) + (x.category ? 1 : 0);
+              if (score(t) > score(existing)) seen.set(key, t);
+            }
+          });
+          setTopics(Array.from(seen.values()));
+        }
         setLoading(false);
       };
 
@@ -1205,6 +1238,67 @@
     // ═══════════════════════════════════════════════════════════════
     // MODULE 4: SERVICE NOTE ENTRY — dynamic forms per service code
     // ═══════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════
+    // DHHS91172 BILLING RULES — rate table per service code
+    // unit_type: "quarter_hour" (15min=1u), "daily" (1 day=1u), "monthly" (1 month=1u), "per_session"
+    // ═══════════════════════════════════════════════════════════════
+    const BILLING_RULES = {
+      RHS:  { unit_type: "quarter_hour", mins_per_unit: 15, label: "Quarter-Hour", rate: 4.54 },
+      SLN:  { unit_type: "quarter_hour", mins_per_unit: 15, label: "Quarter-Hour", rate: 4.54 },
+      DSI:  { unit_type: "quarter_hour", mins_per_unit: 15, label: "Quarter-Hour", rate: 5.72 },
+      DSG:  { unit_type: "quarter_hour", mins_per_unit: 15, label: "Quarter-Hour", rate: 3.62 },
+      PBA:  { unit_type: "quarter_hour", mins_per_unit: 15, label: "Quarter-Hour (Tiered)", rate: null },
+      BC1:  { unit_type: "quarter_hour", mins_per_unit: 15, label: "Quarter-Hour", rate: 25.00 },
+      BC2:  { unit_type: "quarter_hour", mins_per_unit: 15, label: "Quarter-Hour", rate: 18.75 },
+      BC3:  { unit_type: "quarter_hour", mins_per_unit: 15, label: "Quarter-Hour", rate: 12.50 },
+      PN1:  { unit_type: "quarter_hour", mins_per_unit: 15, label: "Quarter-Hour (RN)", rate: 18.75 },
+      PN2:  { unit_type: "quarter_hour", mins_per_unit: 15, label: "Quarter-Hour (LPN)", rate: 14.06 },
+      HH1:  { unit_type: "daily", mins_per_unit: null, label: "Daily", rate: 88.61 },
+      HH2:  { unit_type: "daily", mins_per_unit: null, label: "Daily", rate: 143.47 },
+      HH3:  { unit_type: "daily", mins_per_unit: null, label: "Daily", rate: 202.25 },
+      MTP:  { unit_type: "monthly", mins_per_unit: null, label: "Monthly", rate: null },
+      PE:   { unit_type: "per_session", mins_per_unit: null, label: "Per Session", rate: null },
+      RS:   { unit_type: "per_session", mins_per_unit: null, label: "Per Session", rate: null },
+    };
+
+    function calculateBillableUnits(serviceCode, durationMinutes) {
+      const rule = BILLING_RULES[serviceCode];
+      if (!rule) {
+        // Default: quarter-hour
+        return durationMinutes ? Math.ceil(durationMinutes / 15) : null;
+      }
+      switch (rule.unit_type) {
+        case "quarter_hour":
+          return durationMinutes ? Math.ceil(durationMinutes / 15) : null;
+        case "daily":
+          return 1; // always 1 unit per day
+        case "monthly":
+          return 1; // always 1 unit per month
+        case "per_session":
+          return 1; // 1 unit per session
+        default:
+          return durationMinutes ? Math.ceil(durationMinutes / 15) : null;
+      }
+    }
+
+    function getBillingLabel(serviceCode, durationMinutes) {
+      const rule = BILLING_RULES[serviceCode];
+      if (!rule) return durationMinutes ? `${Math.ceil(durationMinutes / 15)} units (qtr-hr)` : "—";
+      const units = calculateBillableUnits(serviceCode, durationMinutes);
+      switch (rule.unit_type) {
+        case "quarter_hour":
+          return units != null ? `${units} unit${units !== 1 ? "s" : ""} (${rule.label})` : "—";
+        case "daily":
+          return `1 unit (${rule.label})`;
+        case "monthly":
+          return `1 unit (${rule.label})`;
+        case "per_session":
+          return `1 unit (${rule.label})`;
+        default:
+          return "—";
+      }
+    }
+
     const SERVICE_NOTE_FIELDS = {
       RHS: [
         { key: "goals_addressed", label: "Goals Addressed", type: "textarea", placeholder: "Which ISP goals were worked on this shift?" },
@@ -1315,7 +1409,7 @@
           start_time: form.start_time || null,
           end_time: form.end_time || null,
           duration_minutes,
-          billable_units: duration_minutes ? Math.round(duration_minutes / 15 * 10) / 10 : null,
+          billable_units: calculateBillableUnits(selectedCode, duration_minutes),
           summary_note: fullNote,
           status: "draft",
         });
@@ -1360,16 +1454,37 @@
             <FormField label="End Time" half>
               <input style={fieldStyle} type="time" value={form.end_time} onChange={e => set("end_time", e.target.value)} />
             </FormField>
-            <FormField label="Duration" half>
-              <div style={{ ...fieldStyle, background: "#F1F5F9", color: CB.textMid, display: "flex", alignItems: "center" }}>
-                {form.start_time && form.end_time ? (() => {
-                  const [sh, sm] = form.start_time.split(":").map(Number);
-                  const [eh, em] = form.end_time.split(":").map(Number);
-                  let mins = (eh * 60 + em) - (sh * 60 + sm);
-                  if (mins < 0) mins += 1440;
-                  const h = Math.floor(mins / 60);
-                  return `${h}h ${mins % 60}m (${(mins / 15).toFixed(1)} units)`;
-                })() : "Auto-calculated"}
+            <FormField label="Duration / Units" half>
+              <div style={{ ...fieldStyle, background: "#F1F5F9", color: CB.textMid, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                {(() => {
+                  const rule = BILLING_RULES[selectedCode];
+                  if (rule && (rule.unit_type === "daily" || rule.unit_type === "monthly" || rule.unit_type === "per_session")) {
+                    return (
+                      <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ background: `${CB.teal}15`, color: CB.teal, padding: "2px 8px", borderRadius: 6, fontSize: 12, fontWeight: 700 }}>{rule.label}</span>
+                        <span style={{ fontWeight: 600, color: CB.navy }}>1 unit</span>
+                        {rule.rate && <span style={{ fontSize: 12, color: CB.textLight }}>@ ${rule.rate.toFixed(2)}</span>}
+                      </span>
+                    );
+                  }
+                  if (form.start_time && form.end_time) {
+                    const [sh, sm] = form.start_time.split(":").map(Number);
+                    const [eh, em] = form.end_time.split(":").map(Number);
+                    let mins = (eh * 60 + em) - (sh * 60 + sm);
+                    if (mins < 0) mins += 1440;
+                    const h = Math.floor(mins / 60);
+                    const units = calculateBillableUnits(selectedCode, mins);
+                    const billingRule = BILLING_RULES[selectedCode];
+                    return (
+                      <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span>{h}h {mins % 60}m</span>
+                        <span style={{ fontWeight: 700, color: CB.navy }}>→ {units} unit{units !== 1 ? "s" : ""}</span>
+                        {billingRule?.rate && <span style={{ fontSize: 12, color: CB.textLight }}>@ ${billingRule.rate.toFixed(2)}</span>}
+                      </span>
+                    );
+                  }
+                  return "Auto-calculated";
+                })()}
               </div>
             </FormField>
           </FormRow>
@@ -1435,7 +1550,19 @@
         { label: "Client", render: (r) => r.persons ? `${r.persons.first_name} ${r.persons.last_name}` : "—" },
         { label: "Code", render: (r) => <Badge text={r.service_code_definitions?.code || "?"} color={CB.blue} /> },
         { label: "Time", render: (r) => r.start_time && r.end_time ? `${r.start_time.slice(0,5)} – ${r.end_time.slice(0,5)}` : "—" },
-        { label: "Units", render: (r) => r.billable_units || (r.duration_minutes ? (r.duration_minutes / 15).toFixed(1) : "—") },
+        { label: "Units", render: (r) => {
+          const code = r.service_code_definitions?.code;
+          const rule = BILLING_RULES[code];
+          const units = r.billable_units || (r.duration_minutes ? calculateBillableUnits(code, r.duration_minutes) : null);
+          if (!units && units !== 0) return "—";
+          const typeLabel = rule ? rule.label : "qtr-hr";
+          return (
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontWeight: 600 }}>{units}</span>
+              <span style={{ fontSize: 11, color: CB.textLight }}>{typeLabel}</span>
+            </span>
+          );
+        }},
         { label: "Status", render: (r) => <Badge text={r.status || "draft"} color={statusColors[r.status] || CB.textLight} /> },
       ];
 
@@ -1561,7 +1688,23 @@
         { label: "Code", render: (r) => <Badge text={r.service_code_definitions?.code || "?"} color={CB.blue} /> },
         { label: "In", render: (r) => formatTime(r.clock_in_at) },
         { label: "Out", render: (r) => formatTime(r.clock_out_at) },
-        { label: "GPS", render: (r) => r.geofence_valid === true ? <Badge text="Valid" color={CB.green} /> : r.geofence_valid === false ? <Badge text="Invalid" color={CB.red} /> : <Badge text="—" color={CB.textLight} /> },
+        { label: "GPS", render: (r) => {
+          // Show geofence status if explicitly set
+          if (r.geofence_valid === true) return <Badge text="✓ Verified" color={CB.green} />;
+          if (r.geofence_valid === false) return <Badge text="✗ Invalid" color={CB.red} />;
+          // Otherwise show coordinate capture status
+          const hasIn = r.clock_in_lat && r.clock_in_lng;
+          const hasOut = r.clock_out_lat && r.clock_out_lng;
+          if (hasIn || hasOut) {
+            const label = hasIn && hasOut ? "In + Out" : hasIn ? "In only" : "Out only";
+            return (
+              <span title={hasIn ? `In: ${Number(r.clock_in_lat).toFixed(4)}, ${Number(r.clock_in_lng).toFixed(4)}${hasOut ? `\nOut: ${Number(r.clock_out_lat).toFixed(4)}, ${Number(r.clock_out_lng).toFixed(4)}` : ""}` : ""} style={{ cursor: "help" }}>
+                <Badge text={`📍 ${label}`} color={CB.teal} />
+              </span>
+            );
+          }
+          return <Badge text="No GPS" color={CB.textLight} />;
+        }},
         { label: "Status", render: (r) => {
           if (!r.clock_out_at) return (
             <button onClick={() => handleClockOut(r.id)} disabled={clockingOut === r.id} style={{
