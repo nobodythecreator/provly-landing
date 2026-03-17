@@ -1315,7 +1315,8 @@
           start_time: form.start_time || null,
           end_time: form.end_time || null,
           duration_minutes,
-          note_text: fullNote,
+          billable_units: duration_minutes ? Math.round(duration_minutes / 15 * 10) / 10 : null,
+          summary_note: fullNote,
           status: "draft",
         });
         setSaving(false);
@@ -1419,7 +1420,7 @@
       const loadNotes = async () => {
         setLoading(true);
         const { data, error } = await supabase.from("service_notes")
-          .select("id, service_date, start_time, end_time, duration_minutes, status, note_text, staff(first_name, last_name), persons(first_name, last_name), service_code_definitions(code, name)")
+          .select("id, service_date, start_time, end_time, duration_minutes, billable_units, status, summary_note, staff(first_name, last_name), persons(first_name, last_name), service_code_definitions(code, name)")
           .order("service_date", { ascending: false })
           .limit(100);
         if (!error) setNotes(data || []);
@@ -1434,7 +1435,7 @@
         { label: "Client", render: (r) => r.persons ? `${r.persons.first_name} ${r.persons.last_name}` : "—" },
         { label: "Code", render: (r) => <Badge text={r.service_code_definitions?.code || "?"} color={CB.blue} /> },
         { label: "Time", render: (r) => r.start_time && r.end_time ? `${r.start_time.slice(0,5)} – ${r.end_time.slice(0,5)}` : "—" },
-        { label: "Units", render: (r) => r.duration_minutes ? (r.duration_minutes / 15).toFixed(1) : "—" },
+        { label: "Units", render: (r) => r.billable_units || (r.duration_minutes ? (r.duration_minutes / 15).toFixed(1) : "—") },
         { label: "Status", render: (r) => <Badge text={r.status || "draft"} color={statusColors[r.status] || CB.textLight} /> },
       ];
 
@@ -1460,29 +1461,26 @@
       const [staffList, setStaffList] = useState([]);
       const [clients, setClients] = useState([]);
       const [serviceCodes, setServiceCodes] = useState([]);
-      const [sites, setSites] = useState([]);
       const [clockingIn, setClockingIn] = useState(false);
       const [clockingOut, setClockingOut] = useState(null);
       const [gpsStatus, setGpsStatus] = useState(null);
       const [showClockIn, setShowClockIn] = useState(false);
-      const [clockForm, setClockForm] = useState({ staff_id: "", person_id: "", service_code_id: "", site_id: "" });
+      const [clockForm, setClockForm] = useState({ staff_id: "", person_id: "", service_code_id: "" });
 
       useEffect(() => { loadAll(); }, []);
 
       const loadAll = async () => {
         setLoading(true);
-        const [sessRes, staffRes, clientRes, scRes, siteRes] = await Promise.all([
-          supabase.from("evv_sessions").select("id, clock_in_time, clock_out_time, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, status, staff(first_name, last_name), persons(first_name, last_name), service_code_definitions(code), sites(name)").order("clock_in_time", { ascending: false }).limit(50),
+        const [sessRes, staffRes, clientRes, scRes] = await Promise.all([
+          supabase.from("evv_sessions").select("id, clock_in_at, clock_out_at, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, geofence_valid, exceptions, staff(first_name, last_name), persons(first_name, last_name), service_code_definitions(code)").order("clock_in_at", { ascending: false }).limit(50),
           supabase.from("staff").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
           supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
           supabase.from("service_code_definitions").select("id, code, name, requires_evv").order("code"),
-          supabase.from("sites").select("id, name, latitude, longitude, geofence_radius_meters"),
         ]);
         if (!sessRes.error) setSessions(sessRes.data || []);
         setStaffList(staffRes.data || []);
         setClients(clientRes.data || []);
         setServiceCodes((scRes.data || []).filter(sc => sc.requires_evv));
-        setSites(siteRes.data || []);
         setLoading(false);
       };
 
@@ -1496,17 +1494,6 @@
         );
       });
 
-      const checkGeofence = (lat, lng, site) => {
-        if (!site?.latitude || !site?.longitude) return { inRange: true, distance: 0 };
-        const R = 6371000;
-        const dLat = (site.latitude - lat) * Math.PI / 180;
-        const dLng = (site.longitude - lng) * Math.PI / 180;
-        const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat * Math.PI / 180) * Math.cos(site.latitude * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
-        const distance = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        const radius = site.geofence_radius_meters || 150;
-        return { inRange: distance <= radius, distance: Math.round(distance) };
-      };
-
       const handleClockIn = async () => {
         if (!clockForm.staff_id || !clockForm.person_id || !clockForm.service_code_id) {
           return addToast("Select staff, client, and service code", "error");
@@ -1514,24 +1501,14 @@
         setClockingIn(true);
         try {
           const gps = await getGPS();
-          // Check geofence if site selected
-          if (clockForm.site_id) {
-            const site = sites.find(s => s.id === clockForm.site_id);
-            const { inRange, distance } = checkGeofence(gps.lat, gps.lng, site);
-            if (!inRange) {
-              addToast(`Outside geofence: ${distance}m from ${site.name}`, "warning");
-            }
-          }
           const { error } = await supabase.from("evv_sessions").insert({
             org_id: orgId,
             staff_id: clockForm.staff_id,
             person_id: clockForm.person_id,
             service_code_id: clockForm.service_code_id,
-            site_id: clockForm.site_id || null,
-            clock_in_time: new Date().toISOString(),
+            clock_in_at: new Date().toISOString(),
             clock_in_lat: gps.lat,
             clock_in_lng: gps.lng,
-            status: "active",
           });
           if (error) throw error;
           addToast("Clocked in successfully", "success");
@@ -1549,10 +1526,9 @@
         try {
           const gps = await getGPS();
           const { error } = await supabase.from("evv_sessions").update({
-            clock_out_time: new Date().toISOString(),
+            clock_out_at: new Date().toISOString(),
             clock_out_lat: gps.lat,
             clock_out_lng: gps.lng,
-            status: "completed",
           }).eq("id", sessionId);
           if (error) throw error;
           addToast("Clocked out successfully", "success");
@@ -1564,8 +1540,8 @@
         setGpsStatus(null);
       };
 
-      const activeSessions = sessions.filter(s => s.status === "active");
-      const completedSessions = sessions.filter(s => s.status !== "active");
+      const activeSessions = sessions.filter(s => !s.clock_out_at);
+      const completedSessions = sessions.filter(s => s.clock_out_at);
 
       const formatTime = (iso) => {
         if (!iso) return "—";
@@ -1579,15 +1555,15 @@
       };
 
       const columns = [
-        { label: "Date", bold: true, render: (r) => formatDate(r.clock_in_time) },
+        { label: "Date", bold: true, render: (r) => formatDate(r.clock_in_at) },
         { label: "Staff", render: (r) => r.staff ? `${r.staff.first_name} ${r.staff.last_name}` : "—" },
         { label: "Client", render: (r) => r.persons ? `${r.persons.first_name} ${r.persons.last_name}` : "—" },
         { label: "Code", render: (r) => <Badge text={r.service_code_definitions?.code || "?"} color={CB.blue} /> },
-        { label: "In", render: (r) => formatTime(r.clock_in_time) },
-        { label: "Out", render: (r) => formatTime(r.clock_out_time) },
-        { label: "Site", render: (r) => r.sites?.name || "—" },
+        { label: "In", render: (r) => formatTime(r.clock_in_at) },
+        { label: "Out", render: (r) => formatTime(r.clock_out_at) },
+        { label: "GPS", render: (r) => r.geofence_valid === true ? <Badge text="Valid" color={CB.green} /> : r.geofence_valid === false ? <Badge text="Invalid" color={CB.red} /> : <Badge text="—" color={CB.textLight} /> },
         { label: "Status", render: (r) => {
-          if (r.status === "active") return (
+          if (!r.clock_out_at) return (
             <button onClick={() => handleClockOut(r.id)} disabled={clockingOut === r.id} style={{
               display: "flex", alignItems: "center", gap: 6, padding: "6px 12px",
               borderRadius: 8, border: "none", background: CB.red, color: CB.white,
@@ -1620,7 +1596,7 @@
               {activeSessions.map(s => (
                 <div key={s.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 0" }}>
                   <span style={{ fontSize: 13, color: CB.text }}>
-                    {s.staff?.first_name} {s.staff?.last_name} → {s.persons?.first_name} {s.persons?.last_name} ({s.service_code_definitions?.code}) — clocked in {formatTime(s.clock_in_time)}
+                    {s.staff?.first_name} {s.staff?.last_name} → {s.persons?.first_name} {s.persons?.last_name} ({s.service_code_definitions?.code}) — clocked in {formatTime(s.clock_in_at)}
                   </span>
                   <button onClick={() => handleClockOut(s.id)} disabled={clockingOut === s.id} style={{
                     display: "flex", alignItems: "center", gap: 6, padding: "7px 14px",
@@ -1650,20 +1626,12 @@
                 {clients.map(c => <option key={c.id} value={c.id}>{c.first_name} {c.last_name}</option>)}
               </select>
             </FormField>
-            <FormRow>
-              <FormField label="Service Code (EVV)" required half>
+              <FormField label="Service Code (EVV)" required>
                 <select style={fieldStyle} value={clockForm.service_code_id} onChange={e => setClockForm(p => ({ ...p, service_code_id: e.target.value }))}>
                   <option value="">Select code...</option>
                   {serviceCodes.map(sc => <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}</option>)}
                 </select>
               </FormField>
-              <FormField label="Service Site" half>
-                <select style={fieldStyle} value={clockForm.site_id} onChange={e => setClockForm(p => ({ ...p, site_id: e.target.value }))}>
-                  <option value="">Select site...</option>
-                  {sites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
-              </FormField>
-            </FormRow>
 
             {gpsStatus && (
               <div style={{
