@@ -62,44 +62,98 @@
     // ═══════════════════════════════════════════════════════════════
     const AuthContext = createContext(null);
 
+    // ═══════════════════════════════════════════════════════════════
+    // ROLE-BASED ACCESS CONTROL
+    // ═══════════════════════════════════════════════════════════════
+    const ROLE_LEVELS = {
+      owner: 100, admin: 90, compliance_director: 80,
+      residential_director: 70, day_program_director: 70,
+      house_manager: 50, bcba: 60, rn: 60, dsp: 10,
+    };
+
+    const ROLE_PERMISSIONS = {
+      owner:                { viewRates: true, viewBilling: true, viewCompliance: true, viewAllClients: true, viewAllStaff: true, editStaff: true, editClients: true, viewAudit: true, runReports: true, manageRoles: true, intake: true },
+      admin:                { viewRates: true, viewBilling: true, viewCompliance: true, viewAllClients: true, viewAllStaff: true, editStaff: true, editClients: true, viewAudit: true, runReports: true, manageRoles: false, intake: true },
+      compliance_director:  { viewRates: true, viewBilling: true, viewCompliance: true, viewAllClients: true, viewAllStaff: true, editStaff: false, editClients: true, viewAudit: true, runReports: true, manageRoles: false, intake: true },
+      residential_director: { viewRates: false, viewBilling: false, viewCompliance: true, viewAllClients: false, viewAllStaff: false, editStaff: false, editClients: true, viewAudit: false, runReports: false, manageRoles: false, intake: false },
+      day_program_director: { viewRates: false, viewBilling: false, viewCompliance: true, viewAllClients: false, viewAllStaff: false, editStaff: false, editClients: true, viewAudit: false, runReports: false, manageRoles: false, intake: false },
+      house_manager:        { viewRates: false, viewBilling: false, viewCompliance: false, viewAllClients: false, viewAllStaff: false, editStaff: false, editClients: false, viewAudit: false, runReports: false, manageRoles: false, intake: false },
+      bcba:                 { viewRates: false, viewBilling: false, viewCompliance: true, viewAllClients: true, viewAllStaff: false, editStaff: false, editClients: false, viewAudit: false, runReports: true, manageRoles: false, intake: false },
+      rn:                   { viewRates: false, viewBilling: false, viewCompliance: true, viewAllClients: true, viewAllStaff: false, editStaff: false, editClients: false, viewAudit: false, runReports: true, manageRoles: false, intake: false },
+      dsp:                  { viewRates: false, viewBilling: false, viewCompliance: false, viewAllClients: false, viewAllStaff: false, editStaff: false, editClients: false, viewAudit: false, runReports: false, manageRoles: false, intake: false },
+    };
+
+    // Nav items each role can see
+    const ROLE_NAV = {
+      owner:                ["dashboard", "staff", "clients", "training", "notes", "evv", "compliance", "billing"],
+      admin:                ["dashboard", "staff", "clients", "training", "notes", "evv", "compliance", "billing"],
+      compliance_director:  ["dashboard", "staff", "clients", "training", "notes", "evv", "compliance", "billing"],
+      residential_director: ["dashboard", "clients", "training", "notes", "evv"],
+      day_program_director: ["dashboard", "clients", "training", "notes", "evv"],
+      house_manager:        ["dashboard", "clients", "notes", "evv"],
+      bcba:                 ["dashboard", "clients", "notes", "compliance"],
+      rn:                   ["dashboard", "clients", "notes"],
+      dsp:                  ["notes", "evv"],
+    };
+
     function AuthProvider({ children }) {
       const [user, setUser] = useState(null);
       const [session, setSession] = useState(null);
       const [loading, setLoading] = useState(true);
       const [orgId, setOrgId] = useState(null);
+      const [staffProfile, setStaffProfile] = useState(null);
 
       const fetchOrgId = async () => {
         const { data, error } = await supabase.rpc('org_id');
         if (!error && data) setOrgId(data);
       };
 
+      const fetchStaffProfile = async (email) => {
+        const { data } = await supabase.from("staff").select("id, first_name, last_name, role, is_active").eq("email", email).maybeSingle();
+        // If no staff record found, default to owner (for the main admin account)
+        setStaffProfile(data || { role: "owner", first_name: "Admin", last_name: "" });
+      };
+
       useEffect(() => {
         supabase.auth.getSession().then(({ data: { session } }) => {
           setSession(session);
           setUser(session?.user ?? null);
-          if (session?.user) fetchOrgId();
+          if (session?.user) {
+            fetchOrgId();
+            fetchStaffProfile(session.user.email);
+          }
           setLoading(false);
         });
         const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
           setSession(session);
           setUser(session?.user ?? null);
-          if (session?.user) fetchOrgId();
-          else setOrgId(null);
+          if (session?.user) {
+            fetchOrgId();
+            fetchStaffProfile(session.user.email);
+          } else {
+            setOrgId(null);
+            setStaffProfile(null);
+          }
         });
         return () => subscription.unsubscribe();
       }, []);
+
+      const role = staffProfile?.role || "owner";
+      const permissions = ROLE_PERMISSIONS[role] || ROLE_PERMISSIONS.dsp;
+      const navItems = ROLE_NAV[role] || ROLE_NAV.dsp;
 
       const signIn = (email, password) => supabase.auth.signInWithPassword({ email, password });
       const signOut = () => supabase.auth.signOut();
 
       return (
-        <AuthContext.Provider value={{ user, session, loading, signIn, signOut, orgId }}>
+        <AuthContext.Provider value={{ user, session, loading, signIn, signOut, orgId, staffProfile, role, permissions, navItems }}>
           {children}
         </AuthContext.Provider>
       );
     }
 
     function useAuth() { return useContext(AuthContext); }
+    function usePermissions() { const { permissions } = useAuth(); return permissions || ROLE_PERMISSIONS.dsp; }
 
     // ═══════════════════════════════════════════════════════════════
     // TOAST CONTEXT — global notifications
@@ -394,8 +448,8 @@
     // SIDEBAR
     // ═══════════════════════════════════════════════════════════════
     function Sidebar({ active, onNavigate }) {
-      const { user, signOut } = useAuth();
-      const navItems = [
+      const { user, signOut, staffProfile, role, navItems: allowedNav } = useAuth();
+      const allNavItems = [
         { key: "dashboard", label: "Dashboard", icon: icons.dashboard },
         { key: "staff", label: "Staff", icon: icons.users },
         { key: "clients", label: "Clients", icon: icons.heart },
@@ -405,6 +459,9 @@
         { key: "compliance", label: "Compliance", icon: icons.shield },
         { key: "billing", label: "Billing", icon: icons.barChart },
       ];
+      const visibleNav = allNavItems.filter(item => allowedNav.includes(item.key));
+      const displayName = staffProfile ? `${staffProfile.first_name || ""} ${staffProfile.last_name || ""}`.trim() : user?.email?.split("@")[0] || "User";
+      const roleLabel = STAFF_ROLES.find(r => r.value === role)?.label || role?.replace(/_/g, " ") || "User";
       return (
         <aside style={{
           width: CB.sidebarW, minHeight: "100vh", background: CB.navy,
@@ -419,7 +476,7 @@
             </div>
           </div>
           <nav style={{ flex: 1, padding: "16px 12px", overflowY: "auto" }}>
-            {navItems.map((item, i) => {
+            {visibleNav.map((item, i) => {
               const isActive = active === item.key;
               return (
                 <button key={item.key} onClick={() => onNavigate(item.key)} style={{
@@ -446,12 +503,12 @@
                 background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealLight})`,
                 display: "flex", alignItems: "center", justifyContent: "center",
                 fontSize: 14, fontWeight: 700, color: CB.white,
-              }}>{user?.email?.[0]?.toUpperCase() || "U"}</div>
+              }}>{(staffProfile?.first_name || user?.email)?.[0]?.toUpperCase() || "U"}</div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: "rgba(255,255,255,0.9)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {user?.email?.split("@")[0] || "User"}
+                  {displayName}
                 </div>
-                <div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", fontWeight: 500 }}>Owner</div>
+                <div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", fontWeight: 500 }}>{roleLabel}</div>
               </div>
             </div>
             <button onClick={signOut} style={{
@@ -643,11 +700,13 @@
     // MODULE 1: STAFF CRUD
     // ═══════════════════════════════════════════════════════════════
     const STAFF_ROLES = [
-      { value: "dsp", label: "Direct Support Professional" },
+      { value: "owner", label: "Owner" },
+      { value: "admin", label: "Administrator" },
       { value: "compliance_director", label: "Compliance Director" },
       { value: "residential_director", label: "Residential Director" },
       { value: "day_program_director", label: "Day Program Director" },
-      { value: "admin", label: "Administrator" },
+      { value: "house_manager", label: "House Manager" },
+      { value: "dsp", label: "Direct Support Professional" },
       { value: "bcba", label: "BCBA" },
       { value: "rn", label: "Registered Nurse" },
     ];
@@ -821,6 +880,7 @@
     function ClientForm({ open, onClose, onSaved, editing }) {
       const { addToast } = useToast();
       const { orgId } = useAuth();
+      const perms = usePermissions();
       const [saving, setSaving] = useState(false);
       const [serviceCodes, setServiceCodes] = useState([]);
       const [form, setForm] = useState({
@@ -977,7 +1037,7 @@
                         {aRule && <span style={{ fontSize: 11, color: CB.textLight, fontWeight: 600 }}>{aRule.label}</span>}
                         {aRule?.worksheet && <span style={{ fontSize: 10, color: CB.amber, fontWeight: 700, background: `${CB.amber}12`, padding: "1px 6px", borderRadius: 4 }}>WORKSHEET</span>}
                         <span style={{ fontSize: 13, color: CB.text, fontWeight: 600 }}>{a.used_units || 0} / {a.authorized_units} units</span>
-                        {a.rate_per_unit && <span style={{ fontSize: 12, color: CB.teal, fontWeight: 700 }}>@ ${Number(a.rate_per_unit).toFixed(2)}</span>}
+                        {perms.viewRates && a.rate_per_unit && <span style={{ fontSize: 12, color: CB.teal, fontWeight: 700 }}>@ ${Number(a.rate_per_unit).toFixed(2)}</span>}
                         {a.end_date && <span style={{ fontSize: 12, color: CB.textLight }}>exp {new Date(a.end_date + "T00:00:00").toLocaleDateString()}</span>}
                       </div>
                       <button onClick={() => removeAuth(a.id)} style={{
@@ -1001,6 +1061,7 @@
                   <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>Units</label>
                   <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} type="number" value={newAuth.authorized_units} onChange={e => setNewAuth(p => ({ ...p, authorized_units: e.target.value }))} placeholder="0" />
                 </div>
+                {perms.viewRates && (
                 <div style={{ flex: "0 0 100px" }}>
                   <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: isWorksheet ? CB.amber : CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>
                     {isWorksheet ? "Rate *" : "Rate"}
@@ -1010,6 +1071,7 @@
                     onChange={e => setNewAuth(p => ({ ...p, rate_per_unit: e.target.value }))}
                     placeholder={newAuthRule ? (isWorksheet ? `≤${newAuthRule.max_rate || "?"}` : `$${newAuthRule.rate || "?"}`) : "$0.00"} />
                 </div>
+                )}
                 <div style={{ flex: "0 0 130px" }}>
                   <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>End Date</label>
                   <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} type="date" value={newAuth.end_date} onChange={e => setNewAuth(p => ({ ...p, end_date: e.target.value }))} />
@@ -2006,14 +2068,254 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // COMING SOON STUB (for remaining modules)
+    // MODULE 7: COMPLIANCE DASHBOARD — Real-time audit readiness
     // ═══════════════════════════════════════════════════════════════
-    function ComingSoon({ title, subtitle, icon }) {
+    function CompliancePage() {
+      const [loading, setLoading] = useState(true);
+      const [scores, setScores] = useState(null);
+      const [issues, setIssues] = useState([]);
+      const perms = usePermissions();
+
+      useEffect(() => { runAudit(); }, []);
+
+      const runAudit = async () => {
+        setLoading(true);
+        try {
+          const [staffRes, clientRes, trainingRes, topicRes, authRes, noteRes, evvRes] = await Promise.all([
+            supabase.from("staff").select("id, first_name, last_name, role, hire_date, is_active").eq("is_active", true),
+            supabase.from("persons").select("id, first_name, last_name, is_active").eq("is_active", true),
+            supabase.from("staff_trainings").select("id, staff_id, training_topic_id, completed_at, expires_at"),
+            supabase.from("training_topic_definitions").select("id, topic_name, category, deadline_days, renewal_months, requires_certification"),
+            supabase.from("person_service_authorizations").select("id, person_id, service_code_id, authorized_units, used_units, end_date, service_code_definitions(code)"),
+            supabase.from("service_notes").select("id, person_id, service_code_id, service_date, status").order("service_date", { ascending: false }).limit(500),
+            supabase.from("evv_sessions").select("id, staff_id, person_id, clock_in_at, clock_out_at, clock_in_lat, clock_in_lng, geofence_valid").order("clock_in_at", { ascending: false }).limit(200),
+          ]);
+
+          const staff = staffRes.data || [];
+          const clients = clientRes.data || [];
+          const trainings = trainingRes.data || [];
+          const topics = topicRes.data || [];
+          const auths = authRes.data || [];
+          const notes = noteRes.data || [];
+          const evvSessions = evvRes.data || [];
+          const now = new Date();
+          const flaggedIssues = [];
+
+          // ── TRAINING COMPLIANCE ──
+          const requiredTopics = topics.filter(t => t.deadline_days || t.renewal_months);
+          let trainingComplete = 0, trainingTotal = 0;
+          staff.forEach(s => {
+            const hireDate = s.hire_date ? new Date(s.hire_date + "T00:00:00") : null;
+            requiredTopics.forEach(topic => {
+              trainingTotal++;
+              const completion = trainings.find(t => t.staff_id === s.id && t.training_topic_id === topic.id);
+              if (completion) {
+                if (completion.expires_at && new Date(completion.expires_at) < now) {
+                  flaggedIssues.push({ severity: "high", category: "Training", message: `${s.first_name} ${s.last_name} — "${topic.topic_name}" expired ${new Date(completion.expires_at).toLocaleDateString()}` });
+                } else {
+                  trainingComplete++;
+                }
+              } else {
+                // Check if past deadline
+                if (hireDate && topic.deadline_days) {
+                  const deadline = new Date(hireDate);
+                  deadline.setDate(deadline.getDate() + topic.deadline_days);
+                  if (now > deadline) {
+                    flaggedIssues.push({ severity: "high", category: "Training", message: `${s.first_name} ${s.last_name} — "${topic.topic_name}" overdue (due ${deadline.toLocaleDateString()})` });
+                  } else {
+                    const daysLeft = Math.ceil((deadline - now) / (1000*60*60*24));
+                    if (daysLeft <= 14) {
+                      flaggedIssues.push({ severity: "medium", category: "Training", message: `${s.first_name} ${s.last_name} — "${topic.topic_name}" due in ${daysLeft} days` });
+                    }
+                  }
+                }
+              }
+            });
+          });
+          const trainingScore = trainingTotal > 0 ? Math.round((trainingComplete / trainingTotal) * 100) : 100;
+
+          // ── AUTHORIZATION STATUS ──
+          let authActive = 0, authTotal = auths.length;
+          auths.forEach(a => {
+            const expired = a.end_date && new Date(a.end_date + "T00:00:00") < now;
+            const exhausted = a.used_units >= a.authorized_units;
+            if (expired) {
+              flaggedIssues.push({ severity: "high", category: "Authorizations", message: `${a.service_code_definitions?.code || "?"} auth expired for client (exp ${new Date(a.end_date + "T00:00:00").toLocaleDateString()})` });
+            } else if (exhausted) {
+              flaggedIssues.push({ severity: "medium", category: "Authorizations", message: `${a.service_code_definitions?.code || "?"} auth — all ${a.authorized_units} units used` });
+            } else {
+              authActive++;
+              // Warn if >80% used
+              if (a.authorized_units && a.used_units / a.authorized_units > 0.8) {
+                flaggedIssues.push({ severity: "low", category: "Authorizations", message: `${a.service_code_definitions?.code || "?"} auth — ${Math.round((a.used_units/a.authorized_units)*100)}% units used` });
+              }
+            }
+          });
+          const authScore = authTotal > 0 ? Math.round((authActive / authTotal) * 100) : 100;
+
+          // ── SERVICE NOTE COVERAGE ──
+          // Check: do active clients have notes in the last 7 days?
+          const sevenDaysAgo = new Date(now); sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+          let docCovered = 0;
+          clients.forEach(c => {
+            const recentNotes = notes.filter(n => n.person_id === c.id && new Date(n.service_date + "T00:00:00") >= sevenDaysAgo);
+            if (recentNotes.length > 0) {
+              docCovered++;
+            } else {
+              flaggedIssues.push({ severity: "medium", category: "Documentation", message: `${c.first_name} ${c.last_name} — no service notes in the last 7 days` });
+            }
+          });
+          const docScore = clients.length > 0 ? Math.round((docCovered / clients.length) * 100) : 100;
+
+          // ── EVV COMPLIANCE ──
+          const recentEVV = evvSessions.filter(e => new Date(e.clock_in_at) >= sevenDaysAgo);
+          let evvComplete = 0;
+          recentEVV.forEach(e => {
+            if (e.clock_out_at && e.clock_in_lat && e.clock_in_lng) {
+              evvComplete++;
+            } else {
+              if (!e.clock_out_at) flaggedIssues.push({ severity: "high", category: "EVV", message: `Open EVV session (no clock-out) since ${new Date(e.clock_in_at).toLocaleDateString()}` });
+              if (!e.clock_in_lat) flaggedIssues.push({ severity: "medium", category: "EVV", message: `Missing GPS on EVV session ${new Date(e.clock_in_at).toLocaleDateString()}` });
+            }
+          });
+          const evvScore = recentEVV.length > 0 ? Math.round((evvComplete / recentEVV.length) * 100) : 100;
+
+          // ── OVERALL SCORE ──
+          const overall = Math.round((trainingScore * 0.3 + authScore * 0.2 + docScore * 0.25 + evvScore * 0.25));
+
+          // Sort issues by severity
+          const severityOrder = { high: 0, medium: 1, low: 2 };
+          flaggedIssues.sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity]);
+
+          setScores({ overall, trainingScore, authScore, docScore, evvScore, staffCount: staff.length, clientCount: clients.length, trainingTotal, trainingComplete });
+          setIssues(flaggedIssues);
+        } catch (e) { console.error("Audit error:", e); }
+        setLoading(false);
+      };
+
+      const ScoreRing = ({ score, size = 120, label }) => {
+        const radius = (size - 12) / 2;
+        const circumference = 2 * Math.PI * radius;
+        const offset = circumference - (score / 100) * circumference;
+        const color = score >= 80 ? CB.green : score >= 60 ? CB.amber : CB.red;
+        return (
+          <div style={{ textAlign: "center" }}>
+            <svg width={size} height={size} style={{ transform: "rotate(-90deg)" }}>
+              <circle cx={size/2} cy={size/2} r={radius} fill="none" stroke={CB.border} strokeWidth="8" />
+              <circle cx={size/2} cy={size/2} r={radius} fill="none" stroke={color} strokeWidth="8" strokeDasharray={circumference} strokeDashoffset={offset} strokeLinecap="round" style={{ transition: "stroke-dashoffset 1s ease" }} />
+            </svg>
+            <div style={{ marginTop: -size/2 - 14, marginBottom: size/2 - 30 }}>
+              <div style={{ fontSize: size > 100 ? 32 : 22, fontWeight: 800, color: CB.navy }}>{score}%</div>
+            </div>
+            {label && <div style={{ fontSize: 13, fontWeight: 600, color: CB.textMid, marginTop: 8 }}>{label}</div>}
+          </div>
+        );
+      };
+
+      const severityStyles = {
+        high: { bg: "rgba(229,57,53,0.06)", border: `${CB.red}20`, color: CB.red, label: "CRITICAL" },
+        medium: { bg: "rgba(245,127,23,0.06)", border: `${CB.amber}20`, color: CB.amber, label: "WARNING" },
+        low: { bg: "rgba(26,115,232,0.06)", border: `${CB.blue}20`, color: CB.blue, label: "INFO" },
+      };
+
       return (
         <div>
-          <PageHeader title={title} subtitle={subtitle} />
+          <PageHeader title="Compliance Dashboard" subtitle="Real-time audit readiness — DHHS91172 SOW compliance scoring"
+            action={<PrimaryButton onClick={runAudit} color={CB.navy}>{icons.refresh({ size: 16 })} Re-run Audit</PrimaryButton>}
+          />
+
+          {loading ? (
+            <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><Spinner size={28} /></div>
+          ) : scores && (
+            <>
+              {/* Score Cards */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr", gap: 18, marginBottom: 28 }}>
+                <div style={{
+                  background: CB.white, borderRadius: 16, padding: "28px 20px",
+                  border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
+                  display: "flex", flexDirection: "column", alignItems: "center", animation: "fadeIn 0.5s ease",
+                }}>
+                  <ScoreRing score={scores.overall} size={130} />
+                  <div style={{ fontSize: 15, fontWeight: 800, color: CB.navy, marginTop: 12 }}>Overall</div>
+                  <div style={{ fontSize: 12, color: CB.textLight, marginTop: 2 }}>Audit Readiness</div>
+                </div>
+                {[
+                  { score: scores.trainingScore, label: "Training", sub: `${scores.trainingComplete}/${scores.trainingTotal} complete`, icon: icons.book },
+                  { score: scores.authScore, label: "Authorizations", sub: "Active & valid", icon: icons.fileText },
+                  { score: scores.docScore, label: "Documentation", sub: "Notes last 7 days", icon: icons.fileText },
+                  { score: scores.evvScore, label: "EVV", sub: "GPS + clock-out", icon: icons.mapPin },
+                ].map((item, i) => (
+                  <div key={i} style={{
+                    background: CB.white, borderRadius: 16, padding: "24px 16px",
+                    border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
+                    display: "flex", flexDirection: "column", alignItems: "center",
+                    animation: `fadeIn 0.5s ease ${0.05 * (i + 1)}s both`,
+                  }}>
+                    <ScoreRing score={item.score} size={90} />
+                    <div style={{ fontSize: 14, fontWeight: 700, color: CB.navy, marginTop: 8 }}>{item.label}</div>
+                    <div style={{ fontSize: 11, color: CB.textLight, marginTop: 2 }}>{item.sub}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Issues List */}
+              <div style={{
+                background: CB.white, borderRadius: 16, padding: 24,
+                border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
+                animation: "fadeIn 0.5s ease 0.3s both",
+              }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                  <h3 style={{ fontSize: 16, fontWeight: 700, color: CB.navy }}>
+                    {issues.length > 0 ? `${issues.length} Issue${issues.length > 1 ? "s" : ""} Found` : "All Clear"}
+                  </h3>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    {["high", "medium", "low"].map(sev => {
+                      const count = issues.filter(i => i.severity === sev).length;
+                      if (!count) return null;
+                      const s = severityStyles[sev];
+                      return <Badge key={sev} text={`${count} ${s.label}`} color={s.color} />;
+                    })}
+                  </div>
+                </div>
+                {issues.length === 0 ? (
+                  <div style={{ textAlign: "center", padding: "32px 0", color: CB.green }}>
+                    {icons.checkCircle({ size: 32, color: CB.green })}
+                    <p style={{ marginTop: 12, fontSize: 15, fontWeight: 600 }}>All compliance checks passed</p>
+                  </div>
+                ) : (
+                  <div style={{ maxHeight: 400, overflowY: "auto" }}>
+                    {issues.map((issue, i) => {
+                      const s = severityStyles[issue.severity];
+                      return (
+                        <div key={i} style={{
+                          display: "flex", alignItems: "center", gap: 12, padding: "10px 14px",
+                          borderRadius: 10, background: s.bg, border: `1px solid ${s.border}`,
+                          marginBottom: 6, animation: `fadeIn 0.3s ease ${i * 0.02}s both`,
+                        }}>
+                          <Badge text={s.label} color={s.color} />
+                          <Badge text={issue.category} color={CB.navy} />
+                          <span style={{ fontSize: 13, color: CB.text, flex: 1 }}>{issue.message}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // BILLING STUB — placeholder for Tier 3
+    // ═══════════════════════════════════════════════════════════════
+    function BillingStub() {
+      return (
+        <div>
+          <PageHeader title="Billing & Claims" subtitle="Auto-calculated units from service notes with DHHS91172 billing rules" />
           <div style={{
-            background: CB.white, borderRadius: 20, padding: "80px 40px", textAlign: "center",
+            background: CB.white, borderRadius: 20, padding: "60px 40px", textAlign: "center",
             border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, animation: "fadeIn 0.5s ease",
           }}>
             <div style={{
@@ -2021,11 +2323,11 @@
               background: `linear-gradient(135deg, ${CB.teal}12, ${CB.tealLight}12)`,
               display: "inline-flex", alignItems: "center", justifyContent: "center", marginBottom: 20,
             }}>
-              {icon ? icon({ size: 28, color: CB.teal }) : icons.zap({ size: 28, color: CB.teal })}
+              {icons.barChart({ size: 28, color: CB.teal })}
             </div>
-            <h3 style={{ fontSize: 20, fontWeight: 700, color: CB.navy, marginBottom: 8 }}>Coming Soon</h3>
-            <p style={{ fontSize: 15, color: CB.textMid, maxWidth: 400, margin: "0 auto", lineHeight: 1.7 }}>
-              This module is under active development. It will be available in the next sprint.
+            <h3 style={{ fontSize: 20, fontWeight: 700, color: CB.navy, marginBottom: 8 }}>Coming in Next Sprint</h3>
+            <p style={{ fontSize: 15, color: CB.textMid, maxWidth: 480, margin: "0 auto", lineHeight: 1.7 }}>
+              Billing module will auto-calculate claim amounts from service notes, apply DHHS91172 rate table rules (daily, quarter-hour, tiered, worksheet), and generate PRISM-ready export files.
             </p>
           </div>
         </div>
@@ -2046,8 +2348,8 @@
           case "training": return <TrainingPage />;
           case "notes": return <ServiceNotesPage />;
           case "evv": return <EVVPage />;
-          case "compliance": return <ComingSoon title="Compliance Dashboard" subtitle="Real-time audit readiness score with 38 SOW deadline tracking" icon={icons.shield} />;
-          case "billing": return <ComingSoon title="Billing & Claims" subtitle="Auto-calculated units from service notes with Article 2 billing rules" icon={icons.barChart} />;
+          case "compliance": return <CompliancePage />;
+          case "billing": return <BillingStub />;
           default: return <DashboardPage />;
         }
       };
