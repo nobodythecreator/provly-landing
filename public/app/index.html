@@ -916,10 +916,10 @@
       const isWorksheet = newAuthRule?.worksheet;
 
       const addAuth = async () => {
-        console.log("[Provly] ADD AUTH CLICKED — service_code_id:", newAuth.service_code_id, "units:", newAuth.authorized_units, "editing:", !!editing, "editing.id:", editing?.id);
+        console.log("[Provly] ADD AUTH CLICKED — service_code_id:", newAuth.service_code_id, "units:", newAuth.authorized_units, "editing:", editing?.id, editing?.first_name);
         if (!newAuth.service_code_id || !newAuth.authorized_units) return addToast("Select a service code and enter units", "error");
         if (!editing) return addToast("Save the client first, then add authorizations", "warning");
-        console.log("[Provly] addAuth — orgId:", orgId, "person_id:", editing.id, "service_code_id:", newAuth.service_code_id);
+
         const payload = {
           org_id: orgId,
           person_id: editing.id,
@@ -929,27 +929,27 @@
           start_date: newAuth.start_date || new Date().toISOString().split("T")[0],
           end_date: newAuth.end_date || null,
         };
-        // Try to include rate_per_unit (requires DB column)
-        if (newAuth.rate_per_unit) payload.rate_per_unit = parseFloat(newAuth.rate_per_unit);
-        const { error, data: insertData } = await supabase.from("person_service_authorizations").insert(payload).select();
-        console.log("[Provly] addAuth insert result — error:", error, "data:", insertData);
+        console.log("[Provly] addAuth payload:", JSON.stringify(payload));
+
+        const { error, data: insertData, status, statusText } = await supabase.from("person_service_authorizations").insert(payload).select();
+        console.log("[Provly] addAuth result — status:", status, "statusText:", statusText, "error:", error, "data:", insertData);
+
         if (error) {
-          // If rate_per_unit column doesn't exist, retry without it
-          if (error.message?.includes("rate_per_unit")) {
-            delete payload.rate_per_unit;
-            const retry = await supabase.from("person_service_authorizations").insert(payload).select();
-            console.log("[Provly] addAuth retry result — error:", retry.error, "data:", retry.data);
-            if (retry.error) return addToast(retry.error.message, "error");
-            addToast("Authorization added (rate column needs DB setup — see console)", "warning");
-          } else {
-            return addToast(error.message, "error");
-          }
+          console.error("[Provly] addAuth FAILED:", error.message, error.details, error.hint);
+          return addToast("Failed: " + error.message, "error");
+        }
+
+        if (!insertData || insertData.length === 0) {
+          console.error("[Provly] addAuth — insert returned empty! Likely RLS blocking the write.");
+          addToast("Insert blocked — check RLS policies on person_service_authorizations", "error");
         } else {
+          console.log("[Provly] addAuth SUCCESS — inserted row:", insertData[0].id);
           addToast("Authorization added", "success");
         }
-        // Reload auths and log what comes back
+
+        // Reload auths
         const { data: authData, error: authError } = await supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code)").eq("person_id", editing.id);
-        console.log("[Provly] auth reload for person", editing.id, "— error:", authError, "data:", authData);
+        console.log("[Provly] auth reload —", authData?.length, "auths found, error:", authError);
         setAuths(authData || []);
         setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "" });
       };
