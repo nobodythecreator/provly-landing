@@ -887,7 +887,7 @@
         first_name: "", last_name: "", date_of_birth: "", medicaid_number: "", is_active: true,
       });
       const [auths, setAuths] = useState([]);
-      const [newAuth, setNewAuth] = useState({ service_code_id: "", authorized_units: "", start_date: "", end_date: "", rate_per_unit: "" });
+      const [newAuth, setNewAuth] = useState({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "" });
 
       useEffect(() => {
         supabase.from("service_code_definitions").select("id, code, name").order("code").then(({ data }) => setServiceCodes(data || []));
@@ -905,7 +905,7 @@
           setForm({ first_name: "", last_name: "", date_of_birth: "", medicaid_number: "", is_active: true });
           setAuths([]);
         }
-        setNewAuth({ service_code_id: "", authorized_units: "", start_date: "", end_date: "", rate_per_unit: "" });
+        setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "" });
       }, [editing, open]);
 
       const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
@@ -916,6 +916,7 @@
       const isWorksheet = newAuthRule?.worksheet;
 
       const addAuth = async () => {
+        console.log("[Provly] ADD AUTH CLICKED — service_code_id:", newAuth.service_code_id, "units:", newAuth.authorized_units, "editing:", !!editing, "editing.id:", editing?.id);
         if (!newAuth.service_code_id || !newAuth.authorized_units) return addToast("Select a service code and enter units", "error");
         if (!editing) return addToast("Save the client first, then add authorizations", "warning");
         console.log("[Provly] addAuth — orgId:", orgId, "person_id:", editing.id, "service_code_id:", newAuth.service_code_id);
@@ -925,7 +926,7 @@
           service_code_id: newAuth.service_code_id,
           authorized_units: parseInt(newAuth.authorized_units),
           used_units: 0,
-          start_date: newAuth.start_date || null,
+          start_date: newAuth.start_date || new Date().toISOString().split("T")[0],
           end_date: newAuth.end_date || null,
         };
         // Try to include rate_per_unit (requires DB column)
@@ -950,7 +951,7 @@
         const { data: authData, error: authError } = await supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code)").eq("person_id", editing.id);
         console.log("[Provly] auth reload for person", editing.id, "— error:", authError, "data:", authData);
         setAuths(authData || []);
-        setNewAuth({ service_code_id: "", authorized_units: "", start_date: "", end_date: "", rate_per_unit: "" });
+        setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "" });
       };
 
       const removeAuth = async (authId) => {
@@ -1075,6 +1076,10 @@
                     placeholder={newAuthRule ? (isWorksheet ? `≤${newAuthRule.max_rate || "?"}` : `$${newAuthRule.rate || "?"}`) : "$0.00"} />
                 </div>
                 )}
+                <div style={{ flex: "0 0 130px" }}>
+                  <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>Start Date</label>
+                  <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} type="date" value={newAuth.start_date} onChange={e => setNewAuth(p => ({ ...p, start_date: e.target.value }))} />
+                </div>
                 <div style={{ flex: "0 0 130px" }}>
                   <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>End Date</label>
                   <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} type="date" value={newAuth.end_date} onChange={e => setNewAuth(p => ({ ...p, end_date: e.target.value }))} />
