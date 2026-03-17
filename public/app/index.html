@@ -1475,12 +1475,12 @@
           supabase.from("evv_sessions").select("id, clock_in_at, clock_out_at, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, geofence_valid, exceptions, staff(first_name, last_name), persons(first_name, last_name), service_code_definitions(code)").order("clock_in_at", { ascending: false }).limit(50),
           supabase.from("staff").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
           supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
-          supabase.from("service_code_definitions").select("id, code, name, requires_evv").order("code"),
+          supabase.from("service_code_definitions").select("id, code, name, evv_required").order("code"),
         ]);
         if (!sessRes.error) setSessions(sessRes.data || []);
         setStaffList(staffRes.data || []);
         setClients(clientRes.data || []);
-        setServiceCodes((scRes.data || []).filter(sc => sc.requires_evv));
+        setServiceCodes((scRes.data || []).filter(sc => sc.evv_required));
         setLoading(false);
       };
 
