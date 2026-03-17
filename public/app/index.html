@@ -945,8 +945,15 @@
           addToast("Authorization added", "success");
         }
         // Reload auths
-        const { data } = await supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code)").eq("person_id", editing.id);
-        setAuths(data || []);
+        let authData;
+        const authRes = await supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code)").eq("person_id", editing.id);
+        if (authRes.error && authRes.error.message?.includes("rate_per_unit")) {
+          const fallback = await supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code)").eq("person_id", editing.id);
+          authData = fallback.data || [];
+        } else {
+          authData = authRes.data || [];
+        }
+        setAuths(authData);
         setNewAuth({ service_code_id: "", authorized_units: "", start_date: "", end_date: "", rate_per_unit: "" });
       };
 
@@ -1082,13 +1089,13 @@
                   cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap", marginBottom: 16,
                 }}>{icons.plus({ size: 14 })} Add</button>
               </div>
-              {isWorksheet && (
+              {perms.viewRates && isWorksheet && (
                 <div style={{ fontSize: 12, color: CB.amber, fontWeight: 500, marginTop: -8, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
                   {icons.alertTriangle({ size: 13, color: CB.amber })}
                   Worksheet service — rate is person-specific (max ${newAuthRule?.max_rate?.toFixed(2) || "N/A"}/unit). Enter the rate from the support coordinator's worksheet.
                 </div>
               )}
-              {newAuthRule && !isWorksheet && newAuthRule.rate && (
+              {perms.viewRates && newAuthRule && !isWorksheet && newAuthRule.rate && (
                 <div style={{ fontSize: 12, color: CB.textLight, marginTop: -8, marginBottom: 8 }}>
                   Fixed rate: ${newAuthRule.rate.toFixed(2)} / {newAuthRule.label?.toLowerCase()}
                 </div>
@@ -1121,7 +1128,15 @@
             .order("last_name"),
           supabase.from("service_code_definitions").select("id, code").order("code"),
         ]);
-        if (!clientRes.error) setClients(clientRes.data || []);
+        // Fallback if rate_per_unit column doesn't exist yet
+        if (clientRes.error && clientRes.error.message?.includes("rate_per_unit")) {
+          const fallback = await supabase.from("persons")
+            .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, person_service_authorizations(id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code))")
+            .order("last_name");
+          if (!fallback.error) setClients(fallback.data || []);
+        } else if (!clientRes.error) {
+          setClients(clientRes.data || []);
+        }
         // Build lookup map as fallback for nested join failures
         const lookup = {};
         (scRes.data || []).forEach(sc => { lookup[sc.id] = sc.code; });
@@ -1509,6 +1524,7 @@
     function ServiceNoteForm({ open, onClose, onSaved }) {
       const { addToast } = useToast();
       const { orgId } = useAuth();
+      const perms = usePermissions();
       const [saving, setSaving] = useState(false);
       const [staffList, setStaffList] = useState([]);
       const [clients, setClients] = useState([]);
@@ -1544,10 +1560,19 @@
       const handleClientChange = async (personId) => {
         setForm(prev => ({ ...prev, person_id: personId }));
         if (personId) {
-          const { data } = await supabase.from("person_service_authorizations")
+          let authData;
+          const res = await supabase.from("person_service_authorizations")
             .select("id, service_code_id, authorized_units, used_units, rate_per_unit, service_code_definitions(code)")
             .eq("person_id", personId);
-          setClientAuths(data || []);
+          if (res.error && res.error.message?.includes("rate_per_unit")) {
+            const fallback = await supabase.from("person_service_authorizations")
+              .select("id, service_code_id, authorized_units, used_units, service_code_definitions(code)")
+              .eq("person_id", personId);
+            authData = fallback.data || [];
+          } else {
+            authData = res.data || [];
+          }
+          setClientAuths(authData);
         } else {
           setClientAuths([]);
         }
@@ -1642,7 +1667,7 @@
               <div style={{ marginTop: 6, fontSize: 12, color: CB.teal, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
                 {icons.checkCircle({ size: 13, color: CB.teal })}
                 Auth: {activeAuth.used_units || 0}/{activeAuth.authorized_units} units used
-                {activeAuth.rate_per_unit && <span>@ ${Number(activeAuth.rate_per_unit).toFixed(2)}/unit</span>}
+                {activeAuth.rate_per_unit && perms.viewRates && <span>@ ${Number(activeAuth.rate_per_unit).toFixed(2)}/unit</span>}
               </div>
             )}
           </FormField>
@@ -1663,7 +1688,7 @@
                 {(() => {
                   const rule = BILLING_RULES[selectedCode];
                   const authRate = activeAuth?.rate_per_unit ? Number(activeAuth.rate_per_unit) : null;
-                  const effectiveRate = rule ? (rule.worksheet ? authRate : rule.rate) : null;
+                  const effectiveRate = perms.viewRates && rule ? (rule.worksheet ? authRate : rule.rate) : null;
 
                   if (!rule) {
                     if (form.start_time && form.end_time) {
@@ -1683,7 +1708,7 @@
                         <span style={{ fontWeight: 600, color: CB.navy }}>1 unit</span>
                         {effectiveRate ? (
                           <span style={{ fontSize: 12, color: CB.teal, fontWeight: 600 }}>@ ${effectiveRate.toFixed(2)}</span>
-                        ) : rule.worksheet ? (
+                        ) : (perms.viewRates && rule.worksheet) ? (
                           <span style={{ fontSize: 11, color: CB.amber }}>rate from auth</span>
                         ) : null}
                       </span>
@@ -1702,7 +1727,7 @@
                           <span style={{ background: `${CB.amber}15`, color: CB.amber, padding: "2px 8px", borderRadius: 6, fontSize: 12, fontWeight: 700 }}>Tiered</span>
                           <span>{Math.floor(mins/60)}h {mins%60}m</span>
                           <span style={{ fontWeight: 700, color: CB.navy }}>→ 1 unit</span>
-                          <span style={{ fontSize: 11, color: CB.textLight }}>({Math.ceil(mins/60)}hr tier, max ${tier?.max_rate?.toFixed(2) || "?"})</span>
+                          <span style={{ fontSize: 11, color: CB.textLight }}>({Math.ceil(mins/60)}hr tier{perms.viewRates && tier?.max_rate ? `, max $${tier.max_rate.toFixed(2)}` : ""})</span>
                         </span>
                       );
                     }
@@ -1726,7 +1751,7 @@
                         <span style={{ fontWeight: 700, color: CB.navy }}>→ {units} unit{units !== 1 ? "s" : ""}</span>
                         {effectiveRate ? (
                           <span style={{ fontSize: 12, color: CB.teal, fontWeight: 600 }}>@ ${effectiveRate.toFixed(2)}</span>
-                        ) : rule.worksheet ? (
+                        ) : (perms.viewRates && rule.worksheet) ? (
                           <span style={{ fontSize: 11, color: CB.amber }}>rate from auth</span>
                         ) : null}
                       </span>
