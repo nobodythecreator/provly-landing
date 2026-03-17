@@ -945,15 +945,8 @@
           addToast("Authorization added", "success");
         }
         // Reload auths
-        let authData;
-        const authRes = await supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code)").eq("person_id", editing.id);
-        if (authRes.error && authRes.error.message?.includes("rate_per_unit")) {
-          const fallback = await supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code)").eq("person_id", editing.id);
-          authData = fallback.data || [];
-        } else {
-          authData = authRes.data || [];
-        }
-        setAuths(authData);
+        const { data: authData } = await supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code)").eq("person_id", editing.id);
+        setAuths(authData || []);
         setNewAuth({ service_code_id: "", authorized_units: "", start_date: "", end_date: "", rate_per_unit: "" });
       };
 
@@ -1124,19 +1117,11 @@
         setLoading(true);
         const [clientRes, scRes] = await Promise.all([
           supabase.from("persons")
-            .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, person_service_authorizations(id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code))")
+            .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, person_service_authorizations(id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code))")
             .order("last_name"),
           supabase.from("service_code_definitions").select("id, code").order("code"),
         ]);
-        // Fallback if rate_per_unit column doesn't exist yet
-        if (clientRes.error && clientRes.error.message?.includes("rate_per_unit")) {
-          const fallback = await supabase.from("persons")
-            .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, person_service_authorizations(id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code))")
-            .order("last_name");
-          if (!fallback.error) setClients(fallback.data || []);
-        } else if (!clientRes.error) {
-          setClients(clientRes.data || []);
-        }
+        if (!clientRes.error) setClients(clientRes.data || []);
         // Build lookup map as fallback for nested join failures
         const lookup = {};
         (scRes.data || []).forEach(sc => { lookup[sc.id] = sc.code; });
@@ -1560,19 +1545,10 @@
       const handleClientChange = async (personId) => {
         setForm(prev => ({ ...prev, person_id: personId }));
         if (personId) {
-          let authData;
-          const res = await supabase.from("person_service_authorizations")
-            .select("id, service_code_id, authorized_units, used_units, rate_per_unit, service_code_definitions(code)")
+          const { data } = await supabase.from("person_service_authorizations")
+            .select("id, service_code_id, authorized_units, used_units, service_code_definitions(code)")
             .eq("person_id", personId);
-          if (res.error && res.error.message?.includes("rate_per_unit")) {
-            const fallback = await supabase.from("person_service_authorizations")
-              .select("id, service_code_id, authorized_units, used_units, service_code_definitions(code)")
-              .eq("person_id", personId);
-            authData = fallback.data || [];
-          } else {
-            authData = res.data || [];
-          }
-          setClientAuths(authData);
+          setClientAuths(data || []);
         } else {
           setClientAuths([]);
         }
