@@ -918,6 +918,7 @@
       const addAuth = async () => {
         if (!newAuth.service_code_id || !newAuth.authorized_units) return addToast("Select a service code and enter units", "error");
         if (!editing) return addToast("Save the client first, then add authorizations", "warning");
+        console.log("[Provly] addAuth — orgId:", orgId, "person_id:", editing.id, "service_code_id:", newAuth.service_code_id);
         const payload = {
           org_id: orgId,
           person_id: editing.id,
@@ -929,23 +930,25 @@
         };
         // Try to include rate_per_unit (requires DB column)
         if (newAuth.rate_per_unit) payload.rate_per_unit = parseFloat(newAuth.rate_per_unit);
-        const { error } = await supabase.from("person_service_authorizations").insert(payload);
+        const { error, data: insertData } = await supabase.from("person_service_authorizations").insert(payload).select();
+        console.log("[Provly] addAuth insert result — error:", error, "data:", insertData);
         if (error) {
           // If rate_per_unit column doesn't exist, retry without it
           if (error.message?.includes("rate_per_unit")) {
             delete payload.rate_per_unit;
-            const retry = await supabase.from("person_service_authorizations").insert(payload);
+            const retry = await supabase.from("person_service_authorizations").insert(payload).select();
+            console.log("[Provly] addAuth retry result — error:", retry.error, "data:", retry.data);
             if (retry.error) return addToast(retry.error.message, "error");
             addToast("Authorization added (rate column needs DB setup — see console)", "warning");
-            console.warn("Add rate_per_unit column: ALTER TABLE person_service_authorizations ADD COLUMN rate_per_unit NUMERIC(10,2);");
           } else {
             return addToast(error.message, "error");
           }
         } else {
           addToast("Authorization added", "success");
         }
-        // Reload auths
-        const { data: authData } = await supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code)").eq("person_id", editing.id);
+        // Reload auths and log what comes back
+        const { data: authData, error: authError } = await supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code)").eq("person_id", editing.id);
+        console.log("[Provly] auth reload for person", editing.id, "— error:", authError, "data:", authData);
         setAuths(authData || []);
         setNewAuth({ service_code_id: "", authorized_units: "", start_date: "", end_date: "", rate_per_unit: "" });
       };
@@ -1121,7 +1124,17 @@
             .order("last_name"),
           supabase.from("service_code_definitions").select("id, code").order("code"),
         ]);
-        if (!clientRes.error) setClients(clientRes.data || []);
+        if (clientRes.error) {
+          console.error("Client load error:", clientRes.error);
+        } else {
+          // Debug: log auth counts per client
+          (clientRes.data || []).forEach(c => {
+            const auths = c.person_service_authorizations || [];
+            if (auths.length === 0) console.log(`[Provly] ${c.first_name} ${c.last_name}: 0 auths returned`);
+            else console.log(`[Provly] ${c.first_name} ${c.last_name}: ${auths.length} auths —`, auths.map(a => a.service_code_definitions?.code || a.service_code_id).join(", "));
+          });
+          setClients(clientRes.data || []);
+        }
         // Build lookup map as fallback for nested join failures
         const lookup = {};
         (scRes.data || []).forEach(sc => { lookup[sc.id] = sc.code; });
@@ -1163,7 +1176,7 @@
             action={<PrimaryButton onClick={openAdd}>{icons.plus({ size: 16 })} Add Client</PrimaryButton>}
           />
           <DataTable columns={columns} data={clients} loading={loading} emptyMessage="No clients found" />
-          <ClientForm open={formOpen} onClose={() => setFormOpen(false)} onSaved={loadClients} editing={editing} />
+          <ClientForm open={formOpen} onClose={() => { setFormOpen(false); loadClients(); }} onSaved={loadClients} editing={editing} />
         </div>
       );
     }
