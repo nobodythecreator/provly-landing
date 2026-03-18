@@ -85,8 +85,8 @@
 
     // Nav items each role can see
     const ROLE_NAV = {
-      owner:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "billing", "ai"],
-      admin:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "billing", "ai"],
+      owner:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "billing", "ai", "settings"],
+      admin:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "billing", "ai", "settings"],
       compliance_director:  ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "billing", "ai"],
       residential_director: ["dashboard", "clients", "training", "notes", "evv"],
       day_program_director: ["dashboard", "clients", "training", "notes", "evv"],
@@ -460,6 +460,7 @@
         { key: "compliance", label: "Compliance", icon: icons.shield },
         { key: "billing", label: "Billing", icon: icons.barChart },
         { key: "ai", label: "AI Intelligence", icon: icons.zap },
+        { key: "settings", label: "Org Structure", icon: icons.lock },
       ];
       const visibleNav = allNavItems.filter(item => allowedNav.includes(item.key));
       const displayName = staffProfile ? `${staffProfile.first_name || ""} ${staffProfile.last_name || ""}`.trim() : user?.email?.split("@")[0] || "User";
@@ -819,6 +820,10 @@
               </div>
             </FormField>
           )}
+
+          {/* Documents section */}
+          {editing && <DocumentsSection entityType="staff" entityId={editing.id} orgId={orgId} />}
+
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 8 }}>
             <SecondaryButton onClick={onClose}>Cancel</SecondaryButton>
             <PrimaryButton onClick={handleSave} loading={saving}>{icons.save({ size: 16 })} {editing ? "Update" : "Add Staff"}</PrimaryButton>
@@ -1103,6 +1108,9 @@
             </div>
           )}
 
+          {/* Documents section */}
+          {editing && <DocumentsSection entityType="client" entityId={editing.id} orgId={orgId} />}
+
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 16 }}>
             <SecondaryButton onClick={onClose}>Cancel</SecondaryButton>
             <PrimaryButton onClick={handleSave} loading={saving}>{icons.save({ size: 16 })} {editing ? "Update" : "Add Client"}</PrimaryButton>
@@ -1264,32 +1272,33 @@
     }
 
     function TrainingPage() {
-      const [tab, setTab] = useState("completions");
+      const [tab, setTab] = useState("bystaff");
       const [completions, setCompletions] = useState([]);
       const [topics, setTopics] = useState([]);
+      const [staff, setStaff] = useState([]);
+      const [allTrainings, setAllTrainings] = useState([]);
       const [loading, setLoading] = useState(true);
       const [formOpen, setFormOpen] = useState(false);
+      const [selectedStaff, setSelectedStaff] = useState(null);
 
       useEffect(() => { loadAll(); }, []);
 
       const loadAll = async () => {
         setLoading(true);
-        const [compRes, topicRes] = await Promise.all([
-          supabase.from("staff_trainings").select("id, completed_at, expires_at, certificate_url, staff(first_name, last_name), training_topic_definitions(topic_name, category)").order("completed_at", { ascending: false }).limit(100),
+        const [compRes, topicRes, staffRes] = await Promise.all([
+          supabase.from("staff_trainings").select("id, staff_id, training_topic_id, completed_at, expires_at, certificate_url, staff(first_name, last_name), training_topic_definitions(topic_name, category)").order("completed_at", { ascending: false }).limit(200),
           supabase.from("training_topic_definitions").select("id, topic_name, category, deadline_days, renewal_months, requires_certification").order("category, topic_name"),
+          supabase.from("staff").select("id, first_name, last_name, role, hire_date, is_active").eq("is_active", true).order("last_name"),
         ]);
-        if (!compRes.error) setCompletions(compRes.data || []);
+        if (!compRes.error) { setCompletions(compRes.data || []); setAllTrainings(compRes.data || []); }
         if (!topicRes.error) {
-          // Deduplicate topics by normalized name (DB may have duplicates from multiple seed runs)
           const raw = topicRes.data || [];
           const seen = new Map();
           raw.forEach(t => {
             const key = t.topic_name?.trim().toLowerCase();
             if (!key) return;
-            if (!seen.has(key)) {
-              seen.set(key, t);
-            } else {
-              // Keep the one with more data (has renewal_months, deadline_days, etc.)
+            if (!seen.has(key)) seen.set(key, t);
+            else {
               const existing = seen.get(key);
               const score = (x) => (x.renewal_months ? 1 : 0) + (x.deadline_days ? 1 : 0) + (x.requires_certification ? 1 : 0) + (x.category ? 1 : 0);
               if (score(t) > score(existing)) seen.set(key, t);
@@ -1297,6 +1306,7 @@
           });
           setTopics(Array.from(seen.values()));
         }
+        if (!staffRes.error) setStaff(staffRes.data || []);
         setLoading(false);
       };
 
@@ -1327,6 +1337,39 @@
         { label: "Renewal", render: (r) => r.renewal_months ? `Every ${r.renewal_months} mo` : "One-time" },
       ];
 
+      // Build per-staff training matrix
+      const getStaffTrainingStatus = (staffMember) => {
+        const now = new Date();
+        const hireDate = staffMember.hire_date ? new Date(staffMember.hire_date + "T00:00:00") : null;
+        const requiredTopics = topics.filter(t => t.deadline_days || t.renewal_months);
+        return requiredTopics.map(topic => {
+          const completion = allTrainings.find(t => t.staff_id === staffMember.id && t.training_topic_id === topic.id);
+          let status = "missing";
+          let dueDate = null;
+          if (completion) {
+            if (completion.expires_at && new Date(completion.expires_at) < now) status = "expired";
+            else status = "current";
+          } else if (hireDate && topic.deadline_days) {
+            dueDate = new Date(hireDate);
+            dueDate.setDate(dueDate.getDate() + topic.deadline_days);
+            if (now > dueDate) status = "overdue";
+            else {
+              const daysLeft = Math.ceil((dueDate - now) / (1000*60*60*24));
+              status = daysLeft <= 14 ? "due_soon" : "missing";
+            }
+          }
+          return { topic, completion, status, dueDate };
+        });
+      };
+
+      const statusIcons = {
+        current: { color: CB.green, label: "✓ Current" },
+        missing: { color: CB.textLight, label: "— Missing" },
+        overdue: { color: CB.red, label: "✗ Overdue" },
+        expired: { color: CB.red, label: "✗ Expired" },
+        due_soon: { color: CB.amber, label: "⚠ Due Soon" },
+      };
+
       const TabButton = ({ value, label }) => (
         <button onClick={() => setTab(value)} style={{
           padding: "9px 18px", borderRadius: 8, border: "none", fontSize: 13, fontWeight: 700,
@@ -1338,16 +1381,100 @@
 
       return (
         <div>
-          <PageHeader title="Training Tracker" subtitle="27 SOW-required training topics with automated deadline tracking"
+          <PageHeader title="Training Tracker" subtitle="27 SOW-required training topics — view by staff member, completion log, or topic definitions"
             action={<PrimaryButton onClick={() => setFormOpen(true)}>{icons.plus({ size: 16 })} Log Training</PrimaryButton>}
           />
           <div style={{ display: "flex", gap: 4, marginBottom: 20, background: CB.cream, padding: 4, borderRadius: 10, width: "fit-content" }}>
+            <TabButton value="bystaff" label="By Staff" />
             <TabButton value="completions" label="Completions" />
             <TabButton value="topics" label="Topic Definitions" />
           </div>
-          {tab === "completions" ? (
+
+          {tab === "bystaff" && (
+            <div style={{ animation: "fadeIn 0.3s ease" }}>
+              {loading ? (
+                <div style={{ display: "flex", justifyContent: "center", padding: 48 }}><Spinner size={24} /></div>
+              ) : (
+                <div style={{ display: "grid", gap: 12 }}>
+                  {staff.map((s, si) => {
+                    const matrix = getStaffTrainingStatus(s);
+                    const complete = matrix.filter(m => m.status === "current").length;
+                    const issues = matrix.filter(m => ["overdue", "expired", "due_soon"].includes(m.status)).length;
+                    const isExpanded = selectedStaff === s.id;
+
+                    return (
+                      <div key={s.id} style={{
+                        background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`,
+                        boxShadow: "0 1px 3px rgba(10,30,51,0.04)", overflow: "hidden",
+                        animation: `fadeIn 0.3s ease ${si * 0.03}s both`,
+                      }}>
+                        {/* Staff row header */}
+                        <div onClick={() => setSelectedStaff(isExpanded ? null : s.id)} style={{
+                          display: "flex", alignItems: "center", justifyContent: "space-between",
+                          padding: "14px 20px", cursor: "pointer", transition: "background 0.15s",
+                        }}
+                          onMouseEnter={e => e.currentTarget.style.background = CB.cream}
+                          onMouseLeave={e => e.currentTarget.style.background = CB.white}
+                        >
+                          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                            <div style={{
+                              width: 36, height: 36, borderRadius: 10,
+                              background: issues > 0 ? `${CB.red}12` : `${CB.green}12`,
+                              display: "flex", alignItems: "center", justifyContent: "center",
+                              fontSize: 14, fontWeight: 700, color: issues > 0 ? CB.red : CB.green,
+                            }}>{s.first_name?.[0]}{s.last_name?.[0]}</div>
+                            <div>
+                              <div style={{ fontSize: 14, fontWeight: 700, color: CB.navy }}>{s.first_name} {s.last_name}</div>
+                              <div style={{ fontSize: 12, color: CB.textLight }}>{STAFF_ROLES.find(r => r.value === s.role)?.label || s.role} — hired {s.hire_date ? new Date(s.hire_date + "T00:00:00").toLocaleDateString() : "?"}</div>
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            <span style={{ fontSize: 13, fontWeight: 700, color: issues > 0 ? CB.red : CB.green }}>{complete}/{matrix.length}</span>
+                            {issues > 0 && <Badge text={`${issues} issue${issues > 1 ? "s" : ""}`} color={CB.red} />}
+                            <span style={{ transform: isExpanded ? "rotate(180deg)" : "rotate(0)", transition: "transform 0.2s", display: "flex" }}>
+                              {icons.chevDown({ size: 16, color: CB.textLight })}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Expanded training matrix */}
+                        {isExpanded && (
+                          <div style={{ padding: "0 20px 16px", borderTop: `1px solid ${CB.border}` }}>
+                            <div style={{ display: "grid", gap: 4, marginTop: 12 }}>
+                              {matrix.map((m, i) => {
+                                const si = statusIcons[m.status];
+                                return (
+                                  <div key={i} style={{
+                                    display: "flex", alignItems: "center", justifyContent: "space-between",
+                                    padding: "8px 12px", borderRadius: 8,
+                                    background: m.status === "overdue" || m.status === "expired" ? `${CB.red}06` : m.status === "due_soon" ? `${CB.amber}06` : "transparent",
+                                  }}>
+                                    <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+                                      <Badge text={m.topic.category?.replace(/_/g, " ") || "—"} color={categoryColors[m.topic.category] || CB.textLight} />
+                                      <span style={{ fontSize: 13, color: CB.text }}>{m.topic.topic_name}</span>
+                                    </div>
+                                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                      {m.completion?.completed_at && <span style={{ fontSize: 11, color: CB.textLight }}>{new Date(m.completion.completed_at).toLocaleDateString()}</span>}
+                                      <span style={{ fontSize: 12, fontWeight: 700, color: si.color }}>{si.label}</span>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {tab === "completions" && (
             <DataTable columns={compColumns} data={completions} loading={loading} emptyMessage="No training completions logged yet" />
-          ) : (
+          )}
+          {tab === "topics" && (
             <DataTable columns={topicColumns} data={topics} loading={loading} emptyMessage="No training topics found" />
           )}
           <TrainingLogForm open={formOpen} onClose={() => setFormOpen(false)} onSaved={loadAll} />
@@ -1427,7 +1554,50 @@
       CMP:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 6.85 },
     };
 
-    // Get the effective rate for a service code — either fixed or from client auth
+    // ═══════════════════════════════════════════════════════════════
+    // DOCUMENT TYPE TAXONOMY — staff and client document requirements
+    // ═══════════════════════════════════════════════════════════════
+    const STAFF_DOC_TYPES = [
+      { value: "i9", label: "I-9 Employment Eligibility", required: true, expires: false },
+      { value: "drivers_license", label: "Driver's License", required: true, expires: true },
+      { value: "background_check", label: "Background Check Clearance", required: true, expires: true },
+      { value: "cpr_cert", label: "CPR/First Aid Certification", required: true, expires: true },
+      { value: "tb_test", label: "TB Test Results", required: true, expires: true },
+      { value: "ssn_card", label: "Social Security Card", required: true, expires: false },
+      { value: "education_transcript", label: "Education Transcript", required: false, expires: false },
+      { value: "employment_agreement", label: "Signed Employment Agreement", required: true, expires: false },
+      { value: "confidentiality_agreement", label: "Confidentiality Agreement", required: true, expires: false },
+      { value: "abuse_neglect_ack", label: "Abuse/Neglect Policy Acknowledgment", required: true, expires: false },
+      { value: "vehicle_insurance", label: "Vehicle Insurance (if transporting)", required: false, expires: true },
+      { value: "training_cert", label: "Training Certificate", required: false, expires: true },
+      { value: "other", label: "Other Document", required: false, expires: false },
+    ];
+
+    const CLIENT_DOC_TYPES = [
+      { value: "birth_certificate", label: "Birth Certificate", required: true, expires: false },
+      { value: "ssn_card", label: "Social Security Card", required: true, expires: false },
+      { value: "medicaid_card", label: "Medicaid Card", required: true, expires: true },
+      { value: "photo_id", label: "Photo ID", required: false, expires: true },
+      { value: "isp", label: "Individual Support Plan (ISP)", required: true, expires: true },
+      { value: "guardianship", label: "Guardianship/Conservatorship Papers", required: false, expires: false },
+      { value: "physician_orders", label: "Physician Orders", required: true, expires: true },
+      { value: "medication_list", label: "Medication List", required: true, expires: true },
+      { value: "emergency_contacts", label: "Emergency Contact Sheet", required: true, expires: false },
+      { value: "behavioral_plan", label: "Behavioral Support Plan", required: false, expires: true },
+      { value: "intake_assessment", label: "Intake Assessment", required: true, expires: false },
+      { value: "consent_forms", label: "Signed Consent Forms", required: true, expires: false },
+      { value: "rights_ack", label: "Rights Acknowledgment", required: true, expires: false },
+      { value: "other", label: "Other Document", required: false, expires: false },
+    ];
+
+    const ORG_UNIT_TYPES = [
+      { value: "admin", label: "Administration" },
+      { value: "region", label: "Region" },
+      { value: "program", label: "Program" },
+      { value: "site", label: "Site / Facility" },
+      { value: "placement", label: "Individual Placement" },
+      { value: "group", label: "Group" },
+    ]; — either fixed or from client auth
     function getEffectiveRate(serviceCode, authRate) {
       const rule = BILLING_RULES[serviceCode];
       if (!rule) return null;
@@ -1841,6 +2011,12 @@
       const [notes, setNotes] = useState([]);
       const [loading, setLoading] = useState(true);
       const [formOpen, setFormOpen] = useState(false);
+      const [viewing, setViewing] = useState(null);
+      const [editing, setEditing] = useState(false);
+      const [editForm, setEditForm] = useState({});
+      const [saving, setSaving] = useState(false);
+      const { addToast } = useToast();
+      const perms = usePermissions();
 
       useEffect(() => { loadNotes(); }, []);
 
@@ -1854,7 +2030,53 @@
         setLoading(false);
       };
 
+      const openDetail = (note) => {
+        setViewing(note);
+        setEditing(false);
+        setEditForm({
+          summary_note: note.summary_note || "",
+          status: note.status || "draft",
+          start_time: note.start_time?.slice(0, 5) || "",
+          end_time: note.end_time?.slice(0, 5) || "",
+        });
+      };
+
+      const saveEdit = async () => {
+        setSaving(true);
+        let duration_minutes = null;
+        if (editForm.start_time && editForm.end_time) {
+          const [sh, sm] = editForm.start_time.split(":").map(Number);
+          const [eh, em] = editForm.end_time.split(":").map(Number);
+          duration_minutes = (eh * 60 + em) - (sh * 60 + sm);
+          if (duration_minutes < 0) duration_minutes += 1440;
+        }
+        const code = viewing.service_code_definitions?.code;
+        const { error } = await supabase.from("service_notes").update({
+          summary_note: editForm.summary_note,
+          status: editForm.status,
+          start_time: editForm.start_time || null,
+          end_time: editForm.end_time || null,
+          duration_minutes,
+          billable_units: calculateBillableUnits(code, duration_minutes),
+        }).eq("id", viewing.id);
+        setSaving(false);
+        if (error) return addToast(error.message, "error");
+        addToast("Service note updated", "success");
+        setViewing(null);
+        loadNotes();
+      };
+
+      const updateStatus = async (noteId, newStatus) => {
+        const { error } = await supabase.from("service_notes").update({ status: newStatus }).eq("id", noteId);
+        if (error) return addToast(error.message, "error");
+        addToast(`Note marked as ${newStatus}`, "success");
+        setViewing(prev => prev ? { ...prev, status: newStatus } : null);
+        setEditForm(prev => ({ ...prev, status: newStatus }));
+        loadNotes();
+      };
+
       const statusColors = { draft: CB.amber, submitted: CB.blue, approved: CB.green, rejected: CB.red };
+      const statusFlow = { draft: "submitted", submitted: "approved" };
 
       const columns = [
         { label: "Date", bold: true, render: (r) => r.service_date ? new Date(r.service_date + "T00:00:00").toLocaleDateString() : "—" },
@@ -1891,15 +2113,129 @@
           );
         }},
         { label: "Status", render: (r) => <Badge text={r.status || "draft"} color={statusColors[r.status] || CB.textLight} /> },
+        { label: "", render: (r) => (
+          <button onClick={(e) => { e.stopPropagation(); openDetail(r); }} style={{
+            display: "flex", alignItems: "center", gap: 6, padding: "6px 12px",
+            borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
+            color: CB.textMid, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+          }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = CB.teal; e.currentTarget.style.color = CB.teal; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = CB.border; e.currentTarget.style.color = CB.textMid; }}
+          >{icons.eye({ size: 13 })} View</button>
+        )},
       ];
 
       return (
         <div>
-          <PageHeader title="Service Notes" subtitle="Dynamic documentation forms per service code — RHS, DSI, MTP auto-load different fields"
+          <PageHeader title="Service Notes" subtitle="Dynamic documentation forms per service code — click any note to view or edit"
             action={<PrimaryButton onClick={() => setFormOpen(true)}>{icons.plus({ size: 16 })} New Service Note</PrimaryButton>}
           />
-          <DataTable columns={columns} data={notes} loading={loading} emptyMessage="No service notes yet — create your first one" />
+          <DataTable columns={columns} data={notes} loading={loading} emptyMessage="No service notes yet — create your first one" onRowClick={openDetail} />
           <ServiceNoteForm open={formOpen} onClose={() => setFormOpen(false)} onSaved={loadNotes} />
+
+          {/* Note Detail / Edit Modal */}
+          <Modal open={!!viewing} onClose={() => setViewing(null)} title={editing ? "Edit Service Note" : "Service Note Detail"} width={660}
+            subtitle={viewing ? `${viewing.persons?.first_name || ""} ${viewing.persons?.last_name || ""} — ${viewing.service_date || ""}` : ""}>
+            {viewing && (
+              <div>
+                {/* Status bar with actions */}
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20, padding: "12px 16px", borderRadius: 12, background: CB.cream, border: `1px solid ${CB.border}` }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <Badge text={viewing.service_code_definitions?.code || "?"} color={CB.blue} />
+                    <Badge text={editForm.status || viewing.status || "draft"} color={statusColors[editForm.status || viewing.status] || CB.textLight} />
+                    <span style={{ fontSize: 13, color: CB.textMid }}>by {viewing.staff?.first_name} {viewing.staff?.last_name}</span>
+                  </div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    {!editing && statusFlow[viewing.status] && perms.viewCompliance && (
+                      <button onClick={() => updateStatus(viewing.id, statusFlow[viewing.status])} style={{
+                        padding: "6px 12px", borderRadius: 8, border: "none", fontSize: 12, fontWeight: 700,
+                        background: CB.green, color: CB.white, cursor: "pointer", fontFamily: "inherit",
+                      }}>{icons.checkCircle({ size: 13, color: CB.white })} {viewing.status === "draft" ? "Submit" : "Approve"}</button>
+                    )}
+                    {!editing && viewing.status !== "approved" && (
+                      <button onClick={() => { setEditing(true); }} style={{
+                        padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, fontSize: 12, fontWeight: 700,
+                        background: CB.white, color: CB.textMid, cursor: "pointer", fontFamily: "inherit",
+                      }}>{icons.edit({ size: 13 })} Edit</button>
+                    )}
+                    {!editing && viewing.status === "submitted" && perms.viewCompliance && (
+                      <button onClick={() => updateStatus(viewing.id, "rejected")} style={{
+                        padding: "6px 12px", borderRadius: 8, border: "none", fontSize: 12, fontWeight: 700,
+                        background: `${CB.red}12`, color: CB.red, cursor: "pointer", fontFamily: "inherit",
+                      }}>{icons.x({ size: 13, color: CB.red })} Reject</button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Time and billing info */}
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 20 }}>
+                  {editing ? (
+                    <>
+                      <FormField label="Start Time" half style={{ marginBottom: 0 }}>
+                        <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} type="time" value={editForm.start_time} onChange={e => setEditForm(p => ({ ...p, start_time: e.target.value }))} />
+                      </FormField>
+                      <FormField label="End Time" half style={{ marginBottom: 0 }}>
+                        <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} type="time" value={editForm.end_time} onChange={e => setEditForm(p => ({ ...p, end_time: e.target.value }))} />
+                      </FormField>
+                      <FormField label="Status" half style={{ marginBottom: 0 }}>
+                        <select style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} value={editForm.status} onChange={e => setEditForm(p => ({ ...p, status: e.target.value }))}>
+                          {["draft", "submitted", "approved", "rejected"].map(s => <option key={s} value={s}>{s}</option>)}
+                        </select>
+                      </FormField>
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ padding: 12, background: CB.cream, borderRadius: 10, border: `1px solid ${CB.border}` }}>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 4 }}>Time</div>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: CB.navy }}>
+                          {viewing.start_time && viewing.end_time ? `${viewing.start_time.slice(0,5)} – ${viewing.end_time.slice(0,5)}` : "Not recorded"}
+                        </div>
+                      </div>
+                      <div style={{ padding: 12, background: CB.cream, borderRadius: 10, border: `1px solid ${CB.border}` }}>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 4 }}>Duration</div>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: CB.navy }}>
+                          {viewing.duration_minutes ? `${Math.floor(viewing.duration_minutes/60)}h ${viewing.duration_minutes%60}m` : "—"}
+                        </div>
+                      </div>
+                      <div style={{ padding: 12, background: CB.cream, borderRadius: 10, border: `1px solid ${CB.border}` }}>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 4 }}>Billable</div>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: CB.navy }}>
+                          {getBillingLabel(viewing.service_code_definitions?.code, viewing.duration_minutes)}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                {/* Note content */}
+                <div style={{ marginBottom: 20 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 8 }}>Service Note</div>
+                  {editing ? (
+                    <textarea style={{ ...fieldStyle, minHeight: 200, resize: "vertical", lineHeight: 1.7 }}
+                      value={editForm.summary_note}
+                      onChange={e => setEditForm(p => ({ ...p, summary_note: e.target.value }))}
+                    />
+                  ) : (
+                    <div style={{
+                      padding: "16px 20px", borderRadius: 12, background: CB.cream, border: `1px solid ${CB.border}`,
+                      fontSize: 14, color: CB.text, lineHeight: 1.8, whiteSpace: "pre-wrap",
+                      minHeight: 120, maxHeight: 400, overflowY: "auto",
+                    }}>
+                      {viewing.summary_note || "No notes recorded"}
+                    </div>
+                  )}
+                </div>
+
+                {/* Edit actions */}
+                {editing && (
+                  <div style={{ display: "flex", justifyContent: "flex-end", gap: 12 }}>
+                    <SecondaryButton onClick={() => setEditing(false)}>Cancel</SecondaryButton>
+                    <PrimaryButton onClick={saveEdit} loading={saving}>{icons.save({ size: 16 })} Save Changes</PrimaryButton>
+                  </div>
+                )}
+              </div>
+            )}
+          </Modal>
         </div>
       );
     }
@@ -1920,6 +2256,10 @@
       const [gpsStatus, setGpsStatus] = useState(null);
       const [showClockIn, setShowClockIn] = useState(false);
       const [clockForm, setClockForm] = useState({ staff_id: "", person_id: "", service_code_id: "" });
+      const [viewing, setViewing] = useState(null);
+      const [editingEVV, setEditingEVV] = useState(false);
+      const [evvEditForm, setEvvEditForm] = useState({});
+      const [savingEVV, setSavingEVV] = useState(false);
 
       useEffect(() => { loadAll(); }, []);
 
@@ -2008,6 +2348,29 @@
         return new Date(iso).toLocaleDateString();
       };
 
+      const openEVVDetail = (session) => {
+        setViewing(session);
+        setEditingEVV(false);
+        setEvvEditForm({
+          clock_in_at: session.clock_in_at?.slice(0, 16) || "",
+          clock_out_at: session.clock_out_at?.slice(0, 16) || "",
+          exceptions: session.exceptions || "",
+        });
+      };
+
+      const saveEVVEdit = async () => {
+        setSavingEVV(true);
+        const updates = {};
+        if (evvEditForm.clock_out_at) updates.clock_out_at = new Date(evvEditForm.clock_out_at).toISOString();
+        if (evvEditForm.exceptions !== undefined) updates.exceptions = evvEditForm.exceptions || null;
+        const { error } = await supabase.from("evv_sessions").update(updates).eq("id", viewing.id);
+        setSavingEVV(false);
+        if (error) return addToast(error.message, "error");
+        addToast("EVV session updated", "success");
+        setViewing(null);
+        loadAll();
+      };
+
       const columns = [
         { label: "Date", bold: true, render: (r) => formatDate(r.clock_in_at) },
         { label: "Staff", render: (r) => r.staff ? `${r.staff.first_name} ${r.staff.last_name}` : "—" },
@@ -2016,10 +2379,8 @@
         { label: "In", render: (r) => formatTime(r.clock_in_at) },
         { label: "Out", render: (r) => formatTime(r.clock_out_at) },
         { label: "GPS", render: (r) => {
-          // Show geofence status if explicitly set
           if (r.geofence_valid === true) return <Badge text="✓ Verified" color={CB.green} />;
           if (r.geofence_valid === false) return <Badge text="✗ Invalid" color={CB.red} />;
-          // Otherwise show coordinate capture status
           const hasIn = r.clock_in_lat && r.clock_in_lng;
           const hasOut = r.clock_out_lat && r.clock_out_lng;
           if (hasIn || hasOut) {
@@ -2034,7 +2395,7 @@
         }},
         { label: "Status", render: (r) => {
           if (!r.clock_out_at) return (
-            <button onClick={() => handleClockOut(r.id)} disabled={clockingOut === r.id} style={{
+            <button onClick={(e) => { e.stopPropagation(); handleClockOut(r.id); }} disabled={clockingOut === r.id} style={{
               display: "flex", alignItems: "center", gap: 6, padding: "6px 12px",
               borderRadius: 8, border: "none", background: CB.red, color: CB.white,
               fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
@@ -2080,7 +2441,102 @@
             </div>
           )}
 
-          <DataTable columns={columns} data={sessions} loading={loading} emptyMessage="No EVV sessions recorded" />
+          <DataTable columns={columns} data={sessions} loading={loading} emptyMessage="No EVV sessions recorded" onRowClick={openEVVDetail} />
+
+          {/* EVV Detail Modal */}
+          <Modal open={!!viewing} onClose={() => setViewing(null)} title="EVV Session Detail" width={580}
+            subtitle={viewing ? `${viewing.staff?.first_name || ""} ${viewing.staff?.last_name || ""} → ${viewing.persons?.first_name || ""} ${viewing.persons?.last_name || ""}` : ""}>
+            {viewing && (
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 20 }}>
+                  <Badge text={viewing.service_code_definitions?.code || "?"} color={CB.blue} />
+                  <Badge text={viewing.clock_out_at ? "Completed" : "Active"} color={viewing.clock_out_at ? CB.green : CB.amber} />
+                  {!editingEVV && viewing.clock_out_at && (
+                    <button onClick={() => setEditingEVV(true)} style={{
+                      marginLeft: "auto", padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.border}`,
+                      fontSize: 12, fontWeight: 700, background: CB.white, color: CB.textMid, cursor: "pointer", fontFamily: "inherit",
+                    }}>{icons.edit({ size: 13 })} Edit</button>
+                  )}
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+                  <div style={{ padding: 14, background: CB.cream, borderRadius: 10, border: `1px solid ${CB.border}` }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 4 }}>Clock In</div>
+                    <div style={{ fontSize: 15, fontWeight: 700, color: CB.navy }}>{formatTime(viewing.clock_in_at)}</div>
+                    <div style={{ fontSize: 12, color: CB.textMid }}>{formatDate(viewing.clock_in_at)}</div>
+                  </div>
+                  <div style={{ padding: 14, background: CB.cream, borderRadius: 10, border: `1px solid ${CB.border}` }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 4 }}>Clock Out</div>
+                    {editingEVV ? (
+                      <input type="datetime-local" style={{ ...fieldStyle, padding: "8px 10px", fontSize: 13 }} value={evvEditForm.clock_out_at} onChange={e => setEvvEditForm(p => ({ ...p, clock_out_at: e.target.value }))} />
+                    ) : (
+                      <>
+                        <div style={{ fontSize: 15, fontWeight: 700, color: viewing.clock_out_at ? CB.navy : CB.amber }}>{viewing.clock_out_at ? formatTime(viewing.clock_out_at) : "Still active"}</div>
+                        {viewing.clock_out_at && <div style={{ fontSize: 12, color: CB.textMid }}>{formatDate(viewing.clock_out_at)}</div>}
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                {/* Duration */}
+                {viewing.clock_in_at && viewing.clock_out_at && (
+                  <div style={{ padding: 14, background: `${CB.teal}06`, borderRadius: 10, border: `1px solid ${CB.teal}20`, marginBottom: 16, textAlign: "center" }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: CB.teal, textTransform: "uppercase", marginBottom: 4 }}>Session Duration</div>
+                    <div style={{ fontSize: 22, fontWeight: 800, color: CB.navy }}>
+                      {(() => {
+                        const mins = Math.round((new Date(viewing.clock_out_at) - new Date(viewing.clock_in_at)) / 60000);
+                        return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+                      })()}
+                    </div>
+                  </div>
+                )}
+
+                {/* GPS Data */}
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 8 }}>GPS Coordinates</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                    <div style={{ padding: 12, background: CB.cream, borderRadius: 10, border: `1px solid ${CB.border}` }}>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4 }}>Clock-In Location</div>
+                      {viewing.clock_in_lat ? (
+                        <div style={{ fontSize: 13, fontWeight: 600, color: CB.navy, fontFamily: "monospace" }}>
+                          {Number(viewing.clock_in_lat).toFixed(6)}, {Number(viewing.clock_in_lng).toFixed(6)}
+                        </div>
+                      ) : <span style={{ fontSize: 13, color: CB.textLight }}>Not captured</span>}
+                    </div>
+                    <div style={{ padding: 12, background: CB.cream, borderRadius: 10, border: `1px solid ${CB.border}` }}>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4 }}>Clock-Out Location</div>
+                      {viewing.clock_out_lat ? (
+                        <div style={{ fontSize: 13, fontWeight: 600, color: CB.navy, fontFamily: "monospace" }}>
+                          {Number(viewing.clock_out_lat).toFixed(6)}, {Number(viewing.clock_out_lng).toFixed(6)}
+                        </div>
+                      ) : <span style={{ fontSize: 13, color: CB.textLight }}>Not captured</span>}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Exceptions */}
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 8 }}>Exception Notes</div>
+                  {editingEVV ? (
+                    <textarea style={{ ...fieldStyle, minHeight: 72, resize: "vertical" }} value={evvEditForm.exceptions}
+                      onChange={e => setEvvEditForm(p => ({ ...p, exceptions: e.target.value }))}
+                      placeholder="Note any EVV exceptions (missed clock-out, GPS failure, etc.)" />
+                  ) : (
+                    <div style={{ padding: "12px 16px", borderRadius: 10, background: CB.cream, border: `1px solid ${CB.border}`, fontSize: 13, color: viewing.exceptions ? CB.text : CB.textLight }}>
+                      {viewing.exceptions || "No exceptions noted"}
+                    </div>
+                  )}
+                </div>
+
+                {editingEVV && (
+                  <div style={{ display: "flex", justifyContent: "flex-end", gap: 12 }}>
+                    <SecondaryButton onClick={() => setEditingEVV(false)}>Cancel</SecondaryButton>
+                    <PrimaryButton onClick={saveEVVEdit} loading={savingEVV}>{icons.save({ size: 16 })} Save Changes</PrimaryButton>
+                  </div>
+                )}
+              </div>
+            )}
+          </Modal>
 
           {/* Clock-in Modal */}
           <Modal open={showClockIn} onClose={() => setShowClockIn(false)} title="Clock In" subtitle="GPS coordinates will be captured automatically">
@@ -2654,6 +3110,322 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // ORG UNITS — recursive tree builder (UPI-compatible structure)
+    // ═══════════════════════════════════════════════════════════════
+    function OrgUnitsPage() {
+      const { addToast } = useToast();
+      const { orgId } = useAuth();
+      const [units, setUnits] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [addingTo, setAddingTo] = useState(null);
+      const [newUnit, setNewUnit] = useState({ name: "", unit_type: "group", address: "", city: "" });
+      const [editingUnit, setEditingUnit] = useState(null);
+      const [saving, setSaving] = useState(false);
+
+      useEffect(() => { loadUnits(); }, []);
+
+      const loadUnits = async () => {
+        setLoading(true);
+        const { data } = await supabase.from("org_units").select("*").order("sort_order").order("name");
+        setUnits(data || []);
+        setLoading(false);
+      };
+
+      const buildTree = (parentId = null, depth = 0) => {
+        return units.filter(u => u.parent_id === parentId).map(unit => ({
+          ...unit, depth, children: buildTree(unit.id, depth + 1),
+        }));
+      };
+
+      const flattenTree = (nodes) => {
+        const result = [];
+        nodes.forEach(n => { result.push(n); result.push(...flattenTree(n.children)); });
+        return result;
+      };
+
+      const tree = buildTree();
+      const flatTree = flattenTree(tree);
+
+      const handleAdd = async () => {
+        if (!newUnit.name) return addToast("Name is required", "error");
+        setSaving(true);
+        const { error } = await supabase.from("org_units").insert({
+          org_id: orgId, parent_id: addingTo, name: newUnit.name,
+          unit_type: newUnit.unit_type, address: newUnit.address || null, city: newUnit.city || null,
+        });
+        setSaving(false);
+        if (error) return addToast(error.message, "error");
+        addToast(`"${newUnit.name}" added`, "success");
+        setAddingTo(null);
+        setNewUnit({ name: "", unit_type: "group", address: "", city: "" });
+        loadUnits();
+      };
+
+      const handleDelete = async (unitId, unitName) => {
+        const children = units.filter(u => u.parent_id === unitId);
+        if (children.length > 0) return addToast("Remove child units first", "error");
+        if (!confirm(`Delete "${unitName}"?`)) return;
+        const { error } = await supabase.from("org_units").delete().eq("id", unitId);
+        if (error) return addToast(error.message, "error");
+        addToast(`"${unitName}" removed`, "success");
+        loadUnits();
+      };
+
+      const typeIcons = { admin: icons.shield, region: icons.mapPin, program: icons.fileText, site: icons.heart, placement: icons.users, group: icons.dashboard };
+
+      return (
+        <div>
+          <PageHeader title="Organization Structure" subtitle="Build your org tree (UPI-compatible) — Administration → Regions → Programs → Sites"
+            action={<PrimaryButton onClick={() => setAddingTo(null)} color={CB.navy}>{icons.plus({ size: 16 })} Add Root Unit</PrimaryButton>}
+          />
+
+          {loading ? (
+            <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><Spinner size={28} /></div>
+          ) : (
+            <div style={{
+              background: CB.white, borderRadius: 16, padding: 24,
+              border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
+            }}>
+              {flatTree.length === 0 ? (
+                <div style={{ textAlign: "center", padding: "40px 0", color: CB.textLight }}>
+                  <p style={{ fontSize: 15, marginBottom: 16 }}>No org units yet. Start by adding your Administration root.</p>
+                  <PrimaryButton onClick={() => { setAddingTo(null); setNewUnit({ name: "Administration", unit_type: "admin", address: "", city: "" }); }} color={CB.navy}>
+                    {icons.plus({ size: 16 })} Create Administration Root
+                  </PrimaryButton>
+                </div>
+              ) : (
+                <div style={{ display: "grid", gap: 2 }}>
+                  {flatTree.map((unit, i) => (
+                    <div key={unit.id} style={{
+                      display: "flex", alignItems: "center", justifyContent: "space-between",
+                      padding: "10px 14px", paddingLeft: 14 + unit.depth * 28,
+                      borderRadius: 10, animation: `fadeIn 0.2s ease ${i * 0.02}s both`,
+                      transition: "background 0.1s",
+                    }}
+                      onMouseEnter={e => e.currentTarget.style.background = CB.cream}
+                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        {unit.depth > 0 && (
+                          <span style={{ color: CB.border, fontSize: 14, marginRight: -4 }}>└</span>
+                        )}
+                        <div style={{
+                          width: 28, height: 28, borderRadius: 8,
+                          background: `${unit.unit_type === "admin" ? CB.navy : unit.unit_type === "program" ? CB.teal : CB.blue}12`,
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                        }}>
+                          {(typeIcons[unit.unit_type] || icons.dashboard)({ size: 14, color: unit.unit_type === "admin" ? CB.navy : unit.unit_type === "program" ? CB.teal : CB.blue })}
+                        </div>
+                        <div>
+                          <span style={{ fontSize: 14, fontWeight: 600, color: CB.navy }}>{unit.name}</span>
+                          <span style={{ fontSize: 11, color: CB.textLight, marginLeft: 8 }}>{ORG_UNIT_TYPES.find(t => t.value === unit.unit_type)?.label || unit.unit_type}</span>
+                          {unit.city && <span style={{ fontSize: 11, color: CB.textLight, marginLeft: 8 }}>— {unit.city}</span>}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: 4 }}>
+                        <button onClick={() => { setAddingTo(unit.id); setNewUnit({ name: "", unit_type: "group", address: "", city: "" }); }} title="Add child" style={{
+                          padding: "4px 8px", borderRadius: 6, border: `1px solid ${CB.border}`, background: CB.white,
+                          color: CB.teal, cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit",
+                        }}>{icons.plus({ size: 12, color: CB.teal })}</button>
+                        <button onClick={() => handleDelete(unit.id, unit.name)} title="Delete" style={{
+                          padding: "4px 8px", borderRadius: 6, border: `1px solid ${CB.border}`, background: CB.white,
+                          color: CB.red, cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit",
+                        }}>{icons.trash({ size: 12, color: CB.red })}</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Add Unit Modal */}
+          <Modal open={addingTo !== undefined && addingTo !== false} onClose={() => setAddingTo(false)}
+            title={addingTo === null ? "Add Root Unit" : `Add Child Unit`}
+            subtitle={addingTo ? `Under: ${units.find(u => u.id === addingTo)?.name || ""}` : "Top-level organizational unit"}>
+            <FormField label="Unit Name" required>
+              <input style={fieldStyle} value={newUnit.name} onChange={e => setNewUnit(p => ({ ...p, name: e.target.value }))} placeholder="e.g. Residential Programs" />
+            </FormField>
+            <FormField label="Unit Type" required>
+              <select style={fieldStyle} value={newUnit.unit_type} onChange={e => setNewUnit(p => ({ ...p, unit_type: e.target.value }))}>
+                {ORG_UNIT_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+              </select>
+            </FormField>
+            <FormRow>
+              <FormField label="City" half>
+                <input style={fieldStyle} value={newUnit.city} onChange={e => setNewUnit(p => ({ ...p, city: e.target.value }))} placeholder="City" />
+              </FormField>
+              <FormField label="Address" half>
+                <input style={fieldStyle} value={newUnit.address} onChange={e => setNewUnit(p => ({ ...p, address: e.target.value }))} placeholder="Street address" />
+              </FormField>
+            </FormRow>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 8 }}>
+              <SecondaryButton onClick={() => setAddingTo(false)}>Cancel</SecondaryButton>
+              <PrimaryButton onClick={handleAdd} loading={saving}>{icons.plus({ size: 16 })} Add Unit</PrimaryButton>
+            </div>
+          </Modal>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // DOCUMENTS SECTION — reusable for staff and client forms
+    // ═══════════════════════════════════════════════════════════════
+    function DocumentsSection({ entityType, entityId, orgId }) {
+      const { addToast } = useToast();
+      const [docs, setDocs] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [adding, setAdding] = useState(false);
+      const [newDoc, setNewDoc] = useState({ doc_type: "", file_name: "", expires_at: "", notes: "" });
+
+      const docTypes = entityType === "staff" ? STAFF_DOC_TYPES : CLIENT_DOC_TYPES;
+      const requiredTypes = docTypes.filter(d => d.required);
+
+      useEffect(() => {
+        if (entityId) loadDocs();
+        else { setDocs([]); setLoading(false); }
+      }, [entityId]);
+
+      const loadDocs = async () => {
+        setLoading(true);
+        const field = entityType === "staff" ? "staff_id" : "person_id";
+        const { data } = await supabase.from("documents").select("*").eq(field, entityId).eq("is_archived", false).order("uploaded_at", { ascending: false });
+        setDocs(data || []);
+        setLoading(false);
+      };
+
+      const handleAdd = async () => {
+        if (!newDoc.doc_type || !newDoc.file_name) return addToast("Document type and file name are required", "error");
+        const field = entityType === "staff" ? "staff_id" : "person_id";
+        const { error } = await supabase.from("documents").insert({
+          org_id: orgId,
+          [field]: entityId,
+          doc_type: newDoc.doc_type,
+          doc_category: entityType,
+          file_name: newDoc.file_name,
+          file_url: `pending://${newDoc.file_name}`,
+          expires_at: newDoc.expires_at || null,
+          notes: newDoc.notes || null,
+        });
+        if (error) return addToast(error.message, "error");
+        addToast("Document record added", "success");
+        setAdding(false);
+        setNewDoc({ doc_type: "", file_name: "", expires_at: "", notes: "" });
+        loadDocs();
+      };
+
+      const removeDoc = async (docId) => {
+        const { error } = await supabase.from("documents").update({ is_archived: true }).eq("id", docId);
+        if (error) return addToast(error.message, "error");
+        setDocs(prev => prev.filter(d => d.id !== docId));
+        addToast("Document removed", "success");
+      };
+
+      const uploadedTypes = new Set(docs.map(d => d.doc_type));
+      const missingRequired = requiredTypes.filter(t => !uploadedTypes.has(t.value));
+      const completeness = requiredTypes.length > 0 ? Math.round(((requiredTypes.length - missingRequired.length) / requiredTypes.length) * 100) : 100;
+
+      const now = new Date();
+
+      return (
+        <div style={{ marginTop: 8, padding: "16px 0 0", borderTop: `1px solid ${CB.border}` }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy }}>Documents</h3>
+              <span style={{
+                fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 6,
+                background: completeness === 100 ? `${CB.green}12` : completeness >= 60 ? `${CB.amber}12` : `${CB.red}12`,
+                color: completeness === 100 ? CB.green : completeness >= 60 ? CB.amber : CB.red,
+              }}>{completeness}% complete</span>
+            </div>
+            {entityId && (
+              <button onClick={() => setAdding(!adding)} style={{
+                padding: "5px 12px", borderRadius: 8, border: `1px dashed ${CB.blue}`,
+                background: `${CB.blue}08`, color: CB.blue, fontSize: 12, fontWeight: 700,
+                cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4,
+              }}>{icons.plus({ size: 12, color: CB.blue })} Add Document</button>
+            )}
+          </div>
+
+          {!entityId && (
+            <div style={{ fontSize: 13, color: CB.textLight, padding: "8px 0" }}>Save the record first, then add documents.</div>
+          )}
+
+          {/* Missing required docs warning */}
+          {missingRequired.length > 0 && (
+            <div style={{
+              padding: "10px 14px", borderRadius: 10, marginBottom: 10,
+              background: `${CB.amber}06`, border: `1px solid ${CB.amber}20`,
+              fontSize: 12, color: CB.amber, fontWeight: 500,
+            }}>
+              {icons.alertTriangle({ size: 13, color: CB.amber })} Missing: {missingRequired.map(d => d.label).join(", ")}
+            </div>
+          )}
+
+          {/* Existing documents */}
+          {docs.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              {docs.map(doc => {
+                const docDef = docTypes.find(d => d.value === doc.doc_type);
+                const isExpired = doc.expires_at && new Date(doc.expires_at + "T00:00:00") < now;
+                return (
+                  <div key={doc.id} style={{
+                    display: "flex", alignItems: "center", justifyContent: "space-between",
+                    padding: "8px 12px", borderRadius: 8, marginBottom: 4,
+                    background: isExpired ? `${CB.red}06` : CB.cream, border: `1px solid ${isExpired ? `${CB.red}20` : CB.border}`,
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
+                      {icons.fileText({ size: 14, color: isExpired ? CB.red : CB.teal })}
+                      <span style={{ fontSize: 13, fontWeight: 600, color: CB.navy, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{doc.file_name}</span>
+                      <Badge text={docDef?.label || doc.doc_type} color={CB.textMid} />
+                      {isExpired && <Badge text="Expired" color={CB.red} />}
+                      {doc.expires_at && !isExpired && <span style={{ fontSize: 11, color: CB.textLight }}>exp {new Date(doc.expires_at + "T00:00:00").toLocaleDateString()}</span>}
+                    </div>
+                    <button onClick={() => removeDoc(doc.id)} style={{
+                      padding: "3px 6px", borderRadius: 4, border: "none", background: "transparent",
+                      color: CB.textLight, cursor: "pointer",
+                    }}>{icons.trash({ size: 12, color: CB.textLight })}</button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Add document form */}
+          {adding && entityId && (
+            <div style={{ padding: 14, borderRadius: 10, background: CB.cream, border: `1px solid ${CB.border}`, marginBottom: 8 }}>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
+                <div style={{ flex: "1 1 180px" }}>
+                  <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>Document Type</label>
+                  <select style={{ ...fieldStyle, padding: "8px 10px", fontSize: 13 }} value={newDoc.doc_type} onChange={e => setNewDoc(p => ({ ...p, doc_type: e.target.value }))}>
+                    <option value="">Select type...</option>
+                    {docTypes.map(d => <option key={d.value} value={d.value}>{d.label}{d.required ? " *" : ""}</option>)}
+                  </select>
+                </div>
+                <div style={{ flex: "1 1 160px" }}>
+                  <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>File Name</label>
+                  <input style={{ ...fieldStyle, padding: "8px 10px", fontSize: 13 }} value={newDoc.file_name} onChange={e => setNewDoc(p => ({ ...p, file_name: e.target.value }))} placeholder="document.pdf" />
+                </div>
+                <div style={{ flex: "0 0 130px" }}>
+                  <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>Expires</label>
+                  <input style={{ ...fieldStyle, padding: "8px 10px", fontSize: 13 }} type="date" value={newDoc.expires_at} onChange={e => setNewDoc(p => ({ ...p, expires_at: e.target.value }))} />
+                </div>
+                <button onClick={handleAdd} style={{
+                  padding: "8px 14px", borderRadius: 8, border: `2px dashed ${CB.blue}`, marginBottom: 16,
+                  background: `${CB.blue}08`, color: CB.blue, fontSize: 12, fontWeight: 700,
+                  cursor: "pointer", fontFamily: "inherit",
+                }}>{icons.plus({ size: 12, color: CB.blue })} Add</button>
+              </div>
+              <div style={{ fontSize: 11, color: CB.textLight, marginTop: -8 }}>
+                File upload connects to Supabase Storage in production — for now this logs the document record.
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // INTAKE WIZARD — multi-step client onboarding
     // ═══════════════════════════════════════════════════════════════
     function IntakePage() {
@@ -3197,6 +3969,7 @@
           case "compliance": return <CompliancePage />;
           case "billing": return <BillingPage />;
           case "ai": return <AIPage />;
+          case "settings": return <OrgUnitsPage />;
           default: return <DashboardPage />;
         }
       };
