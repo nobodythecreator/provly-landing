@@ -3602,7 +3602,7 @@
     // ═══════════════════════════════════════════════════════════════
     // INTAKE WIZARD — multi-step client onboarding
     // ═══════════════════════════════════════════════════════════════
-    function IntakePage() {
+    function ClientIntakeWizard() {
       const { addToast } = useToast();
       const { orgId } = useAuth();
       const perms = usePermissions();
@@ -3690,7 +3690,6 @@
       if (complete) {
         return (
           <div>
-            <PageHeader title="Intake Complete" subtitle="New client successfully onboarded" />
             <div style={{
               background: CB.white, borderRadius: 20, padding: "60px 40px", textAlign: "center",
               border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, animation: "successPop 0.4s ease",
@@ -3717,7 +3716,6 @@
 
       return (
         <div>
-          <PageHeader title="Client Intake" subtitle="Multi-step onboarding wizard — creates client record and initial authorizations" />
 
           {/* Step indicator */}
           <div style={{
@@ -4049,6 +4047,486 @@
               )}
             </div>
           </div>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // STAFF ONBOARDING WIZARD — mirrors client intake for new hires
+    // Walks through Hope Haven Staff Personnel File (Sections A–D)
+    // ═══════════════════════════════════════════════════════════════
+    function StaffOnboardingWizard() {
+      const { addToast } = useToast();
+      const { orgId } = useAuth();
+      const [step, setStep] = useState(0);
+      const [saving, setSaving] = useState(false);
+      const [complete, setComplete] = useState(false);
+
+      const [form, setForm] = useState({
+        // Personal
+        first_name: "", last_name: "", date_of_birth: "", email: "", phone: "",
+        role: "dsp", hire_date: new Date().toISOString().split("T")[0],
+        address: "", city: "", state: "UT", zip: "",
+        emergency_name: "", emergency_phone: "", emergency_relation: "",
+        // Section B: Hire Paperwork — tracking on-file status
+        b_application: false, b_resume: false, b_code_of_conduct: false,
+        b_medicaid_exclusion: false, b_background_check: false,
+        b_i9: false, b_w4: false, b_direct_deposit: false,
+        b_emergency_contact: false, b_drivers_license: false, b_auto_insurance: false,
+        // Section A: Credentials
+        a_transcripts: false, a_degrees: false, a_professional_license: false,
+        // Section C: Training
+        c_training_log_started: false, c_emergency_plan_training: false,
+        c_person_specific_training: false,
+        // Section D: Certifications
+        d_first_aid_date: "", d_cpr_date: "",
+        d_first_aid_provider: "", d_cpr_provider: "",
+      });
+
+      const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
+
+      const steps = [
+        { label: "Personal Info", icon: icons.heart },
+        { label: "Hire Paperwork", icon: icons.fileText },
+        { label: "Credentials & Training", icon: icons.book },
+        { label: "Certifications", icon: icons.shield },
+        { label: "Review & Submit", icon: icons.checkCircle },
+      ];
+
+      const handleSubmit = async () => {
+        if (!form.first_name || !form.last_name || !form.hire_date) {
+          return addToast("Name and hire date are required", "error");
+        }
+        setSaving(true);
+        // Step 1: Create staff record
+        const staffPayload = {
+          org_id: orgId,
+          first_name: form.first_name, last_name: form.last_name,
+          date_of_birth: form.date_of_birth || null,
+          email: form.email || null, phone: form.phone || null,
+          role: form.role || "dsp", hire_date: form.hire_date,
+          is_active: true,
+        };
+        const { data: staffData, error: staffErr } = await supabase.from("staff").insert(staffPayload).select();
+        if (staffErr || !staffData?.[0]) {
+          addToast("Failed to create staff: " + (staffErr?.message || "unknown error"), "error");
+          setSaving(false);
+          return;
+        }
+        const staffId = staffData[0].id;
+
+        // Step 2: Create document records for all items marked "on file"
+        const docRecords = [];
+        const bDocs = [
+          { field: "b_application", type: "b_application", name: "Employment Application" },
+          { field: "b_resume", type: "b_resume", name: "Resume" },
+          { field: "b_code_of_conduct", type: "b_code_of_conduct", name: "DHHS Code of Conduct (signed)" },
+          { field: "b_medicaid_exclusion", type: "b_medicaid_exclusion", name: "Medicaid Exclusion Verification" },
+          { field: "b_background_check", type: "b_background_check", name: "Background Check (BCI)" },
+          { field: "b_i9", type: "b_i9", name: "I-9 Employment Eligibility" },
+          { field: "b_w4", type: "b_w4", name: "W-4 Tax Withholding" },
+          { field: "b_direct_deposit", type: "b_direct_deposit", name: "Direct Deposit Authorization" },
+          { field: "b_emergency_contact", type: "b_emergency_contact", name: "Emergency Contact Info" },
+          { field: "b_drivers_license", type: "b_drivers_license", name: "Driver's License Copy" },
+          { field: "b_auto_insurance", type: "b_auto_insurance", name: "Auto Insurance Verification" },
+        ];
+        const aDocs = [
+          { field: "a_transcripts", type: "a_transcripts", name: "Educational Transcripts" },
+          { field: "a_degrees", type: "a_degrees", name: "Degrees / Diplomas" },
+          { field: "a_professional_license", type: "a_professional_license", name: "Professional License" },
+        ];
+        [...bDocs, ...aDocs].forEach(d => {
+          if (form[d.field]) {
+            docRecords.push({
+              org_id: orgId, staff_id: staffId,
+              doc_type: d.type, doc_category: "staff",
+              file_name: d.name, file_url: `onboarding://${d.name}`,
+              notes: "Collected during onboarding",
+            });
+          }
+        });
+        // Certifications as documents
+        if (form.d_first_aid_date) {
+          docRecords.push({
+            org_id: orgId, staff_id: staffId,
+            doc_type: "d_first_aid_initial", doc_category: "staff",
+            file_name: `First Aid Cert${form.d_first_aid_provider ? ` — ${form.d_first_aid_provider}` : ""}`,
+            file_url: "onboarding://first-aid-cert",
+            notes: `Initial cert date: ${form.d_first_aid_date}`,
+          });
+        }
+        if (form.d_cpr_date) {
+          docRecords.push({
+            org_id: orgId, staff_id: staffId,
+            doc_type: "d_cpr_initial", doc_category: "staff",
+            file_name: `CPR Cert${form.d_cpr_provider ? ` — ${form.d_cpr_provider}` : ""}`,
+            file_url: "onboarding://cpr-cert",
+            notes: `Initial cert date: ${form.d_cpr_date}`,
+          });
+        }
+        if (docRecords.length > 0) {
+          const { error: docErr } = await supabase.from("documents").insert(docRecords);
+          if (docErr) addToast("Staff created but some documents failed: " + docErr.message, "warning");
+        }
+
+        setSaving(false);
+        setComplete(true);
+        addToast(`${form.first_name} ${form.last_name} onboarding complete!`, "success");
+      };
+
+      // Count collected items for Section B
+      const bFields = ["b_application", "b_resume", "b_code_of_conduct", "b_medicaid_exclusion", "b_background_check", "b_i9", "b_w4", "b_direct_deposit", "b_emergency_contact", "b_drivers_license"];
+      const bRequired = bFields.filter(f => f !== "b_auto_insurance");
+      const bCollected = bRequired.filter(f => form[f]).length;
+
+      if (complete) {
+        return (
+          <div style={{
+            background: CB.white, borderRadius: 20, padding: "60px 40px", textAlign: "center",
+            border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, animation: "successPop 0.4s ease",
+          }}>
+            <div style={{
+              width: 72, height: 72, borderRadius: 20, background: `${CB.green}12`,
+              display: "inline-flex", alignItems: "center", justifyContent: "center", marginBottom: 20,
+            }}>{icons.checkCircle({ size: 36, color: CB.green })}</div>
+            <h3 style={{ fontSize: 22, fontWeight: 800, color: CB.navy, marginBottom: 8 }}>{form.first_name} {form.last_name}</h3>
+            <p style={{ fontSize: 15, color: CB.textMid, marginBottom: 8 }}>
+              {STAFF_ROLES.find(r => r.value === form.role)?.label || form.role} — hired {form.hire_date ? new Date(form.hire_date + "T00:00:00").toLocaleDateString() : ""}
+            </p>
+            <p style={{ fontSize: 14, color: CB.textLight, marginBottom: 24 }}>
+              {bCollected}/{bRequired.length} hire paperwork items collected — view staff record to add remaining documents
+            </p>
+            <PrimaryButton onClick={() => { setComplete(false); setStep(0); setForm(prev => {
+              const fresh = {};
+              Object.keys(prev).forEach(k => fresh[k] = typeof prev[k] === "boolean" ? false : "");
+              fresh.role = "dsp"; fresh.state = "UT"; fresh.hire_date = new Date().toISOString().split("T")[0];
+              return fresh;
+            }); }}>
+              {icons.plus({ size: 16 })} Start Another Onboarding
+            </PrimaryButton>
+          </div>
+        );
+      }
+
+      // Toggle component for checklist items
+      const CheckItem = ({ label, field, required }) => (
+        <label style={{
+          display: "flex", alignItems: "center", gap: 10, padding: "10px 14px",
+          borderRadius: 10, cursor: "pointer", transition: "all 0.15s",
+          border: `1px solid ${form[field] ? `${CB.green}40` : CB.border}`,
+          background: form[field] ? "rgba(46,125,50,0.04)" : CB.white,
+        }}>
+          <div style={{
+            width: 22, height: 22, borderRadius: 6, flexShrink: 0,
+            border: `2px solid ${form[field] ? CB.green : CB.border}`,
+            background: form[field] ? CB.green : CB.white,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            transition: "all 0.15s",
+          }}>
+            {form[field] && <span style={{ color: CB.white, fontSize: 13, fontWeight: 700 }}>✓</span>}
+          </div>
+          <input type="checkbox" checked={form[field]} onChange={e => set(field, e.target.checked)} style={{ display: "none" }} />
+          <div style={{ flex: 1 }}>
+            <span style={{ fontSize: 14, fontWeight: form[field] ? 600 : 400, color: form[field] ? CB.navy : CB.text }}>{label}</span>
+            {required && !form[field] && <span style={{ fontSize: 10, color: CB.red, marginLeft: 6, fontWeight: 700 }}>REQUIRED</span>}
+          </div>
+        </label>
+      );
+
+      return (
+        <div>
+          {/* Step indicator */}
+          <div style={{
+            display: "flex", alignItems: "center", marginBottom: 28, padding: "16px 24px",
+            background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
+          }}>
+            {steps.map((s, i) => (
+              <React.Fragment key={i}>
+                <div onClick={() => i <= step && setStep(i)} style={{
+                  display: "flex", alignItems: "center", gap: 8, cursor: i <= step ? "pointer" : "default",
+                  opacity: i <= step ? 1 : 0.4, transition: "opacity 0.2s",
+                }}>
+                  <div style={{
+                    width: 32, height: 32, borderRadius: 10,
+                    background: i === step ? CB.navy : i < step ? CB.green : CB.cream,
+                    display: "flex", alignItems: "center", justifyContent: "center", transition: "background 0.2s",
+                  }}>
+                    {i < step ? icons.checkCircle({ size: 16, color: CB.white }) : s.icon({ size: 16, color: i === step ? CB.white : CB.textLight })}
+                  </div>
+                  <span style={{ fontSize: 13, fontWeight: i === step ? 700 : 500, color: i === step ? CB.navy : CB.textMid }}>{s.label}</span>
+                </div>
+                {i < steps.length - 1 && (
+                  <div style={{ flex: 1, height: 2, background: i < step ? CB.green : CB.border, margin: "0 12px", borderRadius: 1, transition: "background 0.2s" }} />
+                )}
+              </React.Fragment>
+            ))}
+          </div>
+
+          <div style={{
+            background: CB.white, borderRadius: 20, padding: "32px 36px",
+            border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, animation: "fadeIn 0.3s ease",
+          }}>
+            {/* Step 0: Personal Info */}
+            {step === 0 && (
+              <>
+                <h3 style={{ fontSize: 18, fontWeight: 700, color: CB.navy, marginBottom: 20 }}>Staff Personal Information</h3>
+                <FormRow>
+                  <FormField label="First Name" required half>
+                    <input style={fieldStyle} value={form.first_name} onChange={e => set("first_name", e.target.value)} placeholder="First name" />
+                  </FormField>
+                  <FormField label="Last Name" required half>
+                    <input style={fieldStyle} value={form.last_name} onChange={e => set("last_name", e.target.value)} placeholder="Last name" />
+                  </FormField>
+                </FormRow>
+                <FormRow>
+                  <FormField label="Date of Birth" half>
+                    <input style={fieldStyle} type="date" value={form.date_of_birth} onChange={e => set("date_of_birth", e.target.value)} />
+                  </FormField>
+                  <FormField label="Role" required half>
+                    <select style={fieldStyle} value={form.role} onChange={e => set("role", e.target.value)}>
+                      {STAFF_ROLES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
+                    </select>
+                  </FormField>
+                </FormRow>
+                <FormRow>
+                  <FormField label="Email" half>
+                    <input style={fieldStyle} type="email" value={form.email} onChange={e => set("email", e.target.value)} placeholder="email@hopehavenservices.org" />
+                  </FormField>
+                  <FormField label="Phone" half>
+                    <input style={fieldStyle} type="tel" value={form.phone} onChange={e => set("phone", e.target.value)} placeholder="(801) 555-0000" />
+                  </FormField>
+                </FormRow>
+                <FormField label="Hire Date" required>
+                  <input style={fieldStyle} type="date" value={form.hire_date} onChange={e => set("hire_date", e.target.value)} />
+                </FormField>
+                <FormField label="Address">
+                  <input style={fieldStyle} value={form.address} onChange={e => set("address", e.target.value)} placeholder="Street address" />
+                </FormField>
+                <FormRow>
+                  <FormField label="City" half>
+                    <input style={fieldStyle} value={form.city} onChange={e => set("city", e.target.value)} placeholder="City" />
+                  </FormField>
+                  <FormField label="State" half>
+                    <input style={fieldStyle} value={form.state} onChange={e => set("state", e.target.value)} placeholder="UT" />
+                  </FormField>
+                </FormRow>
+                <div style={{ marginTop: 8, padding: "16px 0 0", borderTop: `1px solid ${CB.border}` }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: CB.navy, marginBottom: 14 }}>Emergency Contact</div>
+                </div>
+                <FormRow>
+                  <FormField label="Contact Name" half>
+                    <input style={fieldStyle} value={form.emergency_name} onChange={e => set("emergency_name", e.target.value)} placeholder="Name" />
+                  </FormField>
+                  <FormField label="Relationship" half>
+                    <input style={fieldStyle} value={form.emergency_relation} onChange={e => set("emergency_relation", e.target.value)} placeholder="Spouse, Parent, etc." />
+                  </FormField>
+                </FormRow>
+                <FormField label="Emergency Phone">
+                  <input style={fieldStyle} type="tel" value={form.emergency_phone} onChange={e => set("emergency_phone", e.target.value)} placeholder="(801) 555-0000" />
+                </FormField>
+              </>
+            )}
+
+            {/* Step 1: Section B — Hire Paperwork */}
+            {step === 1 && (
+              <>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+                  <h3 style={{ fontSize: 18, fontWeight: 700, color: CB.navy }}>Section B — Hire Paperwork</h3>
+                  <span style={{
+                    fontSize: 12, fontWeight: 700, padding: "4px 10px", borderRadius: 6,
+                    background: bCollected === bRequired.length ? `${CB.green}12` : `${CB.amber}12`,
+                    color: bCollected === bRequired.length ? CB.green : CB.amber,
+                  }}>{bCollected}/{bRequired.length} collected</span>
+                </div>
+                <div style={{ padding: "10px 14px", borderRadius: 10, background: `${CB.navy}06`, border: `1px solid ${CB.navy}10`, marginBottom: 16 }}>
+                  <div style={{ fontSize: 12, color: CB.textMid }}>Check each item as it's received. Required items are marked. Files can be uploaded later from the staff record.</div>
+                </div>
+                <div style={{ display: "grid", gap: 6 }}>
+                  <CheckItem label="Employment Application" field="b_application" required />
+                  <CheckItem label="Resume" field="b_resume" required />
+                  <CheckItem label="DHHS Code of Conduct (signed)" field="b_code_of_conduct" required />
+                  <CheckItem label="Medicaid Exclusion Verification (OIG/SAM)" field="b_medicaid_exclusion" required />
+                  <CheckItem label="Background Check (BCI)" field="b_background_check" required />
+                  <CheckItem label="I-9 Employment Eligibility" field="b_i9" required />
+                  <CheckItem label="W-4 Tax Withholding" field="b_w4" required />
+                  <CheckItem label="Direct Deposit Authorization" field="b_direct_deposit" required />
+                  <CheckItem label="Emergency Contact Info" field="b_emergency_contact" required />
+                  <CheckItem label="Driver's License Copy" field="b_drivers_license" required />
+                  <CheckItem label="Auto Insurance Verification (if transporting)" field="b_auto_insurance" />
+                </div>
+              </>
+            )}
+
+            {/* Step 2: Section A Credentials + Section C Training */}
+            {step === 2 && (
+              <>
+                <h3 style={{ fontSize: 18, fontWeight: 700, color: CB.navy, marginBottom: 20 }}>Credentials & Training Setup</h3>
+
+                <div style={{ marginBottom: 20 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: CB.navy, marginBottom: 10, display: "flex", alignItems: "center", gap: 8 }}>
+                    <Badge text="Section A" color={CB.blue} /> Credentials on File
+                  </div>
+                  <div style={{ display: "grid", gap: 6 }}>
+                    <CheckItem label="Educational Transcripts" field="a_transcripts" />
+                    <CheckItem label="Degrees / Diplomas" field="a_degrees" />
+                    <CheckItem label="Professional License (if applicable)" field="a_professional_license" />
+                  </div>
+                </div>
+
+                <div style={{ paddingTop: 16, borderTop: `1px solid ${CB.border}` }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: CB.navy, marginBottom: 10, display: "flex", alignItems: "center", gap: 8 }}>
+                    <Badge text="Section C" color={CB.teal} /> Training Setup
+                  </div>
+                  <div style={{ padding: "10px 14px", borderRadius: 10, background: `${CB.teal}06`, border: `1px solid ${CB.teal}15`, marginBottom: 12 }}>
+                    <div style={{ fontSize: 12, color: CB.textMid }}>
+                      New hires must complete 24 training topics. 30-day topics start from hire date ({form.hire_date ? new Date(form.hire_date + "T00:00:00").toLocaleDateString() : "—"}). Log completions in the Training Tracker as they happen.
+                    </div>
+                  </div>
+                  <div style={{ display: "grid", gap: 6 }}>
+                    <CheckItem label="General Training Log (24 topics) — started" field="c_training_log_started" required />
+                    <CheckItem label="Emergency Management Plan Training — completed" field="c_emergency_plan_training" required />
+                    <CheckItem label="Person-Specific Training — assigned" field="c_person_specific_training" required />
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* Step 3: Section D — Certifications */}
+            {step === 3 && (
+              <>
+                <h3 style={{ fontSize: 18, fontWeight: 700, color: CB.navy, marginBottom: 20 }}>Section D — Certifications</h3>
+                <div style={{ padding: "10px 14px", borderRadius: 10, background: `${CB.red}06`, border: `1px solid ${CB.red}15`, marginBottom: 20 }}>
+                  <div style={{ fontSize: 12, color: CB.textMid }}>
+                    All direct care staff must have current First Aid and CPR certification. Enter initial cert dates — renewal tracking will auto-calculate.
+                  </div>
+                </div>
+
+                <div style={{ marginBottom: 24 }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+                    {icons.shield({ size: 16, color: CB.red })} First Aid
+                  </div>
+                  <FormRow>
+                    <FormField label="Initial Cert Date" half>
+                      <input style={fieldStyle} type="date" value={form.d_first_aid_date} onChange={e => set("d_first_aid_date", e.target.value)} />
+                    </FormField>
+                    <FormField label="Certifying Provider" half>
+                      <input style={fieldStyle} value={form.d_first_aid_provider} onChange={e => set("d_first_aid_provider", e.target.value)} placeholder="e.g. American Red Cross" />
+                    </FormField>
+                  </FormRow>
+                </div>
+
+                <div>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+                    {icons.heart({ size: 16, color: CB.red })} CPR
+                  </div>
+                  <FormRow>
+                    <FormField label="Initial Cert Date" half>
+                      <input style={fieldStyle} type="date" value={form.d_cpr_date} onChange={e => set("d_cpr_date", e.target.value)} />
+                    </FormField>
+                    <FormField label="Certifying Provider" half>
+                      <input style={fieldStyle} value={form.d_cpr_provider} onChange={e => set("d_cpr_provider", e.target.value)} placeholder="e.g. American Heart Association" />
+                    </FormField>
+                  </FormRow>
+                </div>
+              </>
+            )}
+
+            {/* Step 4: Review & Submit */}
+            {step === 4 && (
+              <>
+                <h3 style={{ fontSize: 18, fontWeight: 700, color: CB.navy, marginBottom: 20 }}>Review & Submit</h3>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                  <div style={{ padding: 16, background: CB.cream, borderRadius: 12, border: `1px solid ${CB.border}` }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 10 }}>Staff Info</div>
+                    <div style={{ fontSize: 15, fontWeight: 700, color: CB.navy }}>{form.first_name} {form.last_name}</div>
+                    <div style={{ fontSize: 13, color: CB.textMid, marginTop: 4 }}>{STAFF_ROLES.find(r => r.value === form.role)?.label || form.role}</div>
+                    {form.date_of_birth && <div style={{ fontSize: 13, color: CB.textMid }}>DOB: {new Date(form.date_of_birth + "T00:00:00").toLocaleDateString()}</div>}
+                    {form.email && <div style={{ fontSize: 13, color: CB.textMid }}>{form.email}</div>}
+                    {form.phone && <div style={{ fontSize: 13, color: CB.textMid }}>{form.phone}</div>}
+                    {form.hire_date && <div style={{ fontSize: 13, color: CB.teal, fontWeight: 600, marginTop: 4 }}>Hire: {new Date(form.hire_date + "T00:00:00").toLocaleDateString()}</div>}
+                  </div>
+                  <div style={{ padding: 16, background: CB.cream, borderRadius: 12, border: `1px solid ${CB.border}` }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 10 }}>Section B — Hire Paperwork</div>
+                    <div style={{ fontSize: 22, fontWeight: 800, color: bCollected === bRequired.length ? CB.green : CB.amber }}>{bCollected}/{bRequired.length}</div>
+                    <div style={{ fontSize: 12, color: CB.textMid, marginTop: 2 }}>required items collected</div>
+                    {bCollected < bRequired.length && (
+                      <div style={{ fontSize: 11, color: CB.amber, marginTop: 8, fontWeight: 600 }}>
+                        {icons.alertTriangle({ size: 11, color: CB.amber })} Missing: {bRequired.filter(f => !form[f]).map(f => {
+                          const labels = { b_application: "Application", b_resume: "Resume", b_code_of_conduct: "Code of Conduct", b_medicaid_exclusion: "Medicaid Exclusion", b_background_check: "Background Check", b_i9: "I-9", b_w4: "W-4", b_direct_deposit: "Direct Deposit", b_emergency_contact: "Emergency Contact", b_drivers_license: "Driver's License" };
+                          return labels[f] || f;
+                        }).join(", ")}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
+                  <div style={{ padding: 16, background: CB.cream, borderRadius: 12, border: `1px solid ${CB.border}` }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 10 }}>Credentials & Training</div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {form.a_transcripts && <Badge text="Transcripts ✓" color={CB.green} />}
+                      {form.a_degrees && <Badge text="Degrees ✓" color={CB.green} />}
+                      {form.a_professional_license && <Badge text="License ✓" color={CB.green} />}
+                      {form.c_training_log_started && <Badge text="Training Log ✓" color={CB.teal} />}
+                      {form.c_emergency_plan_training && <Badge text="EMBC Training ✓" color={CB.teal} />}
+                      {form.c_person_specific_training && <Badge text="Person Training ✓" color={CB.teal} />}
+                      {!form.a_transcripts && !form.a_degrees && !form.c_training_log_started && <span style={{ fontSize: 13, color: CB.textLight }}>None collected yet</span>}
+                    </div>
+                  </div>
+                  <div style={{ padding: 16, background: CB.cream, borderRadius: 12, border: `1px solid ${CB.border}` }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 10 }}>Section D — Certifications</div>
+                    <div style={{ display: "grid", gap: 6 }}>
+                      <div style={{ fontSize: 13, color: form.d_first_aid_date ? CB.text : CB.textLight }}>
+                        <span style={{ fontWeight: 600 }}>First Aid:</span> {form.d_first_aid_date ? `${new Date(form.d_first_aid_date + "T00:00:00").toLocaleDateString()}${form.d_first_aid_provider ? ` (${form.d_first_aid_provider})` : ""}` : "Not entered"}
+                      </div>
+                      <div style={{ fontSize: 13, color: form.d_cpr_date ? CB.text : CB.textLight }}>
+                        <span style={{ fontWeight: 600 }}>CPR:</span> {form.d_cpr_date ? `${new Date(form.d_cpr_date + "T00:00:00").toLocaleDateString()}${form.d_cpr_provider ? ` (${form.d_cpr_provider})` : ""}` : "Not entered"}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* Navigation */}
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 28, paddingTop: 20, borderTop: `1px solid ${CB.border}` }}>
+              {step > 0 ? (
+                <SecondaryButton onClick={() => setStep(step - 1)}>{icons.arrowRight({ size: 15, style: { transform: "rotate(180deg)" } })} Back</SecondaryButton>
+              ) : <div />}
+              {step < 4 ? (
+                <PrimaryButton onClick={() => setStep(step + 1)}>Next {icons.arrowRight({ size: 15 })}</PrimaryButton>
+              ) : (
+                <PrimaryButton onClick={handleSubmit} loading={saving} color={CB.green}>{icons.checkCircle({ size: 16 })} Create Staff Member</PrimaryButton>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // INTAKE PAGE — tabbed wrapper for Client + Staff intake
+    // ═══════════════════════════════════════════════════════════════
+    function IntakePage() {
+      const [mode, setMode] = useState("client");
+
+      const TabBtn = ({ value, label, icon }) => (
+        <button onClick={() => setMode(value)} style={{
+          padding: "10px 20px", borderRadius: 10, border: "none", fontSize: 14, fontWeight: 700,
+          background: mode === value ? CB.navy : "transparent",
+          color: mode === value ? CB.white : CB.textMid,
+          cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s",
+          display: "flex", alignItems: "center", gap: 8,
+        }}>{icon({ size: 16, color: mode === value ? CB.white : CB.textMid })} {label}</button>
+      );
+
+      return (
+        <div>
+          <PageHeader title="Intake & Onboarding" subtitle="Guided wizards for new client admissions and staff onboarding" />
+          <div style={{ display: "flex", gap: 4, marginBottom: 24, background: CB.cream, padding: 4, borderRadius: 12, width: "fit-content" }}>
+            <TabBtn value="client" label="Client Intake" icon={icons.heart} />
+            <TabBtn value="staff" label="Staff Onboarding" icon={icons.users} />
+          </div>
+          {mode === "client" ? <ClientIntakeWizard /> : <StaffOnboardingWizard />}
         </div>
       );
     }
