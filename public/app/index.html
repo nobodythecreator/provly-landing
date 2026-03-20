@@ -1557,37 +1557,74 @@
     // ═══════════════════════════════════════════════════════════════
     // DOCUMENT TYPE TAXONOMY — staff and client document requirements
     // ═══════════════════════════════════════════════════════════════
+    // Staff Personnel File — from Hope Haven Staff File Cover Sheet
     const STAFF_DOC_TYPES = [
-      { value: "i9", label: "I-9 Employment Eligibility", required: true, expires: false },
-      { value: "drivers_license", label: "Driver's License", required: true, expires: true },
-      { value: "background_check", label: "Background Check Clearance", required: true, expires: true },
-      { value: "cpr_cert", label: "CPR/First Aid Certification", required: true, expires: true },
-      { value: "tb_test", label: "TB Test Results", required: true, expires: true },
-      { value: "ssn_card", label: "Social Security Card", required: true, expires: false },
-      { value: "education_transcript", label: "Education Transcript", required: false, expires: false },
-      { value: "employment_agreement", label: "Signed Employment Agreement", required: true, expires: false },
-      { value: "confidentiality_agreement", label: "Confidentiality Agreement", required: true, expires: false },
-      { value: "abuse_neglect_ack", label: "Abuse/Neglect Policy Acknowledgment", required: true, expires: false },
-      { value: "vehicle_insurance", label: "Vehicle Insurance (if transporting)", required: false, expires: true },
-      { value: "training_cert", label: "Training Certificate", required: false, expires: true },
-      { value: "other", label: "Other Document", required: false, expires: false },
+      // Section A: Credentials
+      { value: "a_transcripts", label: "A — Educational Transcripts", required: false, expires: false, section: "A Credentials" },
+      { value: "a_degrees", label: "A — Degrees / Diplomas", required: false, expires: false, section: "A Credentials" },
+      { value: "a_professional_license", label: "A — Professional License", required: false, expires: true, section: "A Credentials" },
+      { value: "a_certifications", label: "A — Certifications", required: false, expires: true, section: "A Credentials" },
+      { value: "a_recommendation_letters", label: "A — Letters of Recommendation", required: false, expires: false, section: "A Credentials" },
+      // Section B: Hire Paperwork
+      { value: "b_application", label: "B — Employment Application", required: true, expires: false, section: "B Hire Paperwork" },
+      { value: "b_resume", label: "B — Resume", required: true, expires: false, section: "B Hire Paperwork" },
+      { value: "b_code_of_conduct", label: "B — DHHS Code of Conduct (signed)", required: true, expires: false, section: "B Hire Paperwork" },
+      { value: "b_medicaid_exclusion", label: "B — Medicaid Exclusion Verification", required: true, expires: false, section: "B Hire Paperwork" },
+      { value: "b_background_check", label: "B — Background Check (BCI)", required: true, expires: true, section: "B Hire Paperwork" },
+      { value: "b_i9", label: "B — I-9 Employment Eligibility", required: true, expires: false, section: "B Hire Paperwork" },
+      { value: "b_w4", label: "B — W-4 Tax Withholding", required: true, expires: false, section: "B Hire Paperwork" },
+      { value: "b_direct_deposit", label: "B — Direct Deposit Authorization", required: true, expires: false, section: "B Hire Paperwork" },
+      { value: "b_emergency_contact", label: "B — Emergency Contact Info", required: true, expires: false, section: "B Hire Paperwork" },
+      { value: "b_drivers_license", label: "B — Driver's License Copy", required: true, expires: true, section: "B Hire Paperwork" },
+      { value: "b_auto_insurance", label: "B — Auto Insurance Verification", required: false, expires: true, section: "B Hire Paperwork" },
+      // Section C: Training
+      { value: "c_training_log", label: "C — General Training Log (24 topics)", required: true, expires: false, section: "C Training" },
+      { value: "c_emergency_plan_training", label: "C — Emergency Mgmt Plan Training", required: true, expires: false, section: "C Training" },
+      { value: "c_person_specific_training", label: "C — Person-Specific Training", required: true, expires: false, section: "C Training" },
+      { value: "c_acre_usu", label: "C — ACRE/USU (if EPR)", required: false, expires: false, section: "C Training" },
+      { value: "c_abi_training", label: "C — ABI Training (if ABI)", required: false, expires: false, section: "C Training" },
+      // Section D: Certifications
+      { value: "d_first_aid_initial", label: "D — First Aid (Initial)", required: true, expires: false, section: "D Certifications" },
+      { value: "d_first_aid_current", label: "D — First Aid (Current)", required: true, expires: true, section: "D Certifications" },
+      { value: "d_cpr_initial", label: "D — CPR (Initial)", required: true, expires: false, section: "D Certifications" },
+      { value: "d_cpr_current", label: "D — CPR (Current)", required: true, expires: true, section: "D Certifications" },
+      // Other
+      { value: "other", label: "Other Document", required: false, expires: false, section: "Other" },
     ];
 
+    // Client Binder Tabs — from Hope Haven State Review Checklist
     const CLIENT_DOC_TYPES = [
-      { value: "birth_certificate", label: "Birth Certificate", required: true, expires: false },
-      { value: "ssn_card", label: "Social Security Card", required: true, expires: false },
-      { value: "medicaid_card", label: "Medicaid Card", required: true, expires: true },
-      { value: "photo_id", label: "Photo ID", required: false, expires: true },
-      { value: "isp", label: "Individual Support Plan (ISP)", required: true, expires: true },
-      { value: "guardianship", label: "Guardianship/Conservatorship Papers", required: false, expires: false },
-      { value: "physician_orders", label: "Physician Orders", required: true, expires: true },
-      { value: "medication_list", label: "Medication List", required: true, expires: true },
-      { value: "emergency_contacts", label: "Emergency Contact Sheet", required: true, expires: false },
-      { value: "behavioral_plan", label: "Behavioral Support Plan", required: false, expires: true },
-      { value: "intake_assessment", label: "Intake Assessment", required: true, expires: false },
-      { value: "consent_forms", label: "Signed Consent Forms", required: true, expires: false },
-      { value: "rights_ack", label: "Rights Acknowledgment", required: true, expires: false },
-      { value: "other", label: "Other Document", required: false, expires: false },
+      // Tab 1: Face Sheet
+      { value: "t1_face_sheet", label: "Tab 1 — Face Sheet", required: true, expires: false, tab: 1 },
+      // Tab 2: Medical/Dental
+      { value: "t2_medical_exam", label: "Tab 2 — Medical Exam Verification", required: true, expires: true, tab: 2 },
+      { value: "t2_dental_exam", label: "Tab 2 — Dental Exam Verification", required: true, expires: true, tab: 2 },
+      { value: "t2_health_records", label: "Tab 2 — Health Records", required: true, expires: false, tab: 2 },
+      // Tab 3: Medications
+      { value: "t3_med_tracking", label: "Tab 3 — Medication Tracking Sheet (Monthly)", required: true, expires: true, tab: 3 },
+      { value: "t3_med_list", label: "Tab 3 — Current Medication List", required: true, expires: true, tab: 3 },
+      { value: "t3_physician_orders", label: "Tab 3 — Physician Orders", required: true, expires: true, tab: 3 },
+      // Tab 4: PCSP & Support Strategies
+      { value: "t4_pcsp", label: "Tab 4 — Person-Centered Support Plan (PCSP)", required: true, expires: true, tab: 4 },
+      { value: "t4_support_strategies", label: "Tab 4 — Support Strategies", required: true, expires: false, tab: 4 },
+      // Tab 5: FBA/BSP
+      { value: "t5_fba", label: "Tab 5 — Functional Behavior Assessment (FBA)", required: false, expires: true, tab: 5 },
+      { value: "t5_bsp", label: "Tab 5 — Behavior Support Plan (BSP)", required: false, expires: true, tab: 5 },
+      // Tab 6: Quarterly Summaries
+      { value: "t6_quarterly_summary", label: "Tab 6 — Quarterly Summary", required: true, expires: false, tab: 6 },
+      // Tab 7: Rights & Grievances
+      { value: "t7_grievance_policy", label: "Tab 7 — Signed Grievance Policy", required: true, expires: false, tab: 7 },
+      { value: "t7_hrr_documentation", label: "Tab 7 — Human Rights Review Documentation", required: false, expires: false, tab: 7 },
+      { value: "t7_rights_ack", label: "Tab 7 — Rights Acknowledgment", required: true, expires: false, tab: 7 },
+      // Tab 8: Inventory & Housing
+      { value: "t8_belongings_inventory", label: "Tab 8 — Personal Belongings Inventory", required: true, expires: false, tab: 8 },
+      { value: "t8_room_board_agreement", label: "Tab 8 — Room & Board Agreement", required: true, expires: false, tab: 8 },
+      // Tab 9: Financial
+      { value: "t9_financial_records", label: "Tab 9 — Financial Records (if managing funds)", required: false, expires: false, tab: 9 },
+      // Tab 10: Service Logs
+      { value: "t10_service_logs", label: "Tab 10 — Daily Service Logs", required: true, expires: false, tab: 10 },
+      // Other
+      { value: "other", label: "Other Document", required: false, expires: false, tab: 0 },
     ];
 
     const ORG_UNIT_TYPES = [
@@ -2017,15 +2054,19 @@
       const [editing, setEditing] = useState(false);
       const [editForm, setEditForm] = useState({});
       const [saving, setSaving] = useState(false);
+      const [serviceCodes, setServiceCodes] = useState([]);
       const { addToast } = useToast();
       const perms = usePermissions();
 
-      useEffect(() => { loadNotes(); }, []);
+      useEffect(() => {
+        loadNotes();
+        supabase.from("service_code_definitions").select("id, code, name").order("code").then(({ data }) => setServiceCodes(data || []));
+      }, []);
 
       const loadNotes = async () => {
         setLoading(true);
         const { data, error } = await supabase.from("service_notes")
-          .select("id, service_date, start_time, end_time, duration_minutes, billable_units, status, summary_note, staff!service_notes_staff_id_fkey(first_name, last_name), persons(first_name, last_name), service_code_definitions(code, name)")
+          .select("id, service_date, start_time, end_time, duration_minutes, billable_units, status, summary_note, service_code_id, staff!service_notes_staff_id_fkey(first_name, last_name), persons(first_name, last_name), service_code_definitions(code, name)")
           .order("service_date", { ascending: false })
           .limit(100);
         if (!error) setNotes(data || []);
@@ -2040,6 +2081,7 @@
           status: note.status || "draft",
           start_time: note.start_time?.slice(0, 5) || "",
           end_time: note.end_time?.slice(0, 5) || "",
+          service_code_id: note.service_code_id || "",
         });
       };
 
@@ -2052,15 +2094,22 @@
           duration_minutes = (eh * 60 + em) - (sh * 60 + sm);
           if (duration_minutes < 0) duration_minutes += 1440;
         }
-        const code = viewing.service_code_definitions?.code;
-        const { error } = await supabase.from("service_notes").update({
+        // Use edited code if changed, else fall back to viewing's original code
+        const editedCodeDef = serviceCodes.find(sc => sc.id === editForm.service_code_id);
+        const code = editedCodeDef?.code || viewing.service_code_definitions?.code;
+        const updatePayload = {
           summary_note: editForm.summary_note,
           status: editForm.status,
           start_time: editForm.start_time || null,
           end_time: editForm.end_time || null,
           duration_minutes,
           billable_units: calculateBillableUnits(code, duration_minutes),
-        }).eq("id", viewing.id);
+        };
+        // Only include service_code_id if it changed
+        if (editForm.service_code_id && editForm.service_code_id !== viewing.service_code_id) {
+          updatePayload.service_code_id = editForm.service_code_id;
+        }
+        const { error } = await supabase.from("service_notes").update(updatePayload).eq("id", viewing.id);
         setSaving(false);
         if (error) return addToast(error.message, "error");
         addToast("Service note updated", "success");
@@ -2143,7 +2192,14 @@
                 {/* Status bar with actions */}
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20, padding: "12px 16px", borderRadius: 12, background: CB.cream, border: `1px solid ${CB.border}` }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <Badge text={viewing.service_code_definitions?.code || "?"} color={CB.blue} />
+                    {editing ? (
+                      <select style={{ ...fieldStyle, padding: "6px 10px", fontSize: 12, fontWeight: 700, width: "auto", minWidth: 180, background: CB.white }}
+                        value={editForm.service_code_id} onChange={e => setEditForm(p => ({ ...p, service_code_id: e.target.value }))}>
+                        {serviceCodes.map(sc => <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}</option>)}
+                      </select>
+                    ) : (
+                      <Badge text={viewing.service_code_definitions?.code || "?"} color={CB.blue} />
+                    )}
                     <Badge text={editForm.status || viewing.status || "draft"} color={statusColors[editForm.status || viewing.status] || CB.textLight} />
                     <span style={{ fontSize: 13, color: CB.textMid }}>by {viewing.staff?.first_name} {viewing.staff?.last_name}</span>
                   </div>
@@ -2262,6 +2318,7 @@
       const [editingEVV, setEditingEVV] = useState(false);
       const [evvEditForm, setEvvEditForm] = useState({});
       const [savingEVV, setSavingEVV] = useState(false);
+      const [clientEvvAuths, setClientEvvAuths] = useState([]);
 
       useEffect(() => { loadAll(); }, []);
 
@@ -2280,14 +2337,56 @@
         setLoading(false);
       };
 
+      // When client changes in clock-in form, load their authorized EVV codes
+      const handleEvvClientChange = async (personId) => {
+        setClockForm(p => ({ ...p, person_id: personId, service_code_id: "" }));
+        if (personId) {
+          const { data } = await supabase.from("person_service_authorizations")
+            .select("service_code_id, service_code_definitions(id, code, name, evv_required)")
+            .eq("person_id", personId);
+          // Only keep EVV-required codes from their auths
+          const evvAuths = (data || []).filter(a => a.service_code_definitions?.evv_required);
+          setClientEvvAuths(evvAuths.map(a => a.service_code_definitions));
+        } else {
+          setClientEvvAuths([]);
+        }
+      };
+
+      // Determine which codes to show in dropdown: client-filtered if client selected, else all EVV codes
+      const evvCodesForDropdown = clockForm.person_id && clientEvvAuths.length > 0 ? clientEvvAuths : serviceCodes;
+
+      // Force a fresh GPS fix — watchPosition is more reliable than getCurrentPosition
+      // on mobile browsers that aggressively cache location
       const getGPS = () => new Promise((resolve, reject) => {
         if (!navigator.geolocation) return reject(new Error("Geolocation not supported"));
         setGpsStatus("locating");
-        navigator.geolocation.getCurrentPosition(
-          pos => { setGpsStatus("found"); resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }); },
-          err => { setGpsStatus("error"); reject(err); },
-          { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+        let resolved = false;
+        const watchId = navigator.geolocation.watchPosition(
+          pos => {
+            if (resolved) return;
+            resolved = true;
+            navigator.geolocation.clearWatch(watchId);
+            setGpsStatus("found");
+            resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy });
+          },
+          err => {
+            if (resolved) return;
+            resolved = true;
+            navigator.geolocation.clearWatch(watchId);
+            setGpsStatus("error");
+            reject(err);
+          },
+          { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }
         );
+        // Safety timeout — clear watch if it hangs
+        setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+            navigator.geolocation.clearWatch(watchId);
+            setGpsStatus("error");
+            reject(new Error("GPS timeout — try again or check location permissions"));
+          }
+        }, 22000);
       });
 
       const handleClockIn = async () => {
@@ -2541,7 +2640,7 @@
           </Modal>
 
           {/* Clock-in Modal */}
-          <Modal open={showClockIn} onClose={() => setShowClockIn(false)} title="Clock In" subtitle="GPS coordinates will be captured automatically">
+          <Modal open={showClockIn} onClose={() => { setShowClockIn(false); setClientEvvAuths([]); }} title="Clock In" subtitle="GPS coordinates will be captured automatically">
             <FormField label="Staff Member" required>
               <select style={fieldStyle} value={clockForm.staff_id} onChange={e => setClockForm(p => ({ ...p, staff_id: e.target.value }))}>
                 <option value="">Select staff...</option>
@@ -2549,16 +2648,26 @@
               </select>
             </FormField>
             <FormField label="Client" required>
-              <select style={fieldStyle} value={clockForm.person_id} onChange={e => setClockForm(p => ({ ...p, person_id: e.target.value }))}>
+              <select style={fieldStyle} value={clockForm.person_id} onChange={e => handleEvvClientChange(e.target.value)}>
                 <option value="">Select client...</option>
                 {clients.map(c => <option key={c.id} value={c.id}>{c.first_name} {c.last_name}</option>)}
               </select>
             </FormField>
               <FormField label="Service Code (EVV)" required>
                 <select style={fieldStyle} value={clockForm.service_code_id} onChange={e => setClockForm(p => ({ ...p, service_code_id: e.target.value }))}>
-                  <option value="">Select code...</option>
-                  {serviceCodes.map(sc => <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}</option>)}
+                  <option value="">{clockForm.person_id ? (evvCodesForDropdown.length > 0 ? "Select code..." : "No EVV auths for this client") : "Select client first..."}</option>
+                  {evvCodesForDropdown.map(sc => <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}</option>)}
                 </select>
+                {clockForm.person_id && clientEvvAuths.length > 0 && (
+                  <div style={{ marginTop: 4, fontSize: 11, color: CB.teal, fontWeight: 600 }}>
+                    {icons.checkCircle({ size: 11, color: CB.teal })} Showing {clientEvvAuths.length} authorized EVV code{clientEvvAuths.length !== 1 ? "s" : ""} for this client
+                  </div>
+                )}
+                {clockForm.person_id && clientEvvAuths.length === 0 && (
+                  <div style={{ marginTop: 4, fontSize: 11, color: CB.amber, fontWeight: 600 }}>
+                    {icons.alertTriangle({ size: 11, color: CB.amber })} No EVV authorizations found — showing all EVV codes
+                  </div>
+                )}
               </FormField>
 
             {gpsStatus && (
@@ -3173,6 +3282,22 @@
         loadUnits();
       };
 
+      const handleEdit = async () => {
+        if (!editingUnit || !editingUnit.name) return addToast("Name is required", "error");
+        setSaving(true);
+        const { error } = await supabase.from("org_units").update({
+          name: editingUnit.name,
+          unit_type: editingUnit.unit_type,
+          address: editingUnit.address || null,
+          city: editingUnit.city || null,
+        }).eq("id", editingUnit.id);
+        setSaving(false);
+        if (error) return addToast(error.message, "error");
+        addToast(`"${editingUnit.name}" updated`, "success");
+        setEditingUnit(null);
+        loadUnits();
+      };
+
       const typeIcons = { admin: icons.shield, region: icons.mapPin, program: icons.fileText, site: icons.heart, placement: icons.users, group: icons.dashboard };
 
       return (
@@ -3202,10 +3327,10 @@
                       display: "flex", alignItems: "center", justifyContent: "space-between",
                       padding: "10px 14px", paddingLeft: 14 + unit.depth * 28,
                       borderRadius: 10, animation: `fadeIn 0.2s ease ${i * 0.02}s both`,
-                      transition: "background 0.1s",
+                      transition: "all 0.15s", border: "1px solid transparent",
                     }}
-                      onMouseEnter={e => e.currentTarget.style.background = CB.cream}
-                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+                      onMouseEnter={e => { e.currentTarget.style.background = `${CB.teal}08`; e.currentTarget.style.borderColor = `${CB.teal}20`; }}
+                      onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.borderColor = "transparent"; }}
                     >
                       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                         {unit.depth > 0 && (
@@ -3225,6 +3350,10 @@
                         </div>
                       </div>
                       <div style={{ display: "flex", gap: 4 }}>
+                        <button onClick={() => setEditingUnit({ id: unit.id, name: unit.name, unit_type: unit.unit_type, address: unit.address || "", city: unit.city || "" })} title="Edit" style={{
+                          padding: "4px 8px", borderRadius: 6, border: `1px solid ${CB.border}`, background: CB.white,
+                          color: CB.blue, cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit",
+                        }}>{icons.edit({ size: 12, color: CB.blue })}</button>
                         <button onClick={() => { setAddingTo(unit.id); setNewUnit({ name: "", unit_type: "group", address: "", city: "" }); }} title="Add child" style={{
                           padding: "4px 8px", borderRadius: 6, border: `1px solid ${CB.border}`, background: CB.white,
                           color: CB.teal, cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit",
@@ -3265,6 +3394,35 @@
               <SecondaryButton onClick={() => setAddingTo(false)}>Cancel</SecondaryButton>
               <PrimaryButton onClick={handleAdd} loading={saving}>{icons.plus({ size: 16 })} Add Unit</PrimaryButton>
             </div>
+          </Modal>
+
+          {/* Edit Unit Modal */}
+          <Modal open={!!editingUnit} onClose={() => setEditingUnit(null)} title="Edit Org Unit"
+            subtitle={editingUnit ? `Editing: ${editingUnit.name}` : ""}>
+            {editingUnit && (
+              <>
+                <FormField label="Unit Name" required>
+                  <input style={fieldStyle} value={editingUnit.name} onChange={e => setEditingUnit(p => ({ ...p, name: e.target.value }))} placeholder="Unit name" />
+                </FormField>
+                <FormField label="Unit Type" required>
+                  <select style={fieldStyle} value={editingUnit.unit_type} onChange={e => setEditingUnit(p => ({ ...p, unit_type: e.target.value }))}>
+                    {ORG_UNIT_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                  </select>
+                </FormField>
+                <FormRow>
+                  <FormField label="City" half>
+                    <input style={fieldStyle} value={editingUnit.city} onChange={e => setEditingUnit(p => ({ ...p, city: e.target.value }))} placeholder="City" />
+                  </FormField>
+                  <FormField label="Address" half>
+                    <input style={fieldStyle} value={editingUnit.address} onChange={e => setEditingUnit(p => ({ ...p, address: e.target.value }))} placeholder="Street address" />
+                  </FormField>
+                </FormRow>
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 8 }}>
+                  <SecondaryButton onClick={() => setEditingUnit(null)}>Cancel</SecondaryButton>
+                  <PrimaryButton onClick={handleEdit} loading={saving}>{icons.save({ size: 16 })} Save Changes</PrimaryButton>
+                </div>
+              </>
+            )}
           </Modal>
         </div>
       );
@@ -3401,7 +3559,21 @@
                   <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>Document Type</label>
                   <select style={{ ...fieldStyle, padding: "8px 10px", fontSize: 13 }} value={newDoc.doc_type} onChange={e => setNewDoc(p => ({ ...p, doc_type: e.target.value }))}>
                     <option value="">Select type...</option>
-                    {docTypes.map(d => <option key={d.value} value={d.value}>{d.label}{d.required ? " *" : ""}</option>)}
+                    {(() => {
+                      // Group by section (staff) or tab (client)
+                      const groupKey = entityType === "staff" ? "section" : "tab";
+                      const groups = {};
+                      docTypes.forEach(d => {
+                        const g = entityType === "staff" ? (d.section || "Other") : (d.tab ? `Tab ${d.tab}` : "Other");
+                        if (!groups[g]) groups[g] = [];
+                        groups[g].push(d);
+                      });
+                      return Object.entries(groups).map(([group, items]) => (
+                        <optgroup key={group} label={group}>
+                          {items.map(d => <option key={d.value} value={d.value}>{d.label}{d.required ? " *" : ""}</option>)}
+                        </optgroup>
+                      ));
+                    })()}
                   </select>
                 </div>
                 <div style={{ flex: "1 1 160px" }}>
@@ -3440,8 +3612,13 @@
       const [complete, setComplete] = useState(false);
       const [form, setForm] = useState({
         first_name: "", last_name: "", date_of_birth: "", medicaid_number: "",
-        address: "", phone: "", emergency_name: "", emergency_phone: "", emergency_relation: "",
-        diagnoses: "", support_coordinator: "", sc_phone: "",
+        address: "", city: "", state: "UT", zip: "", phone: "",
+        pid: "", gender: "", ssn_last4: "", primary_language: "English",
+        guardian_name: "", guardian_phone: "", guardian_relation: "",
+        emergency_name: "", emergency_phone: "", emergency_relation: "",
+        support_coordinator: "", sc_phone: "", sc_email: "", sc_agency: "",
+        diagnoses: "", medications_on_file: false, pcsp_on_file: false,
+        admission_date: new Date().toISOString().split("T")[0],
         auths: [],
       });
       const [newAuth, setNewAuth] = useState({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "" });
@@ -3504,7 +3681,8 @@
 
       const steps = [
         { label: "Personal Info", icon: icons.heart },
-        { label: "Contacts", icon: icons.mail },
+        { label: "Guardian & Contacts", icon: icons.mail },
+        { label: "Medical & SC", icon: icons.shield },
         { label: "Service Auths", icon: icons.fileText },
         { label: "Review & Submit", icon: icons.checkCircle },
       ];
@@ -3525,7 +3703,7 @@
               <p style={{ fontSize: 15, color: CB.textMid, marginBottom: 24 }}>
                 Created with {form.auths.length} service authorization{form.auths.length !== 1 ? "s" : ""}
               </p>
-              <PrimaryButton onClick={() => { setComplete(false); setStep(0); setForm({ first_name: "", last_name: "", date_of_birth: "", medicaid_number: "", address: "", phone: "", emergency_name: "", emergency_phone: "", emergency_relation: "", diagnoses: "", support_coordinator: "", sc_phone: "", auths: [] }); }}>
+              <PrimaryButton onClick={() => { setComplete(false); setStep(0); setForm({ first_name: "", last_name: "", date_of_birth: "", medicaid_number: "", address: "", city: "", state: "UT", zip: "", phone: "", pid: "", gender: "", ssn_last4: "", primary_language: "English", guardian_name: "", guardian_phone: "", guardian_relation: "", emergency_name: "", emergency_phone: "", emergency_relation: "", support_coordinator: "", sc_phone: "", sc_email: "", sc_agency: "", diagnoses: "", medications_on_file: false, pcsp_on_file: false, admission_date: new Date().toISOString().split("T")[0], auths: [] }); }}>
                 {icons.plus({ size: 16 })} Start Another Intake
               </PrimaryButton>
             </div>
@@ -3589,53 +3767,158 @@
                   <FormField label="Date of Birth" half>
                     <input style={fieldStyle} type="date" value={form.date_of_birth} onChange={e => set("date_of_birth", e.target.value)} />
                   </FormField>
+                  <FormField label="Gender" half>
+                    <select style={fieldStyle} value={form.gender} onChange={e => set("gender", e.target.value)}>
+                      <option value="">Select...</option>
+                      <option value="male">Male</option>
+                      <option value="female">Female</option>
+                      <option value="nonbinary">Non-binary</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </FormField>
+                </FormRow>
+                <FormRow>
                   <FormField label="Medicaid Number" half>
                     <input style={fieldStyle} value={form.medicaid_number} onChange={e => set("medicaid_number", e.target.value)} placeholder="Medicaid ID" />
                   </FormField>
+                  <FormField label="PID (Person ID)" half>
+                    <input style={fieldStyle} value={form.pid} onChange={e => set("pid", e.target.value)} placeholder="DSPD Person ID" />
+                  </FormField>
+                </FormRow>
+                <FormRow>
+                  <FormField label="SSN (Last 4 digits)" half>
+                    <input style={fieldStyle} value={form.ssn_last4} onChange={e => set("ssn_last4", e.target.value.replace(/\D/g, "").slice(0, 4))} placeholder="XXXX" maxLength={4} />
+                  </FormField>
+                  <FormField label="Primary Language" half>
+                    <input style={fieldStyle} value={form.primary_language} onChange={e => set("primary_language", e.target.value)} placeholder="English" />
+                  </FormField>
                 </FormRow>
                 <FormField label="Address">
-                  <input style={fieldStyle} value={form.address} onChange={e => set("address", e.target.value)} placeholder="Full address" />
+                  <input style={fieldStyle} value={form.address} onChange={e => set("address", e.target.value)} placeholder="Street address" />
                 </FormField>
-                <FormField label="Phone">
-                  <input style={fieldStyle} type="tel" value={form.phone} onChange={e => set("phone", e.target.value)} placeholder="(801) 555-0000" />
-                </FormField>
-                <FormField label="Diagnoses / Conditions">
-                  <textarea style={{ ...fieldStyle, minHeight: 72, resize: "vertical" }} value={form.diagnoses} onChange={e => set("diagnoses", e.target.value)} placeholder="Primary diagnoses, conditions, or relevant medical info" />
+                <FormRow>
+                  <FormField label="City" half>
+                    <input style={fieldStyle} value={form.city} onChange={e => set("city", e.target.value)} placeholder="City" />
+                  </FormField>
+                  <FormField label="State" half>
+                    <input style={fieldStyle} value={form.state} onChange={e => set("state", e.target.value)} placeholder="UT" maxLength={2} />
+                  </FormField>
+                </FormRow>
+                <FormRow>
+                  <FormField label="ZIP Code" half>
+                    <input style={fieldStyle} value={form.zip} onChange={e => set("zip", e.target.value)} placeholder="84088" />
+                  </FormField>
+                  <FormField label="Phone" half>
+                    <input style={fieldStyle} type="tel" value={form.phone} onChange={e => set("phone", e.target.value)} placeholder="(801) 555-0000" />
+                  </FormField>
+                </FormRow>
+                <FormField label="Admission Date">
+                  <input style={fieldStyle} type="date" value={form.admission_date} onChange={e => set("admission_date", e.target.value)} />
                 </FormField>
               </>
             )}
 
-            {/* Step 1: Contacts */}
+            {/* Step 1: Guardian & Emergency Contacts */}
             {step === 1 && (
               <>
-                <h3 style={{ fontSize: 18, fontWeight: 700, color: CB.navy, marginBottom: 20 }}>Emergency & Support Contacts</h3>
+                <h3 style={{ fontSize: 18, fontWeight: 700, color: CB.navy, marginBottom: 20 }}>Guardian & Emergency Contacts</h3>
+                <div style={{ padding: "12px 16px", borderRadius: 10, background: `${CB.teal}06`, border: `1px solid ${CB.teal}20`, marginBottom: 20 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: CB.teal, marginBottom: 4 }}>Legal Guardian / Representative</div>
+                  <div style={{ fontSize: 11, color: CB.textMid }}>If the person has a legal guardian, conservator, or representative payee</div>
+                </div>
+                <FormRow>
+                  <FormField label="Guardian Name" half>
+                    <input style={fieldStyle} value={form.guardian_name} onChange={e => set("guardian_name", e.target.value)} placeholder="Full name" />
+                  </FormField>
+                  <FormField label="Relationship" half>
+                    <input style={fieldStyle} value={form.guardian_relation} onChange={e => set("guardian_relation", e.target.value)} placeholder="e.g. Parent, Guardian, Conservator" />
+                  </FormField>
+                </FormRow>
+                <FormField label="Guardian Phone">
+                  <input style={fieldStyle} type="tel" value={form.guardian_phone} onChange={e => set("guardian_phone", e.target.value)} placeholder="(801) 555-0000" />
+                </FormField>
+
+                <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${CB.border}` }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: CB.navy, marginBottom: 14 }}>Emergency Contact</div>
+                </div>
                 <FormRow>
                   <FormField label="Emergency Contact Name" half>
                     <input style={fieldStyle} value={form.emergency_name} onChange={e => set("emergency_name", e.target.value)} placeholder="Contact name" />
                   </FormField>
                   <FormField label="Relationship" half>
-                    <input style={fieldStyle} value={form.emergency_relation} onChange={e => set("emergency_relation", e.target.value)} placeholder="e.g. Parent, Guardian" />
+                    <input style={fieldStyle} value={form.emergency_relation} onChange={e => set("emergency_relation", e.target.value)} placeholder="e.g. Parent, Sibling" />
                   </FormField>
                 </FormRow>
                 <FormField label="Emergency Phone">
                   <input style={fieldStyle} type="tel" value={form.emergency_phone} onChange={e => set("emergency_phone", e.target.value)} placeholder="(801) 555-0000" />
                 </FormField>
+              </>
+            )}
+
+            {/* Step 2: Medical & Support Coordinator */}
+            {step === 2 && (
+              <>
+                <h3 style={{ fontSize: 18, fontWeight: 700, color: CB.navy, marginBottom: 20 }}>Medical Information & Support Coordinator</h3>
+                <FormField label="Diagnoses / Conditions">
+                  <textarea style={{ ...fieldStyle, minHeight: 72, resize: "vertical" }} value={form.diagnoses} onChange={e => set("diagnoses", e.target.value)} placeholder="Primary diagnoses, conditions, or relevant medical information" />
+                </FormField>
+                <FormRow>
+                  <FormField label="Medications on File" half>
+                    <div style={{ display: "flex", gap: 12 }}>
+                      {[true, false].map(val => (
+                        <label key={String(val)} style={{
+                          display: "flex", alignItems: "center", gap: 8, padding: "10px 16px",
+                          borderRadius: 10, border: `1px solid ${form.medications_on_file === val ? (val ? CB.green : CB.textLight) : CB.border}`,
+                          background: form.medications_on_file === val ? (val ? "rgba(46,125,50,0.06)" : CB.cream) : CB.white,
+                          cursor: "pointer", fontSize: 14, fontWeight: 600, color: form.medications_on_file === val ? (val ? CB.green : CB.textMid) : CB.textMid,
+                        }}>
+                          <input type="radio" name="meds" checked={form.medications_on_file === val} onChange={() => set("medications_on_file", val)} style={{ display: "none" }} />
+                          {val ? "Yes" : "No"}
+                        </label>
+                      ))}
+                    </div>
+                  </FormField>
+                  <FormField label="PCSP on File" half>
+                    <div style={{ display: "flex", gap: 12 }}>
+                      {[true, false].map(val => (
+                        <label key={String(val)} style={{
+                          display: "flex", alignItems: "center", gap: 8, padding: "10px 16px",
+                          borderRadius: 10, border: `1px solid ${form.pcsp_on_file === val ? (val ? CB.green : CB.textLight) : CB.border}`,
+                          background: form.pcsp_on_file === val ? (val ? "rgba(46,125,50,0.06)" : CB.cream) : CB.white,
+                          cursor: "pointer", fontSize: 14, fontWeight: 600, color: form.pcsp_on_file === val ? (val ? CB.green : CB.textMid) : CB.textMid,
+                        }}>
+                          <input type="radio" name="pcsp" checked={form.pcsp_on_file === val} onChange={() => set("pcsp_on_file", val)} style={{ display: "none" }} />
+                          {val ? "Yes" : "No"}
+                        </label>
+                      ))}
+                    </div>
+                  </FormField>
+                </FormRow>
+
                 <div style={{ marginTop: 8, padding: "16px 0 0", borderTop: `1px solid ${CB.border}` }}>
                   <h4 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 14 }}>Support Coordinator</h4>
                   <FormRow>
                     <FormField label="SC Name" half>
                       <input style={fieldStyle} value={form.support_coordinator} onChange={e => set("support_coordinator", e.target.value)} placeholder="Support coordinator name" />
                     </FormField>
+                    <FormField label="SC Agency" half>
+                      <input style={fieldStyle} value={form.sc_agency} onChange={e => set("sc_agency", e.target.value)} placeholder="e.g. Utah Independent Living Center" />
+                    </FormField>
+                  </FormRow>
+                  <FormRow>
                     <FormField label="SC Phone" half>
                       <input style={fieldStyle} type="tel" value={form.sc_phone} onChange={e => set("sc_phone", e.target.value)} placeholder="(801) 555-0000" />
+                    </FormField>
+                    <FormField label="SC Email" half>
+                      <input style={fieldStyle} type="email" value={form.sc_email} onChange={e => set("sc_email", e.target.value)} placeholder="sc@agency.org" />
                     </FormField>
                   </FormRow>
                 </div>
               </>
             )}
 
-            {/* Step 2: Service Auths */}
-            {step === 2 && (
+            {/* Step 3: Service Auths */}
+            {step === 3 && (
               <>
                 <h3 style={{ fontSize: 18, fontWeight: 700, color: CB.navy, marginBottom: 20 }}>Service Authorizations</h3>
                 {form.auths.length > 0 && (
@@ -3701,42 +3984,55 @@
               </>
             )}
 
-            {/* Step 3: Review */}
-            {step === 3 && (
+            {/* Step 4: Review */}
+            {step === 4 && (
               <>
                 <h3 style={{ fontSize: 18, fontWeight: 700, color: CB.navy, marginBottom: 20 }}>Review & Submit</h3>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
                   <div style={{ padding: 16, background: CB.cream, borderRadius: 12, border: `1px solid ${CB.border}` }}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 10 }}>Personal Info</div>
                     <div style={{ fontSize: 15, fontWeight: 700, color: CB.navy }}>{form.first_name} {form.last_name}</div>
                     {form.date_of_birth && <div style={{ fontSize: 13, color: CB.textMid, marginTop: 4 }}>DOB: {new Date(form.date_of_birth + "T00:00:00").toLocaleDateString()}</div>}
+                    {form.gender && <div style={{ fontSize: 13, color: CB.textMid }}>Gender: {form.gender}</div>}
                     {form.medicaid_number && <div style={{ fontSize: 13, color: CB.textMid }}>Medicaid: {form.medicaid_number}</div>}
-                    {form.address && <div style={{ fontSize: 13, color: CB.textMid }}>{form.address}</div>}
+                    {form.pid && <div style={{ fontSize: 13, color: CB.textMid }}>PID: {form.pid}</div>}
+                    {form.address && <div style={{ fontSize: 13, color: CB.textMid, marginTop: 4 }}>{form.address}{form.city ? `, ${form.city}` : ""}{form.state ? `, ${form.state}` : ""} {form.zip}</div>}
                     {form.phone && <div style={{ fontSize: 13, color: CB.textMid }}>{form.phone}</div>}
-                    {form.diagnoses && <div style={{ fontSize: 13, color: CB.textMid, marginTop: 6 }}>{form.diagnoses}</div>}
+                    {form.admission_date && <div style={{ fontSize: 13, color: CB.teal, fontWeight: 600, marginTop: 4 }}>Admission: {new Date(form.admission_date + "T00:00:00").toLocaleDateString()}</div>}
                   </div>
                   <div style={{ padding: 16, background: CB.cream, borderRadius: 12, border: `1px solid ${CB.border}` }}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 10 }}>Contacts</div>
-                    {form.emergency_name && <div style={{ fontSize: 13, color: CB.text }}><span style={{ fontWeight: 600 }}>Emergency:</span> {form.emergency_name} ({form.emergency_relation}) {form.emergency_phone}</div>}
-                    {form.support_coordinator && <div style={{ fontSize: 13, color: CB.text, marginTop: 6 }}><span style={{ fontWeight: 600 }}>SC:</span> {form.support_coordinator} {form.sc_phone}</div>}
-                    {!form.emergency_name && !form.support_coordinator && <div style={{ fontSize: 13, color: CB.textLight }}>No contacts added</div>}
+                    {form.guardian_name && <div style={{ fontSize: 13, color: CB.text }}><span style={{ fontWeight: 600 }}>Guardian:</span> {form.guardian_name} ({form.guardian_relation}) {form.guardian_phone}</div>}
+                    {form.emergency_name && <div style={{ fontSize: 13, color: CB.text, marginTop: 6 }}><span style={{ fontWeight: 600 }}>Emergency:</span> {form.emergency_name} ({form.emergency_relation}) {form.emergency_phone}</div>}
+                    {form.support_coordinator && <div style={{ fontSize: 13, color: CB.text, marginTop: 6 }}><span style={{ fontWeight: 600 }}>SC:</span> {form.support_coordinator}{form.sc_agency ? ` (${form.sc_agency})` : ""} {form.sc_phone} {form.sc_email}</div>}
+                    {!form.guardian_name && !form.emergency_name && !form.support_coordinator && <div style={{ fontSize: 13, color: CB.textLight }}>No contacts added</div>}
                   </div>
                 </div>
-                <div style={{ marginTop: 16, padding: 16, background: CB.cream, borderRadius: 12, border: `1px solid ${CB.border}` }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 10 }}>Service Authorizations ({form.auths.length})</div>
-                  {form.auths.length === 0 ? (
-                    <div style={{ fontSize: 13, color: CB.textLight }}>No authorizations — you can add them later from the client record</div>
-                  ) : (
-                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                      {form.auths.map((a, i) => (
-                        <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 8, background: CB.white, border: `1px solid ${CB.border}` }}>
-                          <Badge text={a.code} color={CB.blue} />
-                          <span style={{ fontSize: 13, fontWeight: 600, color: CB.navy }}>{a.authorized_units} units</span>
-                          {a.rate_per_unit && perms.viewRates && <span style={{ fontSize: 12, color: CB.teal }}>@ ${Number(a.rate_per_unit).toFixed(2)}</span>}
-                        </div>
-                      ))}
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
+                  <div style={{ padding: 16, background: CB.cream, borderRadius: 12, border: `1px solid ${CB.border}` }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 10 }}>Medical</div>
+                    {form.diagnoses ? <div style={{ fontSize: 13, color: CB.text }}>{form.diagnoses}</div> : <div style={{ fontSize: 13, color: CB.textLight }}>No diagnoses entered</div>}
+                    <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                      <Badge text={form.medications_on_file ? "Meds on file ✓" : "Meds not on file"} color={form.medications_on_file ? CB.green : CB.amber} />
+                      <Badge text={form.pcsp_on_file ? "PCSP on file ✓" : "PCSP not on file"} color={form.pcsp_on_file ? CB.green : CB.amber} />
                     </div>
-                  )}
+                  </div>
+                  <div style={{ padding: 16, background: CB.cream, borderRadius: 12, border: `1px solid ${CB.border}` }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 10 }}>Service Authorizations ({form.auths.length})</div>
+                    {form.auths.length === 0 ? (
+                      <div style={{ fontSize: 13, color: CB.textLight }}>No authorizations — add later from client record</div>
+                    ) : (
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        {form.auths.map((a, i) => (
+                          <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 8, background: CB.white, border: `1px solid ${CB.border}` }}>
+                            <Badge text={a.code} color={CB.blue} />
+                            <span style={{ fontSize: 13, fontWeight: 600, color: CB.navy }}>{a.authorized_units} units</span>
+                            {a.rate_per_unit && perms.viewRates && <span style={{ fontSize: 12, color: CB.teal }}>@ ${Number(a.rate_per_unit).toFixed(2)}</span>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
               </>
             )}
@@ -3746,7 +4042,7 @@
               {step > 0 ? (
                 <SecondaryButton onClick={() => setStep(step - 1)}>{icons.arrowRight({ size: 15, style: { transform: "rotate(180deg)" } })} Back</SecondaryButton>
               ) : <div />}
-              {step < 3 ? (
+              {step < 4 ? (
                 <PrimaryButton onClick={() => setStep(step + 1)}>Next {icons.arrowRight({ size: 15 })}</PrimaryButton>
               ) : (
                 <PrimaryButton onClick={handleSubmit} loading={saving} color={CB.green}>{icons.checkCircle({ size: 16 })} Create Client</PrimaryButton>
