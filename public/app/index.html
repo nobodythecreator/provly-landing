@@ -11,6 +11,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body, #root { height: 100%; }
@@ -822,7 +824,7 @@
           )}
 
           {/* Documents section */}
-          {editing && <DocumentsSection entityType="staff" entityId={editing.id} orgId={orgId} />}
+          {editing && <DocumentsSection entityType="staff" entityId={editing.id} orgId={orgId} entityData={editing} />}
 
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 8 }}>
             <SecondaryButton onClick={onClose}>Cancel</SecondaryButton>
@@ -1109,7 +1111,7 @@
           )}
 
           {/* Documents section */}
-          {editing && <DocumentsSection entityType="client" entityId={editing.id} orgId={orgId} />}
+          {editing && <DocumentsSection entityType="client" entityId={editing.id} orgId={orgId} entityData={editing} />}
 
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 16 }}>
             <SecondaryButton onClick={onClose}>Cancel</SecondaryButton>
@@ -1635,6 +1637,510 @@
       { value: "placement", label: "Individual Placement" },
       { value: "group", label: "Group" },
     ];
+
+    // ═══════════════════════════════════════════════════════════════
+    // PDF DOCUMENT ENGINE — generates Hope Haven forms from data
+    // Uses jsPDF + autoTable for client-side PDF generation
+    // ═══════════════════════════════════════════════════════════════
+    const HopeHavenPDF = {
+      // Shared constants
+      HEADER_COLOR: [10, 30, 51],   // CB.navy
+      ACCENT_COLOR: [0, 137, 123],  // CB.teal
+      LIGHT_BG: [250, 251, 253],
+      COMPANY: "HOPE HAVEN SERVICES INC.",
+      ADDRESS: "4974 W Mellow Way, South Jordan, UT 84009",
+      PHONE: "801-558-8070",
+
+      // Utility: add company header to any PDF
+      _header(doc, title, subtitle) {
+        const w = doc.internal.pageSize.getWidth();
+        doc.setFillColor(...this.HEADER_COLOR);
+        doc.rect(0, 0, w, 38, "F");
+        doc.setTextColor(255, 255, 255);
+        doc.setFontSize(16);
+        doc.setFont("helvetica", "bold");
+        doc.text(this.COMPANY, 20, 18);
+        doc.setFontSize(10);
+        doc.setFont("helvetica", "normal");
+        doc.text(title, 20, 30);
+        if (subtitle) { doc.setFontSize(8); doc.text(subtitle, w - 20, 30, { align: "right" }); }
+        doc.setTextColor(0, 0, 0);
+        return 48; // y offset after header
+      },
+
+      // Utility: field row
+      _fieldRow(doc, y, fields, opts = {}) {
+        const w = doc.internal.pageSize.getWidth() - 40;
+        const colW = w / fields.length;
+        fields.forEach((f, i) => {
+          const x = 20 + i * colW;
+          doc.setFontSize(8);
+          doc.setFont("helvetica", "bold");
+          doc.setTextColor(100, 100, 100);
+          doc.text(f.label + ":", x, y);
+          doc.setFontSize(10);
+          doc.setFont("helvetica", "normal");
+          doc.setTextColor(0, 0, 0);
+          doc.text(String(f.value || ""), x + (opts.labelWidth || 0), y);
+          // Underline
+          const lineY = y + 2;
+          doc.setDrawColor(200, 200, 200);
+          doc.line(x, lineY, x + colW - 8, lineY);
+        });
+        return y + 16;
+      },
+
+      // Utility: section heading
+      _sectionHead(doc, y, text) {
+        doc.setFillColor(...this.ACCENT_COLOR);
+        doc.rect(20, y, doc.internal.pageSize.getWidth() - 40, 8, "F");
+        doc.setTextColor(255, 255, 255);
+        doc.setFontSize(9);
+        doc.setFont("helvetica", "bold");
+        doc.text(text, 24, y + 6);
+        doc.setTextColor(0, 0, 0);
+        doc.setFont("helvetica", "normal");
+        return y + 14;
+      },
+
+      // Utility: signature block
+      _signatures(doc, y, signers) {
+        y = this._sectionHead(doc, y, "SIGNATURES");
+        signers.forEach(s => {
+          doc.setFontSize(8);
+          doc.setTextColor(100, 100, 100);
+          doc.text(s.label + ":", 20, y + 4);
+          doc.setDrawColor(0, 0, 0);
+          doc.line(80, y + 4, 200, y + 4);
+          doc.text("Date:", 210, y + 4);
+          doc.line(230, y + 4, 300, y + 4);
+          y += 14;
+        });
+        return y;
+      },
+
+      _download(doc, filename) {
+        doc.save(filename);
+      },
+
+      // ──────────────────────────────────────────────
+      // STAFF FORM: Personnel File Cover Sheet
+      // ──────────────────────────────────────────────
+      staffCoverSheet(staff) {
+        const doc = new jspdf.jsPDF();
+        let y = this._header(doc, "Staff Personnel File Cover Sheet");
+        y = this._fieldRow(doc, y, [
+          { label: "Employee Name", value: `${staff.first_name || ""} ${staff.last_name || ""}` },
+          { label: "Hire Date", value: staff.hire_date || "" },
+        ]);
+        y = this._fieldRow(doc, y, [
+          { label: "Position/Title", value: staff.role || "" },
+          { label: "Status", value: staff.is_active !== false ? "Active" : "Inactive" },
+        ]);
+        y = this._fieldRow(doc, y, [
+          { label: "Phone", value: staff.phone || "" },
+          { label: "Email", value: staff.email || "" },
+        ]);
+        y += 6;
+        y = this._sectionHead(doc, y, "PERSONNEL FILE CONTENTS CHECKLIST");
+        const sections = [
+          { title: "SECTION A: CREDENTIALS", items: ["Educational transcripts", "Degrees/Diplomas", "Professional licenses", "Relevant certifications", "Letters of recommendation"] },
+          { title: "SECTION B: HIRE PAPERWORK", items: ["Employment application", "Resume", "DHHS Code of Conduct (signed)", "Medicaid Exclusion verification", "Background check (BCI)", "I-9 Employment Eligibility", "W-4 Tax Withholding", "Direct deposit authorization", "Emergency contact information", "Driver's license copy", "Auto insurance verification"] },
+          { title: "SECTION C: TRAINING", items: ["General training log (24 topics)", "Emergency Mgmt Plan training", "Person-specific training", "ACRE/USU (if EPR)", "ABI training (if ABI)"] },
+          { title: "SECTION D: CERTIFICATIONS", items: ["First Aid — Initial", "First Aid — Current", "CPR — Initial", "CPR — Current"] },
+        ];
+        sections.forEach(sec => {
+          doc.setFontSize(9); doc.setFont("helvetica", "bold"); doc.setTextColor(...this.HEADER_COLOR);
+          doc.text(sec.title, 24, y); y += 6;
+          doc.setFont("helvetica", "normal"); doc.setTextColor(0, 0, 0); doc.setFontSize(9);
+          sec.items.forEach(item => {
+            doc.rect(24, y - 3, 4, 4); // checkbox
+            doc.text(item, 32, y);
+            doc.text("________", 160, y);
+            y += 7;
+            if (y > 270) { doc.addPage(); y = 20; }
+          });
+          y += 3;
+        });
+        this._download(doc, `Staff_Cover_Sheet_${staff.last_name || "new"}.pdf`);
+      },
+
+      // ──────────────────────────────────────────────
+      // STAFF FORM: DHHS Code of Conduct
+      // ──────────────────────────────────────────────
+      codeOfConduct(staff) {
+        const doc = new jspdf.jsPDF();
+        let y = this._header(doc, "DHHS Staff Code of Conduct", "Required by Utah DHHS");
+        y = this._fieldRow(doc, y, [
+          { label: "Employee Name", value: `${staff.first_name || ""} ${staff.last_name || ""}` },
+          { label: "Hire Date", value: staff.hire_date || "" },
+        ]);
+        y += 4;
+        const content = [
+          { head: "1. PROFESSIONAL CONDUCT", body: "I will treat all Persons with dignity, respect, and courtesy. I will provide services professionally, respect privacy and confidentiality, follow all laws and agency policies, and maintain professional boundaries." },
+          { head: "2. ABUSE, NEGLECT, AND EXPLOITATION", body: "I will NOT physically, emotionally, verbally, or sexually abuse any Person. I will NOT neglect health or safety, exploit any Person, use threats or coercion, or use unauthorized restraints. I WILL immediately report suspected abuse/neglect/exploitation." },
+          { head: "3. FINANCIAL CONDUCT", body: "I will NOT accept money, gifts, loans, or gratuities from Persons or their families. I will NOT borrow from or lend money to Persons. I will NOT use a Person's property, vehicle, or resources for personal benefit." },
+          { head: "4. SUBSTANCE USE", body: "I will NOT report to work under the influence of alcohol or illegal drugs. I will NOT use, possess, or distribute illegal substances while on duty. I will report any prescribed medications that may impair my ability to safely perform duties." },
+          { head: "5. CONFIDENTIALITY", body: "I will protect all Person information per HIPAA and state regulations. I will NOT discuss Person information in public areas. I will NOT share information on social media or with unauthorized individuals." },
+          { head: "6. REPORTING OBLIGATIONS", body: "I will immediately report: suspected abuse/neglect/exploitation, critical incidents, unsafe conditions, policy violations by any staff, and any arrest or criminal charges I receive." },
+        ];
+        content.forEach(sec => {
+          if (y > 245) { doc.addPage(); y = 20; }
+          doc.setFontSize(10); doc.setFont("helvetica", "bold"); doc.setTextColor(...this.HEADER_COLOR);
+          doc.text(sec.head, 20, y); y += 6;
+          doc.setFontSize(9); doc.setFont("helvetica", "normal"); doc.setTextColor(60, 60, 60);
+          const lines = doc.splitTextToSize(sec.body, 170);
+          doc.text(lines, 20, y); y += lines.length * 5 + 6;
+        });
+        y += 8;
+        y = this._sectionHead(doc, y, "ACKNOWLEDGMENT");
+        doc.setFontSize(9); doc.setFont("helvetica", "normal");
+        doc.text("I have read, understand, and agree to comply with this Code of Conduct.", 20, y); y += 12;
+        y = this._signatures(doc, y, [
+          { label: "Employee Signature" }, { label: "Supervisor Signature" },
+        ]);
+        this._download(doc, `Code_of_Conduct_${staff.last_name || "new"}.pdf`);
+      },
+
+      // ──────────────────────────────────────────────
+      // STAFF FORM: Medicaid Exclusion Verification
+      // ──────────────────────────────────────────────
+      medicaidExclusion(staff) {
+        const doc = new jspdf.jsPDF();
+        let y = this._header(doc, "Medicaid Fraud Exclusion List Verification", "Required by Utah DHHS Contract");
+        y = this._fieldRow(doc, y, [
+          { label: "Employee Name", value: `${staff.first_name || ""} ${staff.last_name || ""}` },
+          { label: "Hire Date", value: staff.hire_date || "" },
+        ]);
+        y = this._fieldRow(doc, y, [
+          { label: "Position/Title", value: staff.role || "" },
+        ]);
+        y += 4;
+        y = this._sectionHead(doc, y, "REQUIRED EXCLUSION LIST CHECKS");
+        doc.autoTable({
+          startY: y, margin: { left: 20, right: 20 },
+          head: [["Database", "Website"]],
+          body: [
+            ["OIG List of Excluded Individuals/Entities (LEIE)", "exclusions.oig.hhs.gov"],
+            ["SAM.gov (System for Award Management)", "sam.gov"],
+          ],
+          styles: { fontSize: 9, cellPadding: 4 },
+          headStyles: { fillColor: this.HEADER_COLOR },
+        });
+        y = doc.lastAutoTable.finalY + 10;
+        y = this._sectionHead(doc, y, "INITIAL VERIFICATION (At Hire)");
+        doc.autoTable({
+          startY: y, margin: { left: 20, right: 20 },
+          head: [["Database Checked", "Date Checked", "Result"]],
+          body: [
+            ["OIG LEIE", "", "☐ Clear  ☐ Match Found"],
+            ["SAM.gov", "", "☐ Clear  ☐ Match Found"],
+          ],
+          styles: { fontSize: 9, cellPadding: 4 },
+          headStyles: { fillColor: this.HEADER_COLOR },
+        });
+        y = doc.lastAutoTable.finalY + 8;
+        y = this._signatures(doc, y, [{ label: "Verified By" }]);
+        y += 8;
+        y = this._sectionHead(doc, y, "MONTHLY VERIFICATION LOG");
+        const months = [];
+        for (let i = 0; i < 12; i++) months.push(["", "", "☐ Clear", "☐ Clear", "", ""]);
+        doc.autoTable({
+          startY: y, margin: { left: 20, right: 20 },
+          head: [["Month/Year", "Date Checked", "OIG Result", "SAM Result", "Checked By", "Initials"]],
+          body: months,
+          styles: { fontSize: 8, cellPadding: 3 },
+          headStyles: { fillColor: this.HEADER_COLOR },
+        });
+        this._download(doc, `Medicaid_Exclusion_${staff.last_name || "new"}.pdf`);
+      },
+
+      // ──────────────────────────────────────────────
+      // STAFF FORM: Training Log (24 topics)
+      // ──────────────────────────────────────────────
+      trainingLog(staff) {
+        const doc = new jspdf.jsPDF();
+        let y = this._header(doc, "Staff Training Log", "SOW Article 1.8 General Staff Training Requirements");
+        y = this._fieldRow(doc, y, [
+          { label: "Employee Name", value: `${staff.first_name || ""} ${staff.last_name || ""}` },
+          { label: "Hire Date", value: staff.hire_date || "" },
+        ]);
+        y += 4;
+        const topics = [
+          ["EMERGENCY RESPONSE", null], ["1", "When to call 911"], ["2", "When to call a medical professional"],
+          ["3", "When to call a mental health professional"], ["4", "Incident reporting procedures"],
+          ["5", "Seizure disorders orientation"], ["6", "Missing person notification procedures"],
+          ["7", "Choking rescue maneuvers (Heimlich)"], ["8", "Choking prevention"],
+          ["BEHAVIORAL SUPPORT & CRISIS", null], ["9", "Positive behavior supports (R539-4)"],
+          ["10", "Crisis de-escalation strategies"],
+          ["RIGHTS & COMPLIANCE", null], ["11", "Person's rights (R539-1-3)"],
+          ["12", "Abuse, neglect, exploitation prevention"], ["13", "Mandatory reporting obligations"],
+          ["14", "HIPAA / confidentiality training"], ["15", "Grievance policy and procedures"],
+          ["DAILY SUPPORT", null], ["16", "Medication administration procedures"],
+          ["17", "Proper documentation / service notes"], ["18", "ISP/PCSP implementation"],
+          ["19", "Person-centered planning principles"], ["20", "Community integration strategies"],
+          ["HEALTH & SAFETY", null], ["21", "Infection control / universal precautions"],
+          ["22", "Fire safety and evacuation procedures"], ["23", "Vehicle safety / transportation"],
+          ["24", "Agency-specific emergency procedures"],
+        ];
+        const rows = topics.map(([num, topic]) => {
+          if (!topic) return [{ content: num, colSpan: 4, styles: { fillColor: [240, 245, 250], fontStyle: "bold", fontSize: 9 } }];
+          return [num, topic, "", ""];
+        });
+        doc.autoTable({
+          startY: y, margin: { left: 20, right: 20 },
+          head: [["#", "Training Topic", "Date / Trainer", "Initials"]],
+          body: rows,
+          columnStyles: { 0: { cellWidth: 12 }, 1: { cellWidth: 90 }, 2: { cellWidth: 55 }, 3: { cellWidth: 20 } },
+          styles: { fontSize: 8, cellPadding: 3, minCellHeight: 8 },
+          headStyles: { fillColor: this.HEADER_COLOR },
+        });
+        this._download(doc, `Training_Log_${staff.last_name || "new"}.pdf`);
+      },
+
+      // ──────────────────────────────────────────────
+      // CLIENT FORM: Quarterly Summary Report
+      // ──────────────────────────────────────────────
+      quarterlySummary(person, data = {}) {
+        const doc = new jspdf.jsPDF();
+        let y = this._header(doc, "Quarterly Summary Report");
+        y = this._sectionHead(doc, y, "PERSON INFORMATION");
+        y = this._fieldRow(doc, y, [
+          { label: "Person's Name", value: `${person.first_name || ""} ${person.last_name || ""}` },
+          { label: "PID", value: data.pid || "" },
+        ]);
+        y = this._fieldRow(doc, y, [
+          { label: "Date of Birth", value: person.date_of_birth || "" },
+          { label: "Service Code(s)", value: data.service_codes || "" },
+        ]);
+        y = this._fieldRow(doc, y, [
+          { label: "Support Coordinator", value: data.sc_name || "" },
+          { label: "SC Phone", value: data.sc_phone || "" },
+        ]);
+        y += 4;
+        y = this._sectionHead(doc, y, "REPORTING PERIOD");
+        y = this._fieldRow(doc, y, [
+          { label: "Quarter", value: data.quarter || "☐ Q1  ☐ Q2  ☐ Q3  ☐ Q4" },
+          { label: "Year", value: data.year || new Date().getFullYear().toString() },
+        ]);
+        y += 4;
+        y = this._sectionHead(doc, y, "PCSP GOAL PROGRESS");
+        for (let g = 1; g <= 3; g++) {
+          doc.setFontSize(9); doc.setFont("helvetica", "bold");
+          doc.text(`Goal ${g}:`, 20, y); doc.setDrawColor(200,200,200); doc.line(45, y, 190, y); y += 8;
+          doc.setFont("helvetica", "normal"); doc.setFontSize(8);
+          doc.text("Progress:  ☐ Met   ☐ Partially Met   ☐ Not Met   ☐ Discontinued", 20, y);
+          doc.text("% Complete: ____", 150, y); y += 7;
+          doc.text("Notes:", 20, y); doc.line(40, y, 190, y); y += 5; doc.line(20, y, 190, y); y += 8;
+        }
+        y = this._sectionHead(doc, y, "HEALTH & MEDICAL");
+        doc.autoTable({
+          startY: y, margin: { left: 20, right: 20 },
+          body: [
+            ["Medical Appointments This Quarter:", "Dental Appointments This Quarter:"],
+            ["", ""],
+            ["Medication Changes:", "Health Concerns/Hospitalizations:"],
+            ["", ""],
+          ],
+          styles: { fontSize: 8, cellPadding: 6, minCellHeight: 16 },
+          alternateRowStyles: { fillColor: [250, 251, 253] },
+        });
+        y = doc.lastAutoTable.finalY + 6;
+        const extraSections = ["BEHAVIORAL SUPPORT", "COMMUNITY INTEGRATION & ACTIVITIES", "INCIDENTS THIS QUARTER", "OVERALL SUMMARY & RECOMMENDATIONS"];
+        extraSections.forEach(sec => {
+          if (y > 250) { doc.addPage(); y = 20; }
+          y = this._sectionHead(doc, y, sec);
+          doc.setDrawColor(200,200,200);
+          doc.rect(20, y, 170, 20); y += 26;
+        });
+        if (y > 230) { doc.addPage(); y = 20; }
+        y = this._signatures(doc, y, [
+          { label: "Prepared By" }, { label: "Reviewed By" }, { label: "Person/Guardian" },
+        ]);
+        doc.setFontSize(7); doc.setTextColor(120,120,120);
+        doc.text("Retain copy in Person's file. Provide copy to Support Coordinator. SOW Article 1.25", 20, y + 8);
+        this._download(doc, `Quarterly_Summary_${person.last_name || "client"}.pdf`);
+      },
+
+      // ──────────────────────────────────────────────
+      // CLIENT FORM: Daily Service Log
+      // ──────────────────────────────────────────────
+      dailyServiceLog(person, data = {}) {
+        const doc = new jspdf.jsPDF();
+        let y = this._header(doc, "Daily Service Log");
+        y = this._fieldRow(doc, y, [
+          { label: "Person's Name", value: `${person.first_name || ""} ${person.last_name || ""}` },
+          { label: "PID", value: data.pid || "" },
+        ]);
+        y = this._fieldRow(doc, y, [
+          { label: "Service Month/Year", value: data.month_year || "" },
+          { label: "Page", value: "___ of ___" },
+        ]);
+        y += 2;
+        doc.setFillColor(240, 245, 250);
+        doc.rect(20, y, 170, 14, "F");
+        doc.setFontSize(7); doc.setFont("helvetica", "bold"); doc.setTextColor(60,60,60);
+        doc.text("REQUIRED ELEMENTS (SOW 1.10(7)): (1) Person's name, (2) Date, (3) Start time,", 24, y + 5);
+        doc.text("(4) End time, (5) Service code, (6) Staff name, (7) Summary of activities", 24, y + 10);
+        y += 18;
+        // 4 entry blocks per page
+        for (let e = 0; e < 4; e++) {
+          if (y > 240) { doc.addPage(); y = 20; }
+          doc.setDrawColor(0, 137, 123); doc.setLineWidth(0.5);
+          doc.line(20, y, 190, y); doc.setLineWidth(0.2);
+          y += 6;
+          doc.setFontSize(8); doc.setFont("helvetica", "normal"); doc.setTextColor(0,0,0);
+          doc.text("Date: __________    Start: ________    End: ________    Code: ________", 20, y); y += 7;
+          doc.text("Staff Name: ___________________________________", 20, y); y += 7;
+          doc.text("Service Summary:", 20, y); y += 5;
+          doc.setDrawColor(200,200,200);
+          for (let l = 0; l < 3; l++) { doc.line(20, y, 190, y); y += 6; }
+          y += 4;
+        }
+        this._download(doc, `Daily_Service_Log_${person.last_name || "client"}.pdf`);
+      },
+
+      // ──────────────────────────────────────────────
+      // CLIENT FORM: Room & Board Agreement
+      // ──────────────────────────────────────────────
+      roomBoardAgreement(person, data = {}) {
+        const doc = new jspdf.jsPDF();
+        let y = this._header(doc, "Room and Board Agreement", "Residential Services Housing Agreement");
+        y = this._sectionHead(doc, y, "PARTIES TO THIS AGREEMENT");
+        y = this._fieldRow(doc, y, [
+          { label: "Provider", value: this.COMPANY },
+        ]);
+        y = this._fieldRow(doc, y, [
+          { label: "Provider Address", value: this.ADDRESS },
+        ]);
+        y = this._fieldRow(doc, y, [
+          { label: "Resident Name", value: `${person.first_name || ""} ${person.last_name || ""}` },
+          { label: "Resident PID", value: data.pid || "" },
+        ]);
+        y = this._fieldRow(doc, y, [
+          { label: "Guardian (if any)", value: data.guardian || "" },
+        ]);
+        y += 4;
+        y = this._sectionHead(doc, y, "PROPERTY INFORMATION");
+        y = this._fieldRow(doc, y, [
+          { label: "Property Address", value: data.property_address || "" },
+        ]);
+        y = this._fieldRow(doc, y, [
+          { label: "Room/Unit", value: data.room || "" },
+          { label: "Move-In Date", value: data.move_in_date || "" },
+        ]);
+        y += 4;
+        y = this._sectionHead(doc, y, "ROOM AND BOARD CHARGES");
+        doc.autoTable({
+          startY: y, margin: { left: 20, right: 20 },
+          body: [
+            ["Monthly Room Charge:", data.room_charge ? `$${data.room_charge}` : "$________"],
+            ["Monthly Board (Food) Charge:", data.board_charge ? `$${data.board_charge}` : "$________"],
+            ["Total Monthly Room & Board:", data.total_charge ? `$${data.total_charge}` : "$________"],
+            ["Payment Due Date:", data.due_date || "1st - 3rd of each month"],
+          ],
+          styles: { fontSize: 9, cellPadding: 4 },
+          columnStyles: { 0: { fontStyle: "bold", cellWidth: 80 } },
+        });
+        y = doc.lastAutoTable.finalY + 10;
+        const terms = [
+          "This agreement begins on the Move-In Date and continues month-to-month until terminated by either party.",
+          "Room and board charges are separate from DHHS service payments.",
+          "The Provider will not charge more than fair market value for room and board.",
+        ];
+        doc.setFontSize(8); doc.setFont("helvetica", "normal");
+        terms.forEach(t => {
+          const lines = doc.splitTextToSize(t, 170);
+          doc.text(lines, 20, y); y += lines.length * 4 + 4;
+        });
+        y += 8;
+        y = this._signatures(doc, y, [
+          { label: "Provider Representative" }, { label: "Resident" }, { label: "Guardian (if applicable)" },
+        ]);
+        this._download(doc, `Room_Board_Agreement_${person.last_name || "client"}.pdf`);
+      },
+
+      // ──────────────────────────────────────────────
+      // CLIENT FORM: Rights & Grievance Acknowledgment
+      // ──────────────────────────────────────────────
+      rightsGrievance(person) {
+        const doc = new jspdf.jsPDF();
+        let y = this._header(doc, "Rights & Grievance Policy", "Your Rights and How to File a Complaint");
+        y += 2;
+        const sections = [
+          { head: "DIGNITY & RESPECT", items: ["Right to be treated with dignity, respect, and courtesy", "Right to be free from abuse, neglect, and exploitation", "Right to be free from discrimination"] },
+          { head: "CHOICE & CONTROL", items: ["Right to participate in planning your own services", "Right to choose your own schedule", "Right to refuse services without fear of retaliation"] },
+          { head: "PRIVACY & CONFIDENTIALITY", items: ["Right to privacy in your home", "Right to have personal information kept confidential", "Right to private communication"] },
+          { head: "PERSONAL PROPERTY & FINANCES", items: ["Right to own and control your belongings and money", "Right to access your financial records", "Staff may not accept money from you"] },
+          { head: "HOW TO FILE A GRIEVANCE", items: ["Tell any Hope Haven staff member", "Call Hope Haven at 801-558-8070", "Contact your Support Coordinator", "Contact DHHS Disability Services at 1-800-837-6811", "Contact Adult Protective Services at 1-800-371-7897"] },
+        ];
+        sections.forEach(sec => {
+          if (y > 240) { doc.addPage(); y = 20; }
+          doc.setFontSize(9); doc.setFont("helvetica", "bold"); doc.setTextColor(...this.HEADER_COLOR);
+          doc.text(sec.head, 20, y); y += 6;
+          doc.setFontSize(8); doc.setFont("helvetica", "normal"); doc.setTextColor(60,60,60);
+          sec.items.forEach(item => { doc.text("•  " + item, 24, y); y += 5; });
+          y += 4;
+        });
+        y += 6;
+        y = this._sectionHead(doc, y, "ACKNOWLEDGMENT");
+        doc.setFontSize(9); doc.setFont("helvetica", "normal"); doc.setTextColor(0,0,0);
+        const ack = "I have received a copy of the Hope Haven Rights & Grievance Policy. It has been explained to me in a way I understand. I know how to file a complaint if I am unhappy with services or believe my rights have been violated.";
+        const ackLines = doc.splitTextToSize(ack, 170);
+        doc.text(ackLines, 20, y); y += ackLines.length * 4.5 + 10;
+        y = this._signatures(doc, y, [
+          { label: "Person/Guardian" }, { label: "Staff Witness" },
+        ]);
+        this._download(doc, `Rights_Grievance_${person.last_name || "client"}.pdf`);
+      },
+
+      // ──────────────────────────────────────────────
+      // STAFF FORM: Insurance Tracker
+      // ──────────────────────────────────────────────
+      insuranceTracker() {
+        const doc = new jspdf.jsPDF();
+        let y = this._header(doc, "Insurance Certificate Tracker", "DHHS Contract Requirement (CST 29-36)");
+        const types = ["GENERAL LIABILITY INSURANCE", "PROFESSIONAL LIABILITY INSURANCE", "AUTOMOBILE LIABILITY INSURANCE"];
+        types.forEach((type, i) => {
+          if (y > 220) { doc.addPage(); y = 20; }
+          y = this._sectionHead(doc, y, `${i + 1}. ${type}`);
+          doc.autoTable({
+            startY: y, margin: { left: 20, right: 20 },
+            body: [
+              ["Insurance Carrier:", ""],
+              ["Policy Number:", ""],
+              ["Coverage Amount:", "$__________    Meets Minimum?  ☐ Yes  ☐ No"],
+              ["Effective Date:", ""],
+              ["EXPIRATION DATE:", "⚠️"],
+              ["Certificate on File:", "☐ Yes  ☐ No    Date Obtained: ___________"],
+            ],
+            styles: { fontSize: 9, cellPadding: 4 },
+            columnStyles: { 0: { fontStyle: "bold", cellWidth: 50 } },
+          });
+          y = doc.lastAutoTable.finalY + 8;
+        });
+        this._download(doc, "Insurance_Tracker.pdf");
+      },
+
+      // ──────────────────────────────────────────────
+      // PACKET GENERATORS — bundle multiple forms
+      // ──────────────────────────────────────────────
+      staffOnboardingPacket(staff) {
+        this.staffCoverSheet(staff);
+        setTimeout(() => this.codeOfConduct(staff), 300);
+        setTimeout(() => this.medicaidExclusion(staff), 600);
+        setTimeout(() => this.trainingLog(staff), 900);
+      },
+
+      clientIntakePacket(person, data = {}) {
+        this.dailyServiceLog(person, data);
+        setTimeout(() => this.quarterlySummary(person, data), 300);
+        setTimeout(() => this.rightsGrievance(person), 600);
+        if (data.is_residential) {
+          setTimeout(() => this.roomBoardAgreement(person, data), 900);
+        }
+      },
+    };
 
     // Get the effective rate for a service code — either fixed or from client auth
     function getEffectiveRate(serviceCode, authRate) {
@@ -2856,7 +3362,12 @@
       return (
         <div>
           <PageHeader title="Compliance Dashboard" subtitle="Real-time audit readiness — DHHS91172 SOW compliance scoring"
-            action={<PrimaryButton onClick={runAudit} color={CB.navy}>{icons.refresh({ size: 16 })} Re-run Audit</PrimaryButton>}
+            action={
+              <div style={{ display: "flex", gap: 8 }}>
+                <SecondaryButton onClick={() => HopeHavenPDF.insuranceTracker()}>{icons.fileText({ size: 15 })} Insurance Tracker</SecondaryButton>
+                <PrimaryButton onClick={runAudit} color={CB.navy}>{icons.refresh({ size: 16 })} Re-run Audit</PrimaryButton>
+              </div>
+            }
           />
 
           <div style={{ display: "flex", gap: 4, marginBottom: 20, background: CB.cream, padding: 4, borderRadius: 10, width: "fit-content" }}>
@@ -3431,11 +3942,12 @@
     // ═══════════════════════════════════════════════════════════════
     // DOCUMENTS SECTION — reusable for staff and client forms
     // ═══════════════════════════════════════════════════════════════
-    function DocumentsSection({ entityType, entityId, orgId }) {
+    function DocumentsSection({ entityType, entityId, orgId, entityData }) {
       const { addToast } = useToast();
       const [docs, setDocs] = useState([]);
       const [loading, setLoading] = useState(true);
       const [adding, setAdding] = useState(false);
+      const [showGenerate, setShowGenerate] = useState(false);
       const [newDoc, setNewDoc] = useState({ doc_type: "", file_name: "", expires_at: "", notes: "" });
 
       const docTypes = entityType === "staff" ? STAFF_DOC_TYPES : CLIENT_DOC_TYPES;
@@ -3499,13 +4011,83 @@
               }}>{completeness}% complete</span>
             </div>
             {entityId && (
-              <button onClick={() => setAdding(!adding)} style={{
-                padding: "5px 12px", borderRadius: 8, border: `1px dashed ${CB.blue}`,
-                background: `${CB.blue}08`, color: CB.blue, fontSize: 12, fontWeight: 700,
-                cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4,
-              }}>{icons.plus({ size: 12, color: CB.blue })} Add Document</button>
+              <div style={{ display: "flex", gap: 4 }}>
+                <button onClick={() => setShowGenerate(!showGenerate)} style={{
+                  padding: "5px 12px", borderRadius: 8, border: `1px dashed ${CB.teal}`,
+                  background: showGenerate ? `${CB.teal}15` : `${CB.teal}08`, color: CB.teal, fontSize: 12, fontWeight: 700,
+                  cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4,
+                }}>{icons.fileText({ size: 12, color: CB.teal })} Generate PDF</button>
+                <button onClick={() => setAdding(!adding)} style={{
+                  padding: "5px 12px", borderRadius: 8, border: `1px dashed ${CB.blue}`,
+                  background: `${CB.blue}08`, color: CB.blue, fontSize: 12, fontWeight: 700,
+                  cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4,
+                }}>{icons.plus({ size: 12, color: CB.blue })} Add Document</button>
+              </div>
             )}
           </div>
+
+          {/* Generate PDF forms panel */}
+          {showGenerate && entityId && entityData && (
+            <div style={{
+              padding: 14, borderRadius: 10, marginBottom: 10,
+              background: `${CB.teal}06`, border: `1px solid ${CB.teal}20`,
+            }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: CB.teal, marginBottom: 10 }}>Generate Pre-Filled PDF Forms</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {entityType === "staff" && (
+                  <>
+                    <button onClick={() => { HopeHavenPDF.staffCoverSheet(entityData); addToast("Cover Sheet PDF generated", "success"); }} style={{
+                      padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
+                      color: CB.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                    }}>Cover Sheet</button>
+                    <button onClick={() => { HopeHavenPDF.codeOfConduct(entityData); addToast("Code of Conduct PDF generated", "success"); }} style={{
+                      padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
+                      color: CB.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                    }}>Code of Conduct</button>
+                    <button onClick={() => { HopeHavenPDF.medicaidExclusion(entityData); addToast("Medicaid Exclusion PDF generated", "success"); }} style={{
+                      padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
+                      color: CB.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                    }}>Medicaid Exclusion</button>
+                    <button onClick={() => { HopeHavenPDF.trainingLog(entityData); addToast("Training Log PDF generated", "success"); }} style={{
+                      padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
+                      color: CB.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                    }}>Training Log</button>
+                    <button onClick={() => { HopeHavenPDF.staffOnboardingPacket(entityData); addToast("Full packet downloading (4 PDFs)", "success"); }} style={{
+                      padding: "6px 14px", borderRadius: 8, border: `2px solid ${CB.teal}`, background: `${CB.teal}08`,
+                      color: CB.teal, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                    }}>⬇ Full Onboarding Packet</button>
+                  </>
+                )}
+                {entityType === "client" && (
+                  <>
+                    <button onClick={() => { HopeHavenPDF.dailyServiceLog(entityData); addToast("Daily Service Log PDF generated", "success"); }} style={{
+                      padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
+                      color: CB.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                    }}>Daily Service Log</button>
+                    <button onClick={() => { HopeHavenPDF.quarterlySummary(entityData); addToast("Quarterly Summary PDF generated", "success"); }} style={{
+                      padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
+                      color: CB.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                    }}>Quarterly Summary</button>
+                    <button onClick={() => { HopeHavenPDF.rightsGrievance(entityData); addToast("Rights & Grievance PDF generated", "success"); }} style={{
+                      padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
+                      color: CB.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                    }}>Rights & Grievance</button>
+                    <button onClick={() => { HopeHavenPDF.roomBoardAgreement(entityData); addToast("Room & Board PDF generated", "success"); }} style={{
+                      padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
+                      color: CB.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                    }}>Room & Board</button>
+                    <button onClick={() => { HopeHavenPDF.clientIntakePacket(entityData, { is_residential: true }); addToast("Full packet downloading (4 PDFs)", "success"); }} style={{
+                      padding: "6px 14px", borderRadius: 8, border: `2px solid ${CB.teal}`, background: `${CB.teal}08`,
+                      color: CB.teal, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                    }}>⬇ Full Intake Packet</button>
+                  </>
+                )}
+              </div>
+              <div style={{ fontSize: 10, color: CB.textLight, marginTop: 8 }}>
+                PDFs are pre-filled with {entityData.first_name}'s data. Print, sign, and scan back to upload.
+              </div>
+            </div>
+          )}
 
           {!entityId && (
             <div style={{ fontSize: 13, color: CB.textLight, padding: "8px 0" }}>Save the record first, then add documents.</div>
@@ -3702,9 +4284,14 @@
               <p style={{ fontSize: 15, color: CB.textMid, marginBottom: 24 }}>
                 Created with {form.auths.length} service authorization{form.auths.length !== 1 ? "s" : ""}
               </p>
-              <PrimaryButton onClick={() => { setComplete(false); setStep(0); setForm({ first_name: "", last_name: "", date_of_birth: "", medicaid_number: "", address: "", city: "", state: "UT", zip: "", phone: "", pid: "", gender: "", ssn_last4: "", primary_language: "English", guardian_name: "", guardian_phone: "", guardian_relation: "", emergency_name: "", emergency_phone: "", emergency_relation: "", support_coordinator: "", sc_phone: "", sc_email: "", sc_agency: "", diagnoses: "", medications_on_file: false, pcsp_on_file: false, admission_date: new Date().toISOString().split("T")[0], auths: [] }); }}>
-                {icons.plus({ size: 16 })} Start Another Intake
-              </PrimaryButton>
+              <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
+                <PrimaryButton onClick={() => HopeHavenPDF.clientIntakePacket(form, { pid: form.pid, sc_name: form.support_coordinator, sc_phone: form.sc_phone, is_residential: form.auths.some(a => ["RHS", "HHS", "PPS"].includes(a.code)) })} color={CB.navy}>
+                  {icons.fileText({ size: 16 })} Download Intake Packet
+                </PrimaryButton>
+                <PrimaryButton onClick={() => { setComplete(false); setStep(0); setForm({ first_name: "", last_name: "", date_of_birth: "", medicaid_number: "", address: "", city: "", state: "UT", zip: "", phone: "", pid: "", gender: "", ssn_last4: "", primary_language: "English", guardian_name: "", guardian_phone: "", guardian_relation: "", emergency_name: "", emergency_phone: "", emergency_relation: "", support_coordinator: "", sc_phone: "", sc_email: "", sc_agency: "", diagnoses: "", medications_on_file: false, pcsp_on_file: false, admission_date: new Date().toISOString().split("T")[0], auths: [] }); }}>
+                  {icons.plus({ size: 16 })} Start Another Intake
+                </PrimaryButton>
+              </div>
             </div>
           </div>
         );
@@ -4196,14 +4783,19 @@
             <p style={{ fontSize: 14, color: CB.textLight, marginBottom: 24 }}>
               {bCollected}/{bRequired.length} hire paperwork items collected — view staff record to add remaining documents
             </p>
-            <PrimaryButton onClick={() => { setComplete(false); setStep(0); setForm(prev => {
-              const fresh = {};
-              Object.keys(prev).forEach(k => fresh[k] = typeof prev[k] === "boolean" ? false : "");
-              fresh.role = "dsp"; fresh.state = "UT"; fresh.hire_date = new Date().toISOString().split("T")[0];
-              return fresh;
-            }); }}>
-              {icons.plus({ size: 16 })} Start Another Onboarding
-            </PrimaryButton>
+            <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
+              <PrimaryButton onClick={() => HopeHavenPDF.staffOnboardingPacket(form)} color={CB.navy}>
+                {icons.fileText({ size: 16 })} Download Onboarding Packet
+              </PrimaryButton>
+              <PrimaryButton onClick={() => { setComplete(false); setStep(0); setForm(prev => {
+                const fresh = {};
+                Object.keys(prev).forEach(k => fresh[k] = typeof prev[k] === "boolean" ? false : "");
+                fresh.role = "dsp"; fresh.state = "UT"; fresh.hire_date = new Date().toISOString().split("T")[0];
+                return fresh;
+              }); }}>
+                {icons.plus({ size: 16 })} Start Another Onboarding
+              </PrimaryButton>
+            </div>
           </div>
         );
       }
