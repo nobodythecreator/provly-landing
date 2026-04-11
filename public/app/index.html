@@ -1742,7 +1742,7 @@
           { label: "Hire Date", value: staff.hire_date || "" },
         ]);
         y = this._fieldRow(doc, y, [
-          { label: "Position/Title", value: staff.role || "" },
+          { label: "Position/Title", value: STAFF_ROLES.find(r => r.value === staff.role)?.label || staff.role?.replace(/_/g, " ") || "" },
           { label: "Status", value: staff.is_active !== false ? "Active" : "Inactive" },
         ]);
         y = this._fieldRow(doc, y, [
@@ -1821,7 +1821,7 @@
           { label: "Hire Date", value: staff.hire_date || "" },
         ]);
         y = this._fieldRow(doc, y, [
-          { label: "Position/Title", value: staff.role || "" },
+          { label: "Position/Title", value: STAFF_ROLES.find(r => r.value === staff.role)?.label || staff.role?.replace(/_/g, " ") || "" },
         ]);
         y += 4;
         y = this._sectionHead(doc, y, "REQUIRED EXCLUSION LIST CHECKS");
@@ -3981,7 +3981,6 @@
           org_id: orgId,
           [field]: entityId,
           doc_type: newDoc.doc_type,
-          doc_category: entityType,
           file_name: newDoc.file_name,
           file_url: `pending://${newDoc.file_name}`,
           expires_at: newDoc.expires_at || null,
@@ -4743,7 +4742,7 @@
           if (form[d.field]) {
             docRecords.push({
               org_id: orgId, staff_id: staffId,
-              doc_type: d.type, doc_category: "staff",
+              doc_type: d.type,
               file_name: d.name, file_url: `onboarding://${d.name}`,
               notes: "Collected during onboarding",
             });
@@ -4753,7 +4752,7 @@
         if (form.d_first_aid_date) {
           docRecords.push({
             org_id: orgId, staff_id: staffId,
-            doc_type: "d_first_aid_initial", doc_category: "staff",
+            doc_type: "d_first_aid_initial",
             file_name: `First Aid Cert${form.d_first_aid_provider ? ` — ${form.d_first_aid_provider}` : ""}`,
             file_url: "onboarding://first-aid-cert",
             notes: `Initial cert date: ${form.d_first_aid_date}`,
@@ -4762,7 +4761,7 @@
         if (form.d_cpr_date) {
           docRecords.push({
             org_id: orgId, staff_id: staffId,
-            doc_type: "d_cpr_initial", doc_category: "staff",
+            doc_type: "d_cpr_initial",
             file_name: `CPR Cert${form.d_cpr_provider ? ` — ${form.d_cpr_provider}` : ""}`,
             file_url: "onboarding://cpr-cert",
             notes: `Initial cert date: ${form.d_cpr_date}`,
