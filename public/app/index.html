@@ -102,15 +102,15 @@
 
     // Nav items each role can see
     const ROLE_NAV = {
-      owner:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "billing", "messages", "ai", "migration", "settings"],
-      admin:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "billing", "messages", "ai", "migration", "settings"],
-      compliance_director:  ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "billing", "messages", "ai"],
-      residential_director: ["dashboard", "clients", "training", "notes", "evv", "incidents", "alerts", "messages"],
-      day_program_director: ["dashboard", "clients", "training", "notes", "evv", "incidents", "alerts", "messages"],
-      house_manager:        ["dashboard", "clients", "notes", "evv", "incidents", "messages"],
+      owner:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "billing", "messages", "ai", "migration", "settings"],
+      admin:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "billing", "messages", "ai", "migration", "settings"],
+      compliance_director:  ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "billing", "messages", "ai"],
+      residential_director: ["dashboard", "clients", "training", "notes", "evv", "incidents", "alerts", "medications", "messages"],
+      day_program_director: ["dashboard", "clients", "training", "notes", "evv", "incidents", "alerts", "medications", "messages"],
+      house_manager:        ["dashboard", "clients", "notes", "evv", "incidents", "medications", "messages"],
       bcba:                 ["dashboard", "clients", "notes", "compliance", "incidents", "messages"],
-      rn:                   ["dashboard", "clients", "notes", "incidents", "messages"],
-      dsp:                  ["notes", "evv", "incidents", "messages"],
+      rn:                   ["dashboard", "clients", "notes", "incidents", "medications", "messages"],
+      dsp:                  ["notes", "evv", "incidents", "medications", "messages"],
     };
 
     function AuthProvider({ children }) {
@@ -265,6 +265,7 @@
       menu: (p={}) => <Icon {...p} d={<><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></>} />,
       upload: (p={}) => <Icon {...p} d={<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></>} />,
       bell: (p={}) => <Icon {...p} d={<><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></>} />,
+      capsule: (p={}) => <Icon {...p} d={<><rect x="6" y="2" width="12" height="20" rx="6" ry="6" transform="rotate(45 12 12)"/><line x1="7.76" y1="7.76" x2="16.24" y2="16.24"/></>} />,
     };
 
     // ═══════════════════════════════════════════════════════════════
@@ -494,6 +495,7 @@
         { key: "compliance", label: "Compliance", icon: icons.shield },
         { key: "incidents", label: "Incidents", icon: icons.alertTriangle },
         { key: "alerts", label: "Alerts", icon: icons.bell },
+        { key: "medications", label: "Medications", icon: icons.capsule },
         { key: "billing", label: "Billing", icon: icons.barChart },
         { key: "ai", label: "AI Intelligence", icon: icons.zap },
         { key: "messages", label: "Messages", icon: icons.mail },
@@ -4335,6 +4337,541 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // MEDICATION TRACKING — MAR, med pass logging, missed dose flags
+    // ═══════════════════════════════════════════════════════════════
+    const MED_ROUTES = ["Oral", "Topical", "Sublingual", "Inhalation", "Injection", "Rectal", "Transdermal", "Ophthalmic", "Otic", "Nasal", "Other"];
+    const MED_FREQUENCIES = ["Once daily", "Twice daily", "Three times daily", "Four times daily", "Every morning", "Every evening", "Every bedtime", "Weekly", "As needed (PRN)", "Other"];
+    const MED_LOG_STATUS = [
+      { value: "given", label: "Given", color: "#2E7D32" },
+      { value: "refused", label: "Refused", color: "#E53935" },
+      { value: "held", label: "Held", color: "#F57F17" },
+      { value: "not_available", label: "Not Available", color: "#7B1FA2" },
+      { value: "self_administered", label: "Self-Administered", color: "#1565C0" },
+    ];
+    const DEFAULT_TIMES = { "Once daily": ["08:00"], "Twice daily": ["08:00","20:00"], "Three times daily": ["08:00","12:00","18:00"], "Four times daily": ["06:00","12:00","18:00","22:00"], "Every morning": ["08:00"], "Every evening": ["18:00"], "Every bedtime": ["21:00"], "Weekly": ["08:00"] };
+
+    function MedicationsPage() {
+      const [tab, setTab] = useState("mar"); // mar, medications, missed
+      const [clients, setClients] = useState([]);
+      const [selectedClient, setSelectedClient] = useState("");
+      const [medications, setMedications] = useState([]);
+      const [logs, setLogs] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [showMedForm, setShowMedForm] = useState(false);
+      const [editingMed, setEditingMed] = useState(null);
+      const [showLogModal, setShowLogModal] = useState(null); // { medication, date, time }
+      const [marDate, setMarDate] = useState(new Date().toISOString().split("T")[0]);
+      const { isMobile } = useMobile();
+      const { addToast } = useToast();
+      const { orgId, staffProfile } = useAuth();
+
+      useEffect(() => { loadClients(); }, []);
+      useEffect(() => { if (selectedClient) loadMedData(); }, [selectedClient, marDate]);
+
+      const loadClients = async () => {
+        const { data } = await supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name");
+        setClients(data || []);
+        if (data?.length) setSelectedClient(data[0].id);
+        setLoading(false);
+      };
+
+      const loadMedData = async () => {
+        setLoading(true);
+        try {
+          // Get 7-day window for MAR
+          const startDate = new Date(marDate + "T00:00:00");
+          const endDate = new Date(startDate); endDate.setDate(endDate.getDate() + 6);
+          const [medRes, logRes] = await Promise.all([
+            supabase.from("medications").select("*").eq("person_id", selectedClient).eq("is_active", true).order("medication_name"),
+            supabase.from("medication_logs").select("*, staff(first_name, last_name)").eq("person_id", selectedClient).gte("scheduled_date", startDate.toISOString().split("T")[0]).lte("scheduled_date", endDate.toISOString().split("T")[0]),
+          ]);
+          setMedications(medRes.data || []);
+          setLogs(logRes.data || []);
+        } catch (e) { addToast("Failed to load medication data", "error"); }
+        setLoading(false);
+      };
+
+      // ── Medication Form ──
+      const MedForm = () => {
+        const [form, setForm] = useState(editingMed || {
+          medication_name: "", dosage: "", route: "Oral", frequency: "Once daily",
+          schedule_times: ["08:00"], prescribed_by: "", pharmacy: "", rx_number: "",
+          start_date: new Date().toISOString().split("T")[0], end_date: "",
+          is_prn: false, prn_reason: "", special_instructions: "", is_active: true,
+        });
+        const [saving, setSaving] = useState(false);
+
+        useEffect(() => {
+          if (!editingMed && DEFAULT_TIMES[form.frequency]) {
+            setForm(f => ({ ...f, schedule_times: DEFAULT_TIMES[form.frequency] || f.schedule_times }));
+          }
+        }, [form.frequency]);
+
+        const handleSave = async () => {
+          if (!form.medication_name || !form.dosage) return addToast("Name and dosage required", "error");
+          setSaving(true);
+          const payload = { ...form, person_id: selectedClient, org_id: orgId };
+          delete payload.id; delete payload.created_at;
+          if (editingMed) {
+            const { error } = await supabase.from("medications").update(payload).eq("id", editingMed.id);
+            if (error) { addToast(error.message, "error"); setSaving(false); return; }
+            addToast("Medication updated", "success");
+          } else {
+            const { error } = await supabase.from("medications").insert(payload);
+            if (error) { addToast(error.message, "error"); setSaving(false); return; }
+            addToast("Medication added", "success");
+          }
+          setSaving(false); setShowMedForm(false); setEditingMed(null); loadMedData();
+        };
+
+        const fs = { width: "100%", padding: "10px 14px", borderRadius: 10, border: `1px solid ${CB.border}`, fontSize: 14, fontFamily: "inherit", background: CB.cream };
+        const addTime = () => setForm(f => ({ ...f, schedule_times: [...(f.schedule_times || []), "12:00"] }));
+        const removeTime = (idx) => setForm(f => ({ ...f, schedule_times: f.schedule_times.filter((_, i) => i !== idx) }));
+        const updateTime = (idx, val) => setForm(f => ({ ...f, schedule_times: f.schedule_times.map((t, i) => i === idx ? val : t) }));
+
+        return (
+          <Modal open={true} onClose={() => { setShowMedForm(false); setEditingMed(null); }} title={editingMed ? "Edit Medication" : "Add Medication"} width={560}>
+            <div style={{ padding: "20px 28px 24px", overflowY: "auto", maxHeight: "65vh" }}>
+              <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 14 }}>
+                <div style={{ gridColumn: isMobile ? "1" : "1/3" }}>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Medication Name *</label>
+                  <input style={fs} value={form.medication_name} onChange={e => setForm(f => ({ ...f, medication_name: e.target.value }))} placeholder="e.g. Lisinopril" />
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Dosage *</label>
+                  <input style={fs} value={form.dosage} onChange={e => setForm(f => ({ ...f, dosage: e.target.value }))} placeholder="e.g. 10mg" />
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Route</label>
+                  <select style={fs} value={form.route} onChange={e => setForm(f => ({ ...f, route: e.target.value }))}>
+                    {MED_ROUTES.map(r => <option key={r} value={r}>{r}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Frequency</label>
+                  <select style={fs} value={form.frequency} onChange={e => setForm(f => ({ ...f, frequency: e.target.value }))}>
+                    {MED_FREQUENCIES.map(r => <option key={r} value={r}>{r}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Prescribed By</label>
+                  <input style={fs} value={form.prescribed_by} onChange={e => setForm(f => ({ ...f, prescribed_by: e.target.value }))} placeholder="Dr. Name" />
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Pharmacy</label>
+                  <input style={fs} value={form.pharmacy} onChange={e => setForm(f => ({ ...f, pharmacy: e.target.value }))} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Rx Number</label>
+                  <input style={fs} value={form.rx_number} onChange={e => setForm(f => ({ ...f, rx_number: e.target.value }))} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Start Date</label>
+                  <input style={fs} type="date" value={form.start_date} onChange={e => setForm(f => ({ ...f, start_date: e.target.value }))} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>End Date</label>
+                  <input style={fs} type="date" value={form.end_date} onChange={e => setForm(f => ({ ...f, end_date: e.target.value }))} />
+                </div>
+              </div>
+              {/* Schedule Times */}
+              {form.frequency !== "As needed (PRN)" && (
+                <div style={{ marginTop: 16 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                    <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid }}>Scheduled Times</label>
+                    <button onClick={addTime} style={{ fontSize: 12, fontWeight: 600, color: CB.teal, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit" }}>+ Add Time</button>
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                    {(form.schedule_times || []).map((t, i) => (
+                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        <input type="time" style={{ ...fs, width: 120, padding: "6px 10px" }} value={t} onChange={e => updateTime(i, e.target.value)} />
+                        {form.schedule_times.length > 1 && (
+                          <button onClick={() => removeTime(i)} style={{ background: "none", border: "none", cursor: "pointer", padding: 2, color: CB.red, fontSize: 16 }}>×</button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {/* PRN toggle */}
+              <div style={{ marginTop: 16, display: "flex", alignItems: "center", gap: 10 }}>
+                <input type="checkbox" checked={form.is_prn} onChange={e => setForm(f => ({ ...f, is_prn: e.target.checked, frequency: e.target.checked ? "As needed (PRN)" : f.frequency }))} />
+                <label style={{ fontSize: 13, fontWeight: 600, color: CB.textMid }}>PRN (As Needed)</label>
+              </div>
+              {form.is_prn && (
+                <div style={{ marginTop: 10 }}>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>PRN Reason</label>
+                  <input style={fs} value={form.prn_reason} onChange={e => setForm(f => ({ ...f, prn_reason: e.target.value }))} placeholder="e.g. Pain, Anxiety, Nausea" />
+                </div>
+              )}
+              <div style={{ marginTop: 14 }}>
+                <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Special Instructions</label>
+                <textarea style={{ ...fs, minHeight: 60 }} value={form.special_instructions} onChange={e => setForm(f => ({ ...f, special_instructions: e.target.value }))} placeholder="Take with food, etc." />
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 }}>
+                <button onClick={() => { setShowMedForm(false); setEditingMed(null); }} style={{ padding: "10px 20px", borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.white, color: CB.textMid, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+                <button onClick={handleSave} disabled={saving} style={{ padding: "10px 24px", borderRadius: 10, border: "none", background: CB.teal, color: CB.white, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", opacity: saving ? 0.7 : 1 }}>
+                  {saving ? "Saving..." : editingMed ? "Update" : "Add Medication"}
+                </button>
+              </div>
+            </div>
+          </Modal>
+        );
+      };
+
+      // ── Med Pass Log Modal ──
+      const LogModal = () => {
+        if (!showLogModal) return null;
+        const { medication, date, time } = showLogModal;
+        const existing = logs.find(l => l.medication_id === medication.id && l.scheduled_date === date && l.scheduled_time === time);
+        const [status, setStatus] = useState(existing?.status || "given");
+        const [notes, setNotes] = useState(existing?.notes || "");
+        const [saving, setSaving] = useState(false);
+
+        const handleLog = async () => {
+          setSaving(true);
+          const payload = {
+            org_id: orgId, medication_id: medication.id, person_id: selectedClient,
+            staff_id: staffProfile?.id || null, scheduled_date: date, scheduled_time: time,
+            administered_at: status === "given" || status === "self_administered" ? new Date().toISOString() : null,
+            status, notes,
+          };
+          if (existing) {
+            const { error } = await supabase.from("medication_logs").update(payload).eq("id", existing.id);
+            if (error) { addToast(error.message, "error"); setSaving(false); return; }
+          } else {
+            const { error } = await supabase.from("medication_logs").insert(payload);
+            if (error) { addToast(error.message, "error"); setSaving(false); return; }
+          }
+          addToast(`Med pass logged: ${medication.medication_name} — ${status}`, "success");
+          setSaving(false); setShowLogModal(null); loadMedData();
+        };
+
+        return (
+          <Modal open={true} onClose={() => setShowLogModal(null)} title="Log Med Pass" subtitle={`${medication.medication_name} ${medication.dosage}`} width={420}>
+            <div style={{ padding: "20px 28px 24px" }}>
+              <div style={{ fontSize: 13, color: CB.textMid, marginBottom: 16 }}>
+                <strong>{date}</strong> at <strong>{time}</strong>
+              </div>
+              <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 8 }}>Status</label>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+                {MED_LOG_STATUS.map(s => (
+                  <button key={s.value} onClick={() => setStatus(s.value)} style={{
+                    padding: "8px 16px", borderRadius: 10, fontSize: 13, fontWeight: 600, fontFamily: "inherit",
+                    border: `1.5px solid ${status === s.value ? s.color : CB.border}`,
+                    background: status === s.value ? `${s.color}14` : CB.white,
+                    color: status === s.value ? s.color : CB.textMid, cursor: "pointer",
+                  }}>{s.label}</button>
+                ))}
+              </div>
+              <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Notes</label>
+              <textarea style={{ width: "100%", padding: "10px 14px", borderRadius: 10, border: `1px solid ${CB.border}`, fontSize: 14, fontFamily: "inherit", background: CB.cream, minHeight: 60 }} value={notes} onChange={e => setNotes(e.target.value)} placeholder="Optional notes..." />
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 }}>
+                <button onClick={() => setShowLogModal(null)} style={{ padding: "10px 20px", borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.white, color: CB.textMid, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+                <button onClick={handleLog} disabled={saving} style={{ padding: "10px 24px", borderRadius: 10, border: "none", background: CB.teal, color: CB.white, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", opacity: saving ? 0.7 : 1 }}>
+                  {saving ? "Saving..." : "Log Med Pass"}
+                </button>
+              </div>
+            </div>
+          </Modal>
+        );
+      };
+
+      // ── MAR Grid (7 days × medications × times) ──
+      const MARView = () => {
+        const startDate = new Date(marDate + "T00:00:00");
+        const days = Array.from({ length: 7 }, (_, i) => {
+          const d = new Date(startDate); d.setDate(d.getDate() + i);
+          return d.toISOString().split("T")[0];
+        });
+        const scheduledMeds = medications.filter(m => !m.is_prn && m.schedule_times?.length);
+
+        if (!scheduledMeds.length) return (
+          <div style={{ textAlign: "center", padding: 48, color: CB.textMid }}>
+            <div style={{ width: 56, height: 56, borderRadius: 16, background: `${CB.teal}12`, display: "inline-flex", alignItems: "center", justifyContent: "center", marginBottom: 12 }}>
+              {icons.capsule({ size: 28, color: CB.teal })}
+            </div>
+            <p style={{ fontSize: 15, fontWeight: 600 }}>No scheduled medications for this client</p>
+            <p style={{ fontSize: 13 }}>Add medications in the Medications tab first.</p>
+          </div>
+        );
+
+        const getLog = (medId, date, time) => logs.find(l => l.medication_id === medId && l.scheduled_date === date && l.scheduled_time === time);
+
+        const statusIcon = (log, isPast) => {
+          if (!log && !isPast) return { bg: `${CB.textLight}10`, color: CB.textLight, text: "—" };
+          if (!log && isPast) return { bg: `${CB.red}12`, color: CB.red, text: "!" };
+          const s = MED_LOG_STATUS.find(x => x.value === log.status);
+          const abbr = { given: "✓", refused: "R", held: "H", not_available: "N/A", self_administered: "SA" };
+          return { bg: `${s?.color || CB.textLight}18`, color: s?.color || CB.textLight, text: abbr[log.status] || "?" };
+        };
+
+        const nowStr = new Date().toISOString().split("T")[0];
+        const nowTime = new Date().toTimeString().slice(0, 5);
+
+        return (
+          <div style={{ overflowX: "auto" }}>
+            {/* Week navigation */}
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+              <button onClick={() => { const d = new Date(marDate + "T00:00:00"); d.setDate(d.getDate() - 7); setMarDate(d.toISOString().split("T")[0]); }}
+                style={{ padding: "6px 14px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600, color: CB.textMid }}>← Prev Week</button>
+              <input type="date" value={marDate} onChange={e => setMarDate(e.target.value)}
+                style={{ padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, fontSize: 13, fontFamily: "inherit" }} />
+              <button onClick={() => { const d = new Date(marDate + "T00:00:00"); d.setDate(d.getDate() + 7); setMarDate(d.toISOString().split("T")[0]); }}
+                style={{ padding: "6px 14px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600, color: CB.textMid }}>Next Week →</button>
+              <button onClick={() => setMarDate(new Date().toISOString().split("T")[0])}
+                style={{ padding: "6px 14px", borderRadius: 8, border: `1px solid ${CB.teal}`, background: `${CB.teal}08`, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600, color: CB.teal }}>Today</button>
+            </div>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ background: CB.navy }}>
+                  <th style={{ padding: "10px 14px", textAlign: "left", color: CB.white, fontWeight: 700, fontSize: 12, position: "sticky", left: 0, background: CB.navy, zIndex: 2, minWidth: 160 }}>Medication</th>
+                  <th style={{ padding: "10px 8px", color: "rgba(255,255,255,0.7)", fontWeight: 600, fontSize: 11, minWidth: 40 }}>Time</th>
+                  {days.map(d => {
+                    const dt = new Date(d + "T00:00:00");
+                    const isToday = d === nowStr;
+                    return <th key={d} style={{ padding: "10px 6px", color: isToday ? CB.tealLight : "rgba(255,255,255,0.7)", fontWeight: isToday ? 700 : 600, fontSize: 11, minWidth: 52, background: isToday ? "rgba(0,137,123,0.15)" : "transparent" }}>
+                      {dt.toLocaleDateString("en-US", { weekday: "short" })}<br/>{dt.getMonth()+1}/{dt.getDate()}
+                    </th>;
+                  })}
+                </tr>
+              </thead>
+              <tbody>
+                {scheduledMeds.map((med, mi) => (
+                  (med.schedule_times || []).map((time, ti) => (
+                    <tr key={`${med.id}-${ti}`} style={{ borderBottom: `1px solid ${CB.border}`, background: mi % 2 === 0 ? CB.white : CB.cream }}>
+                      {ti === 0 ? (
+                        <td rowSpan={med.schedule_times.length} style={{ padding: "8px 14px", fontWeight: 600, color: CB.text, position: "sticky", left: 0, background: mi % 2 === 0 ? CB.white : CB.cream, zIndex: 1, borderRight: `1px solid ${CB.border}` }}>
+                          <div>{med.medication_name}</div>
+                          <div style={{ fontSize: 11, color: CB.textMid, fontWeight: 400 }}>{med.dosage} — {med.route}</div>
+                        </td>
+                      ) : null}
+                      <td style={{ padding: "6px 8px", textAlign: "center", fontSize: 12, fontWeight: 600, color: CB.textMid }}>{time}</td>
+                      {days.map(d => {
+                        const log = getLog(med.id, d, time);
+                        const isPast = d < nowStr || (d === nowStr && time < nowTime);
+                        const si = statusIcon(log, isPast);
+                        return (
+                          <td key={d} style={{ padding: "4px", textAlign: "center" }}>
+                            <button onClick={() => setShowLogModal({ medication: med, date: d, time })} style={{
+                              width: 36, height: 30, borderRadius: 6, border: "none", cursor: "pointer",
+                              background: si.bg, color: si.color, fontWeight: 800, fontSize: 12,
+                              fontFamily: "inherit", transition: "all 0.1s",
+                            }}
+                              title={log ? `${log.status}${log.notes ? ": " + log.notes : ""}` : isPast ? "Missed — click to log" : "Click to log"}
+                              onMouseEnter={e => { e.currentTarget.style.transform = "scale(1.15)"; }}
+                              onMouseLeave={e => { e.currentTarget.style.transform = "scale(1)"; }}
+                            >{si.text}</button>
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))
+                ))}
+              </tbody>
+            </table>
+            {/* Legend */}
+            <div style={{ display: "flex", gap: 16, marginTop: 14, flexWrap: "wrap", fontSize: 12, color: CB.textMid }}>
+              <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 14, height: 14, borderRadius: 4, background: `${CB.green}18`, color: CB.green, fontWeight: 800, fontSize: 10, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>✓</span> Given</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 14, height: 14, borderRadius: 4, background: `${CB.red}12`, color: CB.red, fontWeight: 800, fontSize: 10, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>!</span> Missed</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 14, height: 14, borderRadius: 4, background: "#E5393518", color: "#E53935", fontWeight: 800, fontSize: 10, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>R</span> Refused</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 14, height: 14, borderRadius: 4, background: "#F57F1718", color: "#F57F17", fontWeight: 800, fontSize: 10, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>H</span> Held</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 14, height: 14, borderRadius: 4, background: "#1565C018", color: "#1565C0", fontWeight: 800, fontSize: 10, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>SA</span> Self-Admin</span>
+            </div>
+          </div>
+        );
+      };
+
+      // ── Medications List Tab ──
+      const MedsList = () => (
+        <div>
+          <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
+            <button onClick={() => { setEditingMed(null); setShowMedForm(true); }} style={{
+              padding: "10px 20px", borderRadius: 10, border: "none", background: CB.teal, color: CB.white,
+              fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 8,
+            }}>{icons.plus({ size: 15 })} Add Medication</button>
+          </div>
+          {medications.length === 0 ? (
+            <div style={{ textAlign: "center", padding: 48, color: CB.textMid }}>
+              <p style={{ fontSize: 15, fontWeight: 600 }}>No medications for this client</p>
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {medications.map(med => (
+                <div key={med.id} style={{
+                  background: CB.white, borderRadius: 14, padding: isMobile ? 16 : 20,
+                  border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
+                  display: "flex", justifyContent: "space-between", alignItems: isMobile ? "flex-start" : "center",
+                  flexDirection: isMobile ? "column" : "row", gap: 12,
+                }}>
+                  <div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+                      <span style={{ fontSize: 15, fontWeight: 700, color: CB.navy }}>{med.medication_name}</span>
+                      <span style={{ fontSize: 12, padding: "2px 10px", borderRadius: 12, background: med.is_prn ? `${CB.amber}14` : `${CB.teal}12`, color: med.is_prn ? CB.amber : CB.teal, fontWeight: 600 }}>
+                        {med.is_prn ? "PRN" : med.frequency}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 13, color: CB.textMid }}>
+                      {med.dosage} — {med.route}
+                      {med.prescribed_by && <span> — Rx: {med.prescribed_by}</span>}
+                    </div>
+                    {!med.is_prn && med.schedule_times?.length > 0 && (
+                      <div style={{ fontSize: 12, color: CB.textLight, marginTop: 4 }}>
+                        Times: {med.schedule_times.join(", ")}
+                      </div>
+                    )}
+                    {med.special_instructions && (
+                      <div style={{ fontSize: 12, color: CB.amber, fontWeight: 600, marginTop: 4 }}>⚠ {med.special_instructions}</div>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button onClick={() => { setEditingMed(med); setShowMedForm(true); }} style={{
+                      padding: "8px 14px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
+                      fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", color: CB.textMid,
+                    }}>Edit</button>
+                    <button onClick={async () => {
+                      if (!confirm("Discontinue this medication?")) return;
+                      await supabase.from("medications").update({ is_active: false }).eq("id", med.id);
+                      addToast("Medication discontinued", "success"); loadMedData();
+                    }} style={{
+                      padding: "8px 14px", borderRadius: 8, border: `1px solid ${CB.red}30`, background: `${CB.red}08`,
+                      fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", color: CB.red,
+                    }}>Discontinue</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+
+      // ── Missed Doses Tab ──
+      const MissedDoses = () => {
+        const now = new Date();
+        const nowStr = now.toISOString().split("T")[0];
+        const nowTime = now.toTimeString().slice(0, 5);
+        const sevenAgo = new Date(now); sevenAgo.setDate(sevenAgo.getDate() - 7);
+        const startStr = sevenAgo.toISOString().split("T")[0];
+
+        // Build expected passes for last 7 days
+        const missed = [];
+        const scheduledMeds = medications.filter(m => !m.is_prn && m.schedule_times?.length);
+        for (let d = new Date(sevenAgo); d <= now; d.setDate(d.getDate() + 1)) {
+          const dateStr = d.toISOString().split("T")[0];
+          scheduledMeds.forEach(med => {
+            (med.schedule_times || []).forEach(time => {
+              if (dateStr === nowStr && time > nowTime) return; // future today
+              const log = logs.find(l => l.medication_id === med.id && l.scheduled_date === dateStr && l.scheduled_time === time);
+              if (!log) {
+                missed.push({ medication: med, date: dateStr, time });
+              } else if (log.status === "refused" || log.status === "held" || log.status === "not_available") {
+                missed.push({ medication: med, date: dateStr, time, status: log.status, notes: log.notes });
+              }
+            });
+          });
+        }
+
+        // Need to re-fetch logs for the 7-day window if marDate is different
+        // For now use what we have (MAR window might differ)
+
+        return (
+          <div>
+            {missed.length === 0 ? (
+              <div style={{ textAlign: "center", padding: 48 }}>
+                <div style={{ width: 56, height: 56, borderRadius: 16, background: `${CB.green}12`, display: "inline-flex", alignItems: "center", justifyContent: "center", marginBottom: 12 }}>
+                  {icons.checkCircle({ size: 28, color: CB.green })}
+                </div>
+                <p style={{ fontSize: 15, fontWeight: 600, color: CB.navy }}>No missed doses in the last 7 days</p>
+              </div>
+            ) : (
+              <div style={{ background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, overflow: "hidden" }}>
+                <div style={{ padding: "14px 20px", background: `${CB.red}08`, borderBottom: `1px solid ${CB.border}`, display: "flex", alignItems: "center", gap: 10 }}>
+                  {icons.alertTriangle({ size: 16, color: CB.red })}
+                  <span style={{ fontSize: 14, fontWeight: 700, color: CB.red }}>{missed.length} missed or flagged dose{missed.length !== 1 ? "s" : ""} — last 7 days</span>
+                </div>
+                {missed.map((m, i) => {
+                  const statusDef = m.status ? MED_LOG_STATUS.find(s => s.value === m.status) : null;
+                  return (
+                    <div key={i} style={{
+                      display: "flex", alignItems: isMobile ? "flex-start" : "center", gap: 14, padding: "12px 20px",
+                      borderBottom: i < missed.length - 1 ? `1px solid ${CB.border}` : "none",
+                      flexDirection: isMobile ? "column" : "row",
+                    }}>
+                      <div style={{ width: 10, height: 10, borderRadius: "50%", background: statusDef?.color || CB.red, flexShrink: 0 }} />
+                      <div style={{ flex: 1 }}>
+                        <span style={{ fontWeight: 700, color: CB.text, fontSize: 14 }}>{m.medication.medication_name}</span>
+                        <span style={{ color: CB.textMid, fontSize: 13, marginLeft: 8 }}>{m.medication.dosage}</span>
+                      </div>
+                      <span style={{ fontSize: 13, color: CB.textMid, minWidth: 120 }}>{m.date} at {m.time}</span>
+                      <span style={{
+                        padding: "3px 12px", borderRadius: 12, fontSize: 11, fontWeight: 700,
+                        background: `${statusDef?.color || CB.red}14`, color: statusDef?.color || CB.red,
+                        textTransform: "uppercase",
+                      }}>{statusDef?.label || "Not Logged"}</span>
+                      {!m.status && (
+                        <button onClick={() => setShowLogModal({ medication: m.medication, date: m.date, time: m.time })} style={{
+                          padding: "6px 14px", borderRadius: 8, border: `1px solid ${CB.teal}`, background: `${CB.teal}08`,
+                          fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", color: CB.teal,
+                        }}>Log Now</button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      };
+
+      const clientName = clients.find(c => c.id === selectedClient);
+
+      return (
+        <div>
+          <PageHeader title="Medication Tracking" subtitle={clientName ? `${clientName.first_name} ${clientName.last_name} — MAR & Med Pass` : "Select a client"} />
+          {/* Client Selector */}
+          <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap", alignItems: "center" }}>
+            <select value={selectedClient} onChange={e => setSelectedClient(e.target.value)} style={{
+              padding: "10px 16px", borderRadius: 10, border: `1px solid ${CB.border}`, fontSize: 14, fontFamily: "inherit",
+              background: CB.white, minWidth: 220,
+            }}>
+              <option value="">Select client...</option>
+              {clients.map(c => <option key={c.id} value={c.id}>{c.last_name}, {c.first_name}</option>)}
+            </select>
+          </div>
+          {/* Tabs */}
+          <div style={{ display: "flex", gap: 4, marginBottom: 20, background: CB.white, borderRadius: 12, padding: 4, border: `1px solid ${CB.border}`, width: "fit-content" }}>
+            {[
+              { key: "mar", label: "MAR" },
+              { key: "medications", label: "Medications" },
+              { key: "missed", label: "Missed Doses" },
+            ].map(t => (
+              <button key={t.key} onClick={() => setTab(t.key)} style={{
+                padding: "9px 20px", borderRadius: 9, border: "none", fontSize: 13, fontWeight: 600,
+                fontFamily: "inherit", cursor: "pointer", transition: "all 0.15s",
+                background: tab === t.key ? CB.navy : "transparent", color: tab === t.key ? CB.white : CB.textMid,
+              }}>{t.label}</button>
+            ))}
+          </div>
+          {!selectedClient ? (
+            <div style={{ textAlign: "center", padding: 48, color: CB.textMid }}>
+              <p style={{ fontSize: 15, fontWeight: 600 }}>Select a client to view medications</p>
+            </div>
+          ) : loading ? (
+            <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><Spinner size={28} /></div>
+          ) : (
+            <div style={{ background: CB.white, borderRadius: 16, padding: isMobile ? 16 : 24, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow }}>
+              {tab === "mar" && <MARView />}
+              {tab === "medications" && <MedsList />}
+              {tab === "missed" && <MissedDoses />}
+            </div>
+          )}
+          {showMedForm && <MedForm />}
+          <LogModal />
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // BILLING & CLAIMS — real claim engine from service notes
     // ═══════════════════════════════════════════════════════════════
     function BillingPage() {
@@ -6986,6 +7523,7 @@
           case "compliance": return <CompliancePage />;
           case "incidents": return <IncidentsPage />;
           case "alerts": return <AlertsPage />;
+          case "medications": return <MedicationsPage />;
           case "billing": return <BillingPage />;
           case "ai": return <AIPage />;
           case "messages": return <MessagingPage />;
