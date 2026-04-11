@@ -13,6 +13,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body, #root { height: 100%; }
@@ -101,8 +102,8 @@
 
     // Nav items each role can see
     const ROLE_NAV = {
-      owner:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "billing", "messages", "ai", "settings"],
-      admin:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "billing", "messages", "ai", "settings"],
+      owner:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "billing", "messages", "ai", "migration", "settings"],
+      admin:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "billing", "messages", "ai", "migration", "settings"],
       compliance_director:  ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "billing", "messages", "ai"],
       residential_director: ["dashboard", "clients", "training", "notes", "evv", "messages"],
       day_program_director: ["dashboard", "clients", "training", "notes", "evv", "messages"],
@@ -262,6 +263,7 @@
       eye: (p={}) => <Icon {...p} d={<><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></>} />,
       crosshair: (p={}) => <Icon {...p} d={<><circle cx="12" cy="12" r="10"/><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/></>} />,
       menu: (p={}) => <Icon {...p} d={<><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></>} />,
+      upload: (p={}) => <Icon {...p} d={<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></>} />,
     };
 
     // ═══════════════════════════════════════════════════════════════
@@ -492,6 +494,7 @@
         { key: "billing", label: "Billing", icon: icons.barChart },
         { key: "ai", label: "AI Intelligence", icon: icons.zap },
         { key: "messages", label: "Messages", icon: icons.mail },
+        { key: "migration", label: "Data Migration", icon: icons.upload },
         { key: "settings", label: "Org Structure", icon: icons.lock },
       ];
       const visibleNav = allNavItems.filter(item => allowedNav.includes(item.key));
@@ -5570,6 +5573,471 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // UNIVERSAL PROVIDER DATA MIGRATION TOOL
+    // ═══════════════════════════════════════════════════════════════
+    const IMPORT_TYPES = {
+      staff: {
+        label: "Staff / Employees",
+        table: "staff",
+        icon: icons.users,
+        fields: [
+          { key: "first_name", label: "First Name", required: true },
+          { key: "last_name", label: "Last Name", required: true },
+          { key: "email", label: "Email" },
+          { key: "phone", label: "Phone" },
+          { key: "role", label: "Role", note: "dsp, rn, bcba, house_manager, etc." },
+          { key: "hire_date", label: "Hire Date" },
+          { key: "date_of_birth", label: "Date of Birth" },
+          { key: "is_active", label: "Active Status", note: "true/false, yes/no, active/inactive" },
+        ],
+      },
+      clients: {
+        label: "Clients / Individuals",
+        table: "persons",
+        icon: icons.heart,
+        fields: [
+          { key: "first_name", label: "First Name", required: true },
+          { key: "last_name", label: "Last Name", required: true },
+          { key: "date_of_birth", label: "Date of Birth" },
+          { key: "medicaid_number", label: "Medicaid Number" },
+          { key: "pid", label: "PID / Person ID" },
+          { key: "gender", label: "Gender" },
+          { key: "phone", label: "Phone" },
+          { key: "address", label: "Address" },
+          { key: "city", label: "City" },
+          { key: "state", label: "State" },
+          { key: "zip", label: "ZIP" },
+          { key: "is_active", label: "Active Status" },
+        ],
+      },
+      trainings: {
+        label: "Training Records",
+        table: "staff_trainings",
+        icon: icons.book,
+        fields: [
+          { key: "staff_email", label: "Staff Email", required: true, note: "Used to match existing staff" },
+          { key: "topic_name", label: "Training Topic", required: true },
+          { key: "completed_at", label: "Date Completed" },
+          { key: "expires_at", label: "Expiration Date" },
+          { key: "provider", label: "Training Provider" },
+        ],
+      },
+    };
+
+    // Auto-detect column mappings from common EHR headers
+    const HEADER_ALIASES = {
+      first_name: ["first name", "firstname", "first", "fname", "given name"],
+      last_name: ["last name", "lastname", "last", "lname", "surname", "family name"],
+      email: ["email", "email address", "emailaddress", "e-mail"],
+      phone: ["phone", "phone number", "phonenumber", "telephone", "cell", "mobile"],
+      role: ["role", "position", "title", "job title", "jobtitle"],
+      hire_date: ["hire date", "hiredate", "start date", "startdate", "date hired", "datehired"],
+      date_of_birth: ["date of birth", "dateofbirth", "dob", "birthdate", "birth date", "birthday"],
+      is_active: ["active", "status", "is_active", "isactive", "active status"],
+      medicaid_number: ["medicaid", "medicaid number", "medicaid id", "medicaidid", "medicaid_number"],
+      pid: ["pid", "person id", "personid", "client id", "clientid", "individual id"],
+      gender: ["gender", "sex"],
+      address: ["address", "street", "street address", "address1", "address 1"],
+      city: ["city", "town"],
+      state: ["state", "st", "province"],
+      zip: ["zip", "zipcode", "zip code", "postal", "postal code"],
+      staff_email: ["staff email", "employee email", "email"],
+      topic_name: ["topic", "training", "training topic", "course", "course name"],
+      completed_at: ["completed", "completed date", "date completed", "completion date"],
+      expires_at: ["expires", "expiration", "expiration date", "expires at"],
+      provider: ["provider", "training provider", "vendor", "source"],
+    };
+
+    function autoMapColumns(csvHeaders, targetFields) {
+      const mapping = {};
+      targetFields.forEach(field => {
+        const aliases = HEADER_ALIASES[field.key] || [field.key];
+        const match = csvHeaders.find(h => {
+          const norm = h.toLowerCase().trim();
+          return aliases.includes(norm) || norm === field.key;
+        });
+        if (match) mapping[field.key] = match;
+      });
+      return mapping;
+    }
+
+    function parseValue(val, key) {
+      if (val === null || val === undefined || val === "") return null;
+      const v = String(val).trim();
+      if (key === "is_active") {
+        const lower = v.toLowerCase();
+        if (["true", "yes", "active", "1", "y"].includes(lower)) return true;
+        if (["false", "no", "inactive", "0", "n", "terminated"].includes(lower)) return false;
+        return true;
+      }
+      if (key === "role") {
+        const lower = v.toLowerCase().replace(/\s+/g, "_");
+        const roleMap = { direct_support_professional: "dsp", dsp: "dsp", registered_nurse: "rn", rn: "rn", bcba: "bcba", administrator: "admin", admin: "admin", owner: "owner", house_manager: "house_manager", compliance_director: "compliance_director", residential_director: "residential_director", day_program_director: "day_program_director" };
+        return roleMap[lower] || "dsp";
+      }
+      if (["hire_date", "date_of_birth", "completed_at", "expires_at"].includes(key)) {
+        const d = new Date(v);
+        return isNaN(d.getTime()) ? null : d.toISOString().split("T")[0];
+      }
+      return v;
+    }
+
+    function MigrationPage() {
+      const { orgId } = useAuth();
+      const { addToast } = useToast();
+      const [step, setStep] = useState(0); // 0=type, 1=upload, 2=map, 3=preview, 4=importing, 5=done
+      const [importType, setImportType] = useState(null);
+      const [csvData, setCsvData] = useState(null); // { headers, rows }
+      const [fileName, setFileName] = useState("");
+      const [mapping, setMapping] = useState({});
+      const [importing, setImporting] = useState(false);
+      const [progress, setProgress] = useState({ done: 0, total: 0, errors: [] });
+      const fileRef = useRef(null);
+
+      const typeConfig = importType ? IMPORT_TYPES[importType] : null;
+
+      const handleFile = (file) => {
+        if (!file) return;
+        setFileName(file.name);
+        Papa.parse(file, {
+          header: true, skipEmptyLines: true,
+          complete: (result) => {
+            if (!result.data || result.data.length === 0) return addToast("No data found in file", "error");
+            const headers = result.meta.fields || Object.keys(result.data[0]);
+            setCsvData({ headers, rows: result.data });
+            const autoMap = autoMapColumns(headers, typeConfig.fields);
+            setMapping(autoMap);
+            setStep(2);
+          },
+          error: (err) => addToast("Failed to parse file: " + err.message, "error"),
+        });
+      };
+
+      const handleDrop = (e) => {
+        e.preventDefault();
+        const file = e.dataTransfer?.files?.[0];
+        if (file) handleFile(file);
+      };
+
+      const mappedCount = typeConfig ? typeConfig.fields.filter(f => mapping[f.key]).length : 0;
+      const requiredMapped = typeConfig ? typeConfig.fields.filter(f => f.required).every(f => mapping[f.key]) : false;
+
+      const previewRows = useMemo(() => {
+        if (!csvData || !typeConfig) return [];
+        return csvData.rows.slice(0, 10).map(row => {
+          const mapped = {};
+          typeConfig.fields.forEach(f => {
+            const csvCol = mapping[f.key];
+            mapped[f.key] = csvCol ? parseValue(row[csvCol], f.key) : null;
+          });
+          return mapped;
+        });
+      }, [csvData, mapping, typeConfig]);
+
+      const validationWarnings = useMemo(() => {
+        if (!csvData || !typeConfig) return [];
+        const warns = [];
+        const reqFields = typeConfig.fields.filter(f => f.required);
+        let missingCount = 0;
+        csvData.rows.forEach((row, i) => {
+          reqFields.forEach(f => {
+            const csvCol = mapping[f.key];
+            if (!csvCol || !row[csvCol] || !String(row[csvCol]).trim()) missingCount++;
+          });
+        });
+        if (missingCount > 0) warns.push(`${missingCount} missing required field values — those rows will be skipped`);
+        const unmapped = typeConfig.fields.filter(f => !mapping[f.key] && !f.required);
+        if (unmapped.length > 0) warns.push(`${unmapped.length} optional fields not mapped: ${unmapped.map(f => f.label).join(", ")}`);
+        return warns;
+      }, [csvData, mapping, typeConfig]);
+
+      const doImport = async () => {
+        if (!csvData || !typeConfig || !orgId) return;
+        setImporting(true);
+        setStep(4);
+        const errors = [];
+        const reqFields = typeConfig.fields.filter(f => f.required);
+        const validRows = csvData.rows.filter(row => {
+          return reqFields.every(f => {
+            const csvCol = mapping[f.key];
+            return csvCol && row[csvCol] && String(row[csvCol]).trim();
+          });
+        });
+        setProgress({ done: 0, total: validRows.length, errors: [] });
+
+        // Batch import in chunks of 25
+        const BATCH = 25;
+        let done = 0;
+
+        // For training imports, pre-fetch staff and topics
+        let staffLookup = {}, topicLookup = {};
+        if (importType === "trainings") {
+          const { data: staffData } = await supabase.from("staff").select("id, email").eq("org_id", orgId);
+          (staffData || []).forEach(s => { if (s.email) staffLookup[s.email.toLowerCase()] = s.id; });
+          const { data: topicData } = await supabase.from("training_topic_definitions").select("id, name").eq("org_id", orgId);
+          (topicData || []).forEach(t => { topicLookup[t.name.toLowerCase()] = t.id; });
+        }
+
+        for (let i = 0; i < validRows.length; i += BATCH) {
+          const batch = validRows.slice(i, i + BATCH);
+          const records = batch.map(row => {
+            const rec = { org_id: orgId };
+            typeConfig.fields.forEach(f => {
+              if (f.key === "staff_email") return; // handled separately for trainings
+              const csvCol = mapping[f.key];
+              if (csvCol) rec[f.key] = parseValue(row[csvCol], f.key);
+            });
+            // Training-specific: resolve staff_id and topic_id
+            if (importType === "trainings") {
+              const email = mapping.staff_email ? String(row[mapping.staff_email] || "").toLowerCase().trim() : "";
+              rec.staff_id = staffLookup[email] || null;
+              const topicName = mapping.topic_name ? String(row[mapping.topic_name] || "").toLowerCase().trim() : "";
+              rec.training_topic_id = topicLookup[topicName] || null;
+              delete rec.topic_name;
+              if (!rec.staff_id) { errors.push(`Row ${i + batch.indexOf(row) + 1}: Staff email "${email}" not found`); return null; }
+            }
+            return rec;
+          }).filter(Boolean);
+
+          if (records.length > 0) {
+            const { error } = await supabase.from(typeConfig.table).insert(records);
+            if (error) errors.push(`Batch ${Math.floor(i / BATCH) + 1}: ${error.message}`);
+          }
+          done += batch.length;
+          setProgress({ done, total: validRows.length, errors: [...errors] });
+        }
+
+        setStep(5);
+        setImporting(false);
+        if (errors.length === 0) addToast(`Successfully imported ${validRows.length} ${typeConfig.label.toLowerCase()}`, "success");
+        else addToast(`Import completed with ${errors.length} errors`, "warning");
+      };
+
+      const reset = () => {
+        setStep(0); setImportType(null); setCsvData(null); setFileName("");
+        setMapping({}); setProgress({ done: 0, total: 0, errors: [] });
+      };
+
+      return (
+        <div>
+          <PageHeader title="Data Migration" subtitle="Import data from AxisCare, Therap, or any CSV export" action={
+            step > 0 && (
+              <button onClick={reset} style={{ padding: "10px 18px", background: "transparent", border: `1px solid ${CB.border}`, borderRadius: 10, fontSize: 13, fontWeight: 600, color: CB.textMid, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 6 }}>
+                {icons.refresh({ size: 14 })} Start Over
+              </button>
+            )
+          } />
+
+          {/* Progress steps */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 28 }}>
+            {["Select Type", "Upload CSV", "Map Columns", "Preview", "Import"].map((label, i) => (
+              <React.Fragment key={i}>
+                {i > 0 && <div style={{ width: 24, height: 2, background: i <= step ? CB.teal : CB.border }} />}
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <div style={{
+                    width: 28, height: 28, borderRadius: 14, display: "flex", alignItems: "center", justifyContent: "center",
+                    fontSize: 12, fontWeight: 800, background: i < step ? CB.teal : i === step ? CB.navy : CB.cream,
+                    color: i <= step ? CB.white : CB.textLight, border: `2px solid ${i <= step ? "transparent" : CB.border}`,
+                  }}>{i < step ? "✓" : i + 1}</div>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: i === step ? CB.navy : CB.textLight, display: window.innerWidth < 600 ? "none" : "inline" }}>{label}</span>
+                </div>
+              </React.Fragment>
+            ))}
+          </div>
+
+          {/* Step 0: Select Type */}
+          {step === 0 && (
+            <RGrid cols={3} gap={16}>
+              {Object.entries(IMPORT_TYPES).map(([key, config]) => (
+                <button key={key} onClick={() => { setImportType(key); setStep(1); }} style={{
+                  padding: 24, borderRadius: 16, border: `1px solid ${CB.border}`, background: CB.white,
+                  cursor: "pointer", fontFamily: "inherit", textAlign: "left", transition: "all 0.15s",
+                  boxShadow: CB.cardShadow, display: "flex", flexDirection: "column", gap: 12,
+                }}
+                  onMouseEnter={e => { e.currentTarget.style.borderColor = CB.teal; e.currentTarget.style.transform = "translateY(-2px)"; }}
+                  onMouseLeave={e => { e.currentTarget.style.borderColor = CB.border; e.currentTarget.style.transform = "none"; }}
+                >
+                  <div style={{ width: 44, height: 44, borderRadius: 12, background: `${CB.teal}12`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    {config.icon({ size: 22, color: CB.teal })}
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 16, fontWeight: 700, color: CB.navy }}>{config.label}</div>
+                    <div style={{ fontSize: 13, color: CB.textMid, marginTop: 4 }}>{config.fields.length} fields • Import from any CSV</div>
+                  </div>
+                </button>
+              ))}
+            </RGrid>
+          )}
+
+          {/* Step 1: Upload */}
+          {step === 1 && typeConfig && (
+            <div style={{ background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, padding: 32 }}>
+              <h3 style={{ fontSize: 18, fontWeight: 700, color: CB.navy, marginBottom: 8 }}>Upload {typeConfig.label} CSV</h3>
+              <p style={{ fontSize: 13, color: CB.textMid, marginBottom: 24 }}>Export your data from AxisCare, Therap, or any system as a CSV file, then upload it here. We'll auto-detect the columns.</p>
+              <div
+                onDrop={handleDrop} onDragOver={e => e.preventDefault()}
+                onClick={() => fileRef.current?.click()}
+                style={{
+                  border: `2px dashed ${CB.border}`, borderRadius: 16, padding: "48px 24px", textAlign: "center",
+                  cursor: "pointer", transition: "all 0.2s", background: CB.cream,
+                }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor = CB.teal; e.currentTarget.style.background = "#F0FDFA"; }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = CB.border; e.currentTarget.style.background = CB.cream; }}
+              >
+                <input ref={fileRef} type="file" accept=".csv,.tsv,.txt" style={{ display: "none" }} onChange={e => handleFile(e.target.files?.[0])} />
+                <div style={{ marginBottom: 12 }}>{icons.upload({ size: 36, color: CB.teal })}</div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Drop CSV file here or click to browse</div>
+                <div style={{ fontSize: 13, color: CB.textMid }}>Supports .csv, .tsv exports from AxisCare, Therap, and other DSPD platforms</div>
+              </div>
+              <div style={{ marginTop: 24 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: CB.navy, marginBottom: 8 }}>Expected fields:</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {typeConfig.fields.map(f => (
+                    <Badge key={f.key} text={`${f.label}${f.required ? " *" : ""}`} color={f.required ? CB.teal : CB.textLight} />
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Step 2: Map Columns */}
+          {step === 2 && typeConfig && csvData && (
+            <div style={{ background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, padding: 32 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
+                <div>
+                  <h3 style={{ fontSize: 18, fontWeight: 700, color: CB.navy }}>Map Columns</h3>
+                  <p style={{ fontSize: 13, color: CB.textMid, marginTop: 2 }}>
+                    <strong>{fileName}</strong> — {csvData.rows.length} rows, {csvData.headers.length} columns • {mappedCount}/{typeConfig.fields.length} fields mapped
+                  </p>
+                </div>
+                <Badge text={requiredMapped ? "Ready to preview" : "Map required fields"} color={requiredMapped ? CB.green : CB.amber} />
+              </div>
+              <div style={{ display: "grid", gap: 12 }}>
+                {typeConfig.fields.map(field => (
+                  <div key={field.key} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", background: mapping[field.key] ? "#F0FDFA" : CB.cream, borderRadius: 10, border: `1px solid ${mapping[field.key] ? `${CB.teal}40` : CB.border}`, flexWrap: "wrap" }}>
+                    <div style={{ width: 180, flexShrink: 0 }}>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: CB.navy, display: "flex", alignItems: "center", gap: 6 }}>
+                        {field.label} {field.required && <span style={{ color: CB.red, fontSize: 16 }}>*</span>}
+                      </div>
+                      {field.note && <div style={{ fontSize: 11, color: CB.textLight, marginTop: 2 }}>{field.note}</div>}
+                    </div>
+                    <div style={{ fontSize: 13, color: CB.textLight, fontWeight: 600 }}>←</div>
+                    <select value={mapping[field.key] || ""} onChange={e => setMapping(p => ({ ...p, [field.key]: e.target.value || undefined }))}
+                      style={{ ...fieldStyle, flex: 1, minWidth: 180, background: CB.white }}>
+                      <option value="">— Skip this field —</option>
+                      {csvData.headers.map(h => <option key={h} value={h}>{h}</option>)}
+                    </select>
+                    {mapping[field.key] && (
+                      <div style={{ fontSize: 12, color: CB.textMid, fontStyle: "italic", minWidth: 120 }}>
+                        e.g. "{csvData.rows[0]?.[mapping[field.key]] || "—"}"
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 24 }}>
+                <button onClick={() => setStep(3)} disabled={!requiredMapped} style={{
+                  padding: "12px 24px", borderRadius: 10, border: "none", fontSize: 14, fontWeight: 700,
+                  background: requiredMapped ? CB.teal : CB.border, color: requiredMapped ? CB.white : CB.textLight,
+                  cursor: requiredMapped ? "pointer" : "not-allowed", fontFamily: "inherit",
+                  display: "flex", alignItems: "center", gap: 8,
+                }}>Preview Data {icons.arrowRight({ size: 15, color: requiredMapped ? CB.white : CB.textLight })}</button>
+              </div>
+            </div>
+          )}
+
+          {/* Step 3: Preview */}
+          {step === 3 && typeConfig && csvData && (
+            <div>
+              {validationWarnings.length > 0 && (
+                <div style={{ marginBottom: 16, padding: "12px 18px", borderRadius: 10, background: "#FFFBEB", border: "1px solid #FDE68A", display: "flex", flexDirection: "column", gap: 4 }}>
+                  {validationWarnings.map((w, i) => (
+                    <div key={i} style={{ fontSize: 13, color: "#92400E", display: "flex", alignItems: "center", gap: 8 }}>
+                      {icons.alertTriangle({ size: 14, color: "#92400E" })} {w}
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div style={{ background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, overflow: "hidden" }}>
+                <div style={{ padding: "16px 24px", borderBottom: `1px solid ${CB.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: CB.navy }}>Preview — first 10 of {csvData.rows.length} rows</div>
+                </div>
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                    <thead>
+                      <tr style={{ background: CB.cream }}>
+                        {typeConfig.fields.filter(f => mapping[f.key]).map(f => (
+                          <th key={f.key} style={{ padding: "10px 14px", fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", textAlign: "left", whiteSpace: "nowrap", borderBottom: `1px solid ${CB.border}` }}>{f.label}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {previewRows.map((row, ri) => (
+                        <tr key={ri} style={{ borderBottom: `1px solid ${CB.border}` }}>
+                          {typeConfig.fields.filter(f => mapping[f.key]).map(f => (
+                            <td key={f.key} style={{ padding: "10px 14px", fontSize: 13, color: row[f.key] ? CB.text : CB.textLight, whiteSpace: "nowrap" }}>
+                              {row[f.key] !== null && row[f.key] !== undefined ? String(row[f.key]) : "—"}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginTop: 24 }}>
+                <button onClick={() => setStep(2)} style={{ padding: "12px 20px", borderRadius: 10, border: `1px solid ${CB.border}`, background: "transparent", fontSize: 14, fontWeight: 600, color: CB.textMid, cursor: "pointer", fontFamily: "inherit" }}>← Back to Mapping</button>
+                <button onClick={doImport} style={{
+                  padding: "12px 24px", borderRadius: 10, border: "none", fontSize: 14, fontWeight: 700,
+                  background: CB.green, color: CB.white, cursor: "pointer", fontFamily: "inherit",
+                  display: "flex", alignItems: "center", gap: 8,
+                }}>{icons.upload({ size: 15, color: CB.white })} Import {csvData.rows.length} Records</button>
+              </div>
+            </div>
+          )}
+
+          {/* Step 4: Importing */}
+          {step === 4 && (
+            <div style={{ background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, padding: 48, textAlign: "center" }}>
+              <Spinner size={32} />
+              <div style={{ fontSize: 18, fontWeight: 700, color: CB.navy, marginTop: 20 }}>Importing...</div>
+              <div style={{ fontSize: 14, color: CB.textMid, marginTop: 4 }}>{progress.done} of {progress.total} records</div>
+              <div style={{ width: "100%", maxWidth: 400, height: 8, background: CB.cream, borderRadius: 4, margin: "20px auto 0", overflow: "hidden" }}>
+                <div style={{ width: `${progress.total ? (progress.done / progress.total * 100) : 0}%`, height: "100%", background: CB.teal, borderRadius: 4, transition: "width 0.3s" }} />
+              </div>
+            </div>
+          )}
+
+          {/* Step 5: Done */}
+          {step === 5 && (
+            <div style={{ background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, padding: 48, textAlign: "center" }}>
+              <div style={{ fontSize: 48, marginBottom: 16, animation: "successPop 0.5s ease" }}>{progress.errors.length === 0 ? "✅" : "⚠️"}</div>
+              <div style={{ fontSize: 22, fontWeight: 800, color: CB.navy, marginBottom: 8 }}>
+                {progress.errors.length === 0 ? "Import Complete" : "Import Completed with Errors"}
+              </div>
+              <div style={{ fontSize: 15, color: CB.textMid, marginBottom: 24 }}>
+                {progress.done} records processed from {fileName}
+              </div>
+              {progress.errors.length > 0 && (
+                <div style={{ textAlign: "left", maxWidth: 500, margin: "0 auto 24px", padding: 16, background: "#FEF2F2", borderRadius: 10, border: "1px solid #FECACA", maxHeight: 200, overflowY: "auto" }}>
+                  {progress.errors.map((err, i) => (
+                    <div key={i} style={{ fontSize: 12, color: CB.red, marginBottom: 4 }}>{err}</div>
+                  ))}
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
+                <button onClick={reset} style={{
+                  padding: "12px 24px", borderRadius: 10, border: "none", fontSize: 14, fontWeight: 700,
+                  background: CB.teal, color: CB.white, cursor: "pointer", fontFamily: "inherit",
+                }}>Import More Data</button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // CLAUDE AI INTELLIGENCE LAYER — shift handoffs & quarterly drafts
     // ═══════════════════════════════════════════════════════════════
     function AIPage() {
@@ -5786,6 +6254,7 @@
           case "billing": return <BillingPage />;
           case "ai": return <AIPage />;
           case "messages": return <MessagingPage />;
+          case "migration": return <MigrationPage />;
           case "settings": return <OrgUnitsPage />;
           default: return <DashboardPage />;
         }
