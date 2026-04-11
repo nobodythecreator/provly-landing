@@ -30,6 +30,20 @@
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
     @keyframes spin { to { transform: rotate(360deg); } }
     @keyframes successPop { 0% { transform: scale(0.8); opacity: 0; } 50% { transform: scale(1.05); } 100% { transform: scale(1); opacity: 1; } }
+
+    /* ── MOBILE RESPONSIVE ── */
+    @media (max-width: 767px) {
+      /* Touch-friendly inputs */
+      input, select, textarea { font-size: 16px !important; min-height: 44px; }
+
+      /* Tighter table cells on mobile */
+      th, td { padding: 10px 12px !important; font-size: 13px !important; }
+
+      /* Prevent zoom on input focus (iOS) */
+      input[type="text"], input[type="email"], input[type="password"],
+      input[type="number"], input[type="tel"], input[type="date"],
+      select, textarea { font-size: 16px !important; }
+    }
   </style>
 </head>
 <body>
@@ -87,15 +101,15 @@
 
     // Nav items each role can see
     const ROLE_NAV = {
-      owner:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "billing", "ai", "settings"],
-      admin:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "billing", "ai", "settings"],
-      compliance_director:  ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "billing", "ai"],
-      residential_director: ["dashboard", "clients", "training", "notes", "evv"],
-      day_program_director: ["dashboard", "clients", "training", "notes", "evv"],
-      house_manager:        ["dashboard", "clients", "notes", "evv"],
-      bcba:                 ["dashboard", "clients", "notes", "compliance"],
-      rn:                   ["dashboard", "clients", "notes"],
-      dsp:                  ["notes", "evv"],
+      owner:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "billing", "messages", "ai", "settings"],
+      admin:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "billing", "messages", "ai", "settings"],
+      compliance_director:  ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "billing", "messages", "ai"],
+      residential_director: ["dashboard", "clients", "training", "notes", "evv", "messages"],
+      day_program_director: ["dashboard", "clients", "training", "notes", "evv", "messages"],
+      house_manager:        ["dashboard", "clients", "notes", "evv", "messages"],
+      bcba:                 ["dashboard", "clients", "notes", "compliance", "messages"],
+      rn:                   ["dashboard", "clients", "notes", "messages"],
+      dsp:                  ["notes", "evv", "messages"],
     };
 
     function AuthProvider({ children }) {
@@ -156,6 +170,19 @@
 
     function useAuth() { return useContext(AuthContext); }
     function usePermissions() { const { permissions } = useAuth(); return permissions || ROLE_PERMISSIONS.dsp; }
+
+    // ═══════════════════════════════════════════════════════════════
+    // RESPONSIVE HOOKS
+    // ═══════════════════════════════════════════════════════════════
+    function useMobile() {
+      const [width, setWidth] = useState(window.innerWidth);
+      useEffect(() => {
+        const onResize = () => setWidth(window.innerWidth);
+        window.addEventListener("resize", onResize);
+        return () => window.removeEventListener("resize", onResize);
+      }, []);
+      return { isMobile: width < 768, isTablet: width < 1024, width };
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // TOAST CONTEXT — global notifications
@@ -234,6 +261,7 @@
       save: (p={}) => <Icon {...p} d={<><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></>} />,
       eye: (p={}) => <Icon {...p} d={<><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></>} />,
       crosshair: (p={}) => <Icon {...p} d={<><circle cx="12" cy="12" r="10"/><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/></>} />,
+      menu: (p={}) => <Icon {...p} d={<><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></>} />,
     };
 
     // ═══════════════════════════════════════════════════════════════
@@ -249,17 +277,18 @@
     // MODAL COMPONENT — reusable overlay
     // ═══════════════════════════════════════════════════════════════
     function Modal({ open, onClose, title, subtitle, width = 520, children }) {
+      const { isMobile } = useMobile();
       if (!open) return null;
       return (
         <div onClick={onClose} style={{
           position: "fixed", inset: 0, zIndex: 1000,
           background: "rgba(10,30,51,0.45)", backdropFilter: "blur(4px)",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          padding: 24, animation: "overlayIn 0.2s ease",
+          display: "flex", alignItems: isMobile ? "flex-end" : "center", justifyContent: "center",
+          padding: isMobile ? 0 : 24, animation: "overlayIn 0.2s ease",
         }}>
           <div onClick={e => e.stopPropagation()} style={{
-            width: "100%", maxWidth: width, maxHeight: "90vh",
-            background: CB.white, borderRadius: 20, boxShadow: "0 24px 80px rgba(10,30,51,0.2)",
+            width: "100%", maxWidth: isMobile ? "100%" : width, maxHeight: isMobile ? "92vh" : "90vh",
+            background: CB.white, borderRadius: isMobile ? "20px 20px 0 0" : 20, boxShadow: "0 24px 80px rgba(10,30,51,0.2)",
             animation: "modalIn 0.25s ease", display: "flex", flexDirection: "column",
           }}>
             {/* Header */}
@@ -449,7 +478,7 @@
     // ═══════════════════════════════════════════════════════════════
     // SIDEBAR
     // ═══════════════════════════════════════════════════════════════
-    function Sidebar({ active, onNavigate }) {
+    function Sidebar({ active, onNavigate, isMobile, isOpen, onClose }) {
       const { user, signOut, staffProfile, role, navItems: allowedNav } = useAuth();
       const allNavItems = [
         { key: "dashboard", label: "Dashboard", icon: icons.dashboard },
@@ -462,29 +491,44 @@
         { key: "compliance", label: "Compliance", icon: icons.shield },
         { key: "billing", label: "Billing", icon: icons.barChart },
         { key: "ai", label: "AI Intelligence", icon: icons.zap },
+        { key: "messages", label: "Messages", icon: icons.mail },
         { key: "settings", label: "Org Structure", icon: icons.lock },
       ];
       const visibleNav = allNavItems.filter(item => allowedNav.includes(item.key));
       const displayName = staffProfile ? `${staffProfile.first_name || ""} ${staffProfile.last_name || ""}`.trim() : user?.email?.split("@")[0] || "User";
       const roleLabel = STAFF_ROLES.find(r => r.value === role)?.label || role?.replace(/_/g, " ") || "User";
-      return (
+
+      const handleNav = (key) => {
+        onNavigate(key);
+        if (isMobile && onClose) onClose();
+      };
+
+      if (isMobile && !isOpen) return null;
+
+      const sidebar = (
         <aside style={{
-          width: CB.sidebarW, minHeight: "100vh", background: CB.navy,
-          display: "flex", flexDirection: "column", position: "fixed", top: 0, left: 0, bottom: 0, zIndex: 50,
+          width: isMobile ? 280 : CB.sidebarW, minHeight: "100vh", background: CB.navy,
+          display: "flex", flexDirection: "column", position: "fixed", top: 0, left: 0, bottom: 0,
+          zIndex: isMobile ? 1001 : 50, transition: "transform 0.25s ease",
         }}>
-          <div style={{ padding: "24px 20px 20px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+          <div style={{ padding: "24px 20px 20px", borderBottom: "1px solid rgba(255,255,255,0.08)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <div style={{ width: 36, height: 36, borderRadius: 10, background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
                 {icons.shield({ size: 20, color: CB.white })}
               </div>
               <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
             </div>
+            {isMobile && (
+              <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", padding: 4 }}>
+                {icons.x({ size: 20, color: "rgba(255,255,255,0.6)" })}
+              </button>
+            )}
           </div>
           <nav style={{ flex: 1, padding: "16px 12px", overflowY: "auto" }}>
             {visibleNav.map((item, i) => {
               const isActive = active === item.key;
               return (
-                <button key={item.key} onClick={() => onNavigate(item.key)} style={{
+                <button key={item.key} onClick={() => handleNav(item.key)} style={{
                   width: "100%", display: "flex", alignItems: "center", gap: 12,
                   padding: "11px 14px", borderRadius: 10, border: "none",
                   background: isActive ? "rgba(0,137,123,0.15)" : "transparent",
@@ -528,6 +572,19 @@
           </div>
         </aside>
       );
+
+      if (isMobile) {
+        return (
+          <>
+            <div onClick={onClose} style={{
+              position: "fixed", inset: 0, background: "rgba(10,30,51,0.5)", backdropFilter: "blur(4px)",
+              zIndex: 1000, animation: "overlayIn 0.2s ease",
+            }} />
+            {sidebar}
+          </>
+        );
+      }
+      return sidebar;
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -601,12 +658,24 @@
       );
     }
 
-    function PageHeader({ title, subtitle, action }) {
+    // Responsive grid: cols={4} renders 4 on desktop, 2 on tablet, 1 on phone
+    function RGrid({ cols = 4, gap = 18, children, style = {} }) {
+      const { isMobile, isTablet } = useMobile();
+      const actualCols = isMobile ? (cols <= 2 ? 1 : 2) : isTablet ? Math.min(cols, 2) : cols;
       return (
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 28, animation: "fadeIn 0.4s ease" }}>
+        <div style={{ display: "grid", gridTemplateColumns: `repeat(${actualCols}, 1fr)`, gap: isMobile ? Math.min(gap, 12) : gap, ...style }}>
+          {children}
+        </div>
+      );
+    }
+
+    function PageHeader({ title, subtitle, action }) {
+      const { isMobile } = useMobile();
+      return (
+        <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", justifyContent: "space-between", alignItems: isMobile ? "stretch" : "flex-start", gap: isMobile ? 12 : 0, marginBottom: isMobile ? 20 : 28, animation: "fadeIn 0.4s ease" }}>
           <div>
-            <h1 style={{ fontSize: 26, fontWeight: 800, color: CB.navy, letterSpacing: -0.8, lineHeight: 1.2 }}>{title}</h1>
-            {subtitle && <p style={{ fontSize: 14, color: CB.textMid, marginTop: 4 }}>{subtitle}</p>}
+            <h1 style={{ fontSize: isMobile ? 22 : 26, fontWeight: 800, color: CB.navy, letterSpacing: -0.8, lineHeight: 1.2 }}>{title}</h1>
+            {subtitle && <p style={{ fontSize: isMobile ? 12 : 14, color: CB.textMid, marginTop: 4 }}>{subtitle}</p>}
           </div>
           {action}
         </div>
@@ -619,6 +688,7 @@
     function DashboardPage() {
       const [stats, setStats] = useState({ staff: 0, clients: 0, trainings: 0, auths: 0 });
       const [loading, setLoading] = useState(true);
+      const { isMobile, isTablet } = useMobile();
 
       useEffect(() => { loadDashboard(); }, []);
 
@@ -659,7 +729,7 @@
             <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><Spinner size={28} /></div>
           ) : (
             <>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 18, marginBottom: 28 }}>
+              <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(4, 1fr)", gap: isMobile ? 12 : 18, marginBottom: isMobile ? 20 : 28 }}>
                 <StatCard label="Active Staff" value={stats.staff} icon={icons.users} color={CB.blue} delay={0} />
                 <StatCard label="Active Clients" value={stats.clients} icon={icons.heart} color={CB.teal} delay={0.05} />
                 <StatCard label="Overdue Trainings" value={stats.trainings} icon={icons.alertTriangle} color={stats.trainings > 0 ? CB.red : CB.green} delay={0.1} />
@@ -671,7 +741,7 @@
                 animation: "fadeIn 0.5s ease 0.2s both",
               }}>
                 <h3 style={{ fontSize: 16, fontWeight: 700, color: CB.navy, marginBottom: 16 }}>Quick Actions</h3>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+                <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(4, 1fr)", gap: 12 }}>
                   {[
                     { label: "New Service Note", icon: icons.fileText, color: CB.teal },
                     { label: "Clock In (EVV)", icon: icons.mapPin, color: CB.blue },
@@ -2740,7 +2810,7 @@
                 </div>
 
                 {/* Time and billing info */}
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 20 }}>
+                <RGrid cols={3} gap={12} style={{ marginBottom: 20 }}>
                   {editing ? (
                     <>
                       <FormField label="Start Time" half style={{ marginBottom: 0 }}>
@@ -2777,7 +2847,7 @@
                       </div>
                     </>
                   )}
-                </div>
+                </RGrid>
 
                 {/* Note content */}
                 <div style={{ marginBottom: 20 }}>
@@ -3074,7 +3144,7 @@
                   )}
                 </div>
 
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+                <RGrid cols={2} gap={12} style={{ marginBottom: 16 }}>
                   <div style={{ padding: 14, background: CB.cream, borderRadius: 10, border: `1px solid ${CB.border}` }}>
                     <div style={{ fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 4 }}>Clock In</div>
                     <div style={{ fontSize: 15, fontWeight: 700, color: CB.navy }}>{formatTime(viewing.clock_in_at)}</div>
@@ -3091,7 +3161,7 @@
                       </>
                     )}
                   </div>
-                </div>
+                </RGrid>
 
                 {/* Duration */}
                 {viewing.clock_in_at && viewing.clock_out_at && (
@@ -3109,7 +3179,7 @@
                 {/* GPS Data */}
                 <div style={{ marginBottom: 16 }}>
                   <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 8 }}>GPS Coordinates</div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                  <RGrid cols={2} gap={12}>
                     <div style={{ padding: 12, background: CB.cream, borderRadius: 10, border: `1px solid ${CB.border}` }}>
                       <div style={{ fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4 }}>Clock-In Location</div>
                       {viewing.clock_in_lat ? (
@@ -3126,7 +3196,7 @@
                         </div>
                       ) : <span style={{ fontSize: 13, color: CB.textLight }}>Not captured</span>}
                     </div>
-                  </div>
+                  </RGrid>
                 </div>
 
                 {/* Exceptions */}
@@ -3389,7 +3459,7 @@
                 <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><Spinner size={28} /></div>
               ) : scores && (
                 <>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr", gap: 18, marginBottom: 28 }}>
+                  <RGrid cols={5} gap={18} style={{ marginBottom: 28 }}>
                     <div style={{
                       background: CB.white, borderRadius: 16, padding: "28px 20px",
                       border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
@@ -3416,7 +3486,7 @@
                         <div style={{ fontSize: 11, color: CB.textLight, marginTop: 2 }}>{item.sub}</div>
                       </div>
                     ))}
-                  </div>
+                  </RGrid>
 
                   <div style={{
                     background: CB.white, borderRadius: 16, padding: 24,
@@ -3700,14 +3770,14 @@
           ) : summary && (
             <>
               {/* Summary cards */}
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 18, marginBottom: 28 }}>
+              <RGrid cols={4} gap={18} style={{ marginBottom: 28 }}>
                 <StatCard label="Total Claims" value={summary.totalClaims} icon={icons.fileText} color={CB.navy} delay={0} />
                 {perms.viewRates && (
                   <StatCard label="Total Amount" value={`$${summary.totalAmount.toFixed(2)}`} icon={icons.barChart} color={CB.teal} delay={0.05} />
                 )}
                 <StatCard label="Approved" value={`$${(summary.byStatus.approved || 0).toFixed(2)}`} icon={icons.checkCircle} color={CB.green} delay={0.1} />
                 <StatCard label="Pending" value={`$${((summary.byStatus.draft || 0) + (summary.byStatus.submitted || 0)).toFixed(2)}`} icon={icons.clock} color={CB.amber} delay={0.15} />
-              </div>
+              </RGrid>
 
               {/* Per-client summary */}
               {perms.viewRates && summary.byClient.length > 0 && (
@@ -4589,7 +4659,7 @@
             {step === 4 && (
               <>
                 <h3 style={{ fontSize: 18, fontWeight: 700, color: CB.navy, marginBottom: 20 }}>Review & Submit</h3>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                <RGrid cols={2} gap={16}>
                   <div style={{ padding: 16, background: CB.cream, borderRadius: 12, border: `1px solid ${CB.border}` }}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 10 }}>Personal Info</div>
                     <div style={{ fontSize: 15, fontWeight: 700, color: CB.navy }}>{form.first_name} {form.last_name}</div>
@@ -4608,8 +4678,8 @@
                     {form.support_coordinator && <div style={{ fontSize: 13, color: CB.text, marginTop: 6 }}><span style={{ fontWeight: 600 }}>SC:</span> {form.support_coordinator}{form.sc_agency ? ` (${form.sc_agency})` : ""} {form.sc_phone} {form.sc_email}</div>}
                     {!form.guardian_name && !form.emergency_name && !form.support_coordinator && <div style={{ fontSize: 13, color: CB.textLight }}>No contacts added</div>}
                   </div>
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
+                </RGrid>
+                <RGrid cols={2} gap={16} style={{ marginTop: 16 }}>
                   <div style={{ padding: 16, background: CB.cream, borderRadius: 12, border: `1px solid ${CB.border}` }}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 10 }}>Medical</div>
                     {form.diagnoses ? <div style={{ fontSize: 13, color: CB.text }}>{form.diagnoses}</div> : <div style={{ fontSize: 13, color: CB.textLight }}>No diagnoses entered</div>}
@@ -4634,7 +4704,7 @@
                       </div>
                     )}
                   </div>
-                </div>
+                </RGrid>
               </>
             )}
 
@@ -5043,7 +5113,7 @@
             {step === 4 && (
               <>
                 <h3 style={{ fontSize: 18, fontWeight: 700, color: CB.navy, marginBottom: 20 }}>Review & Submit</h3>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                <RGrid cols={2} gap={16}>
                   <div style={{ padding: 16, background: CB.cream, borderRadius: 12, border: `1px solid ${CB.border}` }}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 10 }}>Staff Info</div>
                     <div style={{ fontSize: 15, fontWeight: 700, color: CB.navy }}>{form.first_name} {form.last_name}</div>
@@ -5066,8 +5136,8 @@
                       </div>
                     )}
                   </div>
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
+                </RGrid>
+                <RGrid cols={2} gap={16} style={{ marginTop: 16 }}>
                   <div style={{ padding: 16, background: CB.cream, borderRadius: 12, border: `1px solid ${CB.border}` }}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 10 }}>Credentials & Training</div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -5091,7 +5161,7 @@
                       </div>
                     </div>
                   </div>
-                </div>
+                </RGrid>
               </>
             )}
 
@@ -5135,6 +5205,366 @@
             <TabBtn value="staff" label="Staff Onboarding" icon={icons.users} />
           </div>
           {mode === "client" ? <ClientIntakeWizard /> : <StaffOnboardingWizard />}
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // HIPAA-COMPLIANT MESSAGING — internal staff-to-staff messaging
+    // ═══════════════════════════════════════════════════════════════
+    function MessagingPage() {
+      const { orgId, staffProfile } = useAuth();
+      const { addToast } = useToast();
+      const [tab, setTab] = useState("inbox"); // inbox | sent | compose
+      const [messages, setMessages] = useState([]);
+      const [staff, setStaff] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [selectedMsg, setSelectedMsg] = useState(null);
+      const [showCompose, setShowCompose] = useState(false);
+      const [replyTo, setReplyTo] = useState(null);
+      const [searchQ, setSearchQ] = useState("");
+      const [compose, setCompose] = useState({ recipient_staff_id: "", subject: "", body: "", is_urgent: false });
+      const [thread, setThread] = useState([]);
+
+      const myStaffId = staffProfile?.id;
+
+      const fetchMessages = useCallback(async () => {
+        if (!orgId || !myStaffId) return;
+        setLoading(true);
+        let query;
+        if (tab === "inbox") {
+          query = supabase.from("messages").select("*, sender:staff!messages_sender_staff_id_fkey(id,first_name,last_name,role), recipient:staff!messages_recipient_staff_id_fkey(id,first_name,last_name,role)")
+            .eq("org_id", orgId).eq("recipient_staff_id", myStaffId).order("sent_at", { ascending: false });
+        } else {
+          query = supabase.from("messages").select("*, sender:staff!messages_sender_staff_id_fkey(id,first_name,last_name,role), recipient:staff!messages_recipient_staff_id_fkey(id,first_name,last_name,role)")
+            .eq("org_id", orgId).eq("sender_staff_id", myStaffId).order("sent_at", { ascending: false });
+        }
+        const { data, error } = await query;
+        if (error) addToast(error.message, "error");
+        else setMessages(data || []);
+        setLoading(false);
+      }, [orgId, myStaffId, tab]);
+
+      const fetchStaff = useCallback(async () => {
+        if (!orgId) return;
+        const { data } = await supabase.from("staff").select("id, first_name, last_name, role, is_active").eq("org_id", orgId).eq("is_active", true).order("last_name");
+        setStaff((data || []).filter(s => s.id !== myStaffId));
+      }, [orgId, myStaffId]);
+
+      useEffect(() => { fetchMessages(); }, [fetchMessages]);
+      useEffect(() => { fetchStaff(); }, [fetchStaff]);
+
+      const markAsRead = async (msg) => {
+        if (msg.read_at || msg.sender_staff_id === myStaffId) return;
+        await supabase.from("messages").update({ read_at: new Date().toISOString() }).eq("id", msg.id);
+        setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, read_at: new Date().toISOString() } : m));
+      };
+
+      const openMessage = (msg) => {
+        setSelectedMsg(msg);
+        markAsRead(msg);
+      };
+
+      const handleSend = async () => {
+        if (!compose.recipient_staff_id) return addToast("Select a recipient", "error");
+        if (!compose.body.trim()) return addToast("Message body is required", "error");
+        const payload = {
+          org_id: orgId,
+          sender_staff_id: myStaffId,
+          recipient_staff_id: compose.recipient_staff_id,
+          subject: compose.subject || "(No subject)",
+          body: compose.body,
+          is_urgent: compose.is_urgent,
+          thread_id: replyTo?.thread_id || replyTo?.id || null,
+        };
+        const { error } = await supabase.from("messages").insert(payload);
+        if (error) return addToast(error.message, "error");
+        addToast("Message sent", "success");
+        setCompose({ recipient_staff_id: "", subject: "", body: "", is_urgent: false });
+        setShowCompose(false);
+        setReplyTo(null);
+        fetchMessages();
+      };
+
+      const handleReply = (msg) => {
+        const other = msg.sender_staff_id === myStaffId ? msg.recipient : msg.sender;
+        setReplyTo(msg);
+        setCompose({
+          recipient_staff_id: other?.id || "",
+          subject: msg.subject?.startsWith("Re: ") ? msg.subject : `Re: ${msg.subject || ""}`,
+          body: "",
+          is_urgent: false,
+        });
+        setSelectedMsg(null);
+        setShowCompose(true);
+      };
+
+      const unreadCount = useMemo(() => messages.filter(m => !m.read_at && tab === "inbox").length, [messages, tab]);
+
+      const staffName = (s) => s ? `${s.first_name || ""} ${s.last_name || ""}`.trim() : "Unknown";
+      const staffRoleLabel = (s) => s ? (STAFF_ROLES.find(r => r.value === s.role)?.label || s.role?.replace(/_/g, " ") || "") : "";
+
+      const filtered = useMemo(() => {
+        if (!searchQ.trim()) return messages;
+        const q = searchQ.toLowerCase();
+        return messages.filter(m =>
+          (m.subject || "").toLowerCase().includes(q) ||
+          (m.body || "").toLowerCase().includes(q) ||
+          staffName(m.sender).toLowerCase().includes(q) ||
+          staffName(m.recipient).toLowerCase().includes(q)
+        );
+      }, [messages, searchQ]);
+
+      const formatTime = (iso) => {
+        if (!iso) return "";
+        const d = new Date(iso);
+        const now = new Date();
+        const diff = now - d;
+        if (diff < 60000) return "Just now";
+        if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+        if (diff < 86400000) return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+        if (diff < 604800000) return d.toLocaleDateString([], { weekday: "short" });
+        return d.toLocaleDateString([], { month: "short", day: "numeric" });
+      };
+
+      const TabBtn = ({ value, label, count }) => (
+        <button onClick={() => { setTab(value); setSelectedMsg(null); }} style={{
+          padding: "10px 20px", borderRadius: 10, border: "none", fontSize: 14, fontWeight: 700,
+          background: tab === value ? CB.navy : "transparent",
+          color: tab === value ? CB.white : CB.textMid,
+          cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s",
+          display: "flex", alignItems: "center", gap: 8, position: "relative",
+        }}>
+          {label}
+          {count > 0 && (
+            <span style={{ background: CB.red, color: CB.white, fontSize: 11, fontWeight: 800, padding: "2px 7px", borderRadius: 10, minWidth: 20, textAlign: "center" }}>{count}</span>
+          )}
+        </button>
+      );
+
+      // Load thread when a message is selected
+      useEffect(() => {
+        if (!selectedMsg || !orgId) { setThread([]); return; }
+        const loadThread = async () => {
+          const threadId = selectedMsg.thread_id || selectedMsg.id;
+          const { data } = await supabase.from("messages")
+            .select("*, sender:staff!messages_sender_staff_id_fkey(id,first_name,last_name,role), recipient:staff!messages_recipient_staff_id_fkey(id,first_name,last_name,role)")
+            .eq("org_id", orgId)
+            .or(`id.eq.${threadId},thread_id.eq.${threadId}`)
+            .order("sent_at", { ascending: true });
+          setThread(data || []);
+        };
+        loadThread();
+      }, [selectedMsg?.id, orgId]);
+
+      // ── Detail view ──
+      if (selectedMsg) {
+        const msg = selectedMsg;
+        const isInbound = msg.recipient_staff_id === myStaffId;
+
+        return (
+          <div>
+            <PageHeader title="Messages" subtitle="HIPAA-compliant internal messaging" action={
+              <button onClick={() => { setShowCompose(true); setReplyTo(null); setCompose({ recipient_staff_id: "", subject: "", body: "", is_urgent: false }); }}
+                style={{ padding: "10px 20px", background: CB.teal, color: CB.white, border: "none", borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 8 }}>
+                {icons.edit({ size: 16, color: CB.white })} Compose
+              </button>
+            } />
+            <button onClick={() => setSelectedMsg(null)} style={{
+              padding: "8px 16px", background: "transparent", border: `1px solid ${CB.border}`, borderRadius: 8,
+              fontSize: 13, fontWeight: 600, color: CB.textMid, cursor: "pointer", fontFamily: "inherit", marginBottom: 16,
+              display: "flex", alignItems: "center", gap: 6,
+            }}>← Back</button>
+            <div style={{ background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, overflow: "hidden" }}>
+              {/* Header */}
+              <div style={{ padding: "20px 24px", borderBottom: `1px solid ${CB.border}`, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                <div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+                    {msg.is_urgent && <span style={{ background: "#FEF2F2", color: CB.red, fontSize: 11, fontWeight: 800, padding: "2px 8px", borderRadius: 6 }}>URGENT</span>}
+                    <h3 style={{ fontSize: 18, fontWeight: 800, color: CB.navy }}>{msg.subject || "(No subject)"}</h3>
+                  </div>
+                  <div style={{ fontSize: 13, color: CB.textMid }}>
+                    {isInbound ? `From: ${staffName(msg.sender)}` : `To: ${staffName(msg.recipient)}`}
+                    <span style={{ margin: "0 8px", color: CB.border }}>•</span>
+                    {staffRoleLabel(isInbound ? msg.sender : msg.recipient)}
+                  </div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontSize: 12, color: CB.textLight }}>{new Date(msg.sent_at).toLocaleString()}</div>
+                  {msg.read_at && <div style={{ fontSize: 11, color: CB.green, marginTop: 2 }}>✓ Read {formatTime(msg.read_at)}</div>}
+                </div>
+              </div>
+              {/* Thread */}
+              <div style={{ maxHeight: 500, overflowY: "auto" }}>
+                {(thread.length > 1 ? thread : [msg]).map((m, i) => (
+                  <div key={m.id} style={{ padding: "16px 24px", borderBottom: i < (thread.length > 1 ? thread.length : 1) - 1 ? `1px solid ${CB.border}` : "none",
+                    background: m.id === msg.id ? "#F0FDFA" : "transparent" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: m.sender_staff_id === myStaffId ? CB.teal : CB.navy }}>
+                        {m.sender_staff_id === myStaffId ? "You" : staffName(m.sender)}
+                      </span>
+                      <span style={{ fontSize: 12, color: CB.textLight }}>{formatTime(m.sent_at)}</span>
+                    </div>
+                    <div style={{ fontSize: 14, color: CB.text, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{m.body}</div>
+                  </div>
+                ))}
+              </div>
+              {/* Reply bar */}
+              <div style={{ padding: "16px 24px", borderTop: `1px solid ${CB.border}`, background: CB.cream }}>
+                <button onClick={() => handleReply(msg)} style={{
+                  padding: "10px 20px", background: CB.navy, color: CB.white, border: "none", borderRadius: 10,
+                  fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 8,
+                }}>
+                  {icons.arrowRight({ size: 15, color: CB.white })} Reply
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div>
+          <PageHeader title="Messages" subtitle="HIPAA-compliant internal messaging" action={
+            <button onClick={() => { setShowCompose(true); setReplyTo(null); setCompose({ recipient_staff_id: "", subject: "", body: "", is_urgent: false }); }}
+              style={{ padding: "10px 20px", background: CB.teal, color: CB.white, border: "none", borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 8 }}>
+              {icons.edit({ size: 16, color: CB.white })} Compose
+            </button>
+          } />
+
+          {/* HIPAA Notice */}
+          <div style={{
+            padding: "12px 18px", borderRadius: 10, background: "#FFFBEB", border: "1px solid #FDE68A",
+            marginBottom: 20, display: "flex", alignItems: "center", gap: 10, fontSize: 13, color: "#92400E",
+          }}>
+            {icons.lock({ size: 16, color: "#92400E" })}
+            <span><strong>HIPAA Notice:</strong> Messages are encrypted and stored within your organization. Do not include PHI in subject lines. All messages are logged for compliance auditing.</span>
+          </div>
+
+          {/* Tabs + Search */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
+            <div style={{ display: "flex", gap: 4, background: CB.cream, padding: 4, borderRadius: 12 }}>
+              <TabBtn value="inbox" label="Inbox" count={tab === "inbox" ? unreadCount : 0} />
+              <TabBtn value="sent" label="Sent" />
+            </div>
+            <div style={{ position: "relative" }}>
+              {icons.search({ size: 16, color: CB.textLight, style: { position: "absolute", left: 12, top: 11 } })}
+              <input value={searchQ} onChange={e => setSearchQ(e.target.value)} placeholder="Search messages..."
+                style={{ ...fieldStyle, width: 260, paddingLeft: 36 }} />
+            </div>
+          </div>
+
+          {/* Message list */}
+          <div style={{ background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, overflow: "hidden" }}>
+            {loading ? (
+              <div style={{ padding: 40, textAlign: "center" }}><Spinner /></div>
+            ) : filtered.length === 0 ? (
+              <div style={{ padding: 48, textAlign: "center" }}>
+                <div style={{ fontSize: 48, marginBottom: 12 }}>{tab === "inbox" ? "📬" : "📤"}</div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>{searchQ ? "No messages found" : tab === "inbox" ? "Inbox is empty" : "No sent messages"}</div>
+                <div style={{ fontSize: 13, color: CB.textMid }}>{searchQ ? "Try a different search" : "Compose a new message to get started"}</div>
+              </div>
+            ) : (
+              filtered.map((msg, i) => {
+                const isUnread = tab === "inbox" && !msg.read_at;
+                const otherPerson = tab === "inbox" ? msg.sender : msg.recipient;
+                return (
+                  <div key={msg.id} onClick={() => openMessage(msg)} style={{
+                    padding: "16px 24px", borderBottom: i < filtered.length - 1 ? `1px solid ${CB.border}` : "none",
+                    cursor: "pointer", transition: "background 0.1s",
+                    background: isUnread ? "#F0FDFA" : "transparent",
+                    display: "flex", alignItems: "center", gap: 16,
+                  }}
+                    onMouseEnter={e => e.currentTarget.style.background = isUnread ? "#E0F7FA" : CB.cream}
+                    onMouseLeave={e => e.currentTarget.style.background = isUnread ? "#F0FDFA" : "transparent"}
+                  >
+                    {/* Avatar */}
+                    <div style={{
+                      width: 40, height: 40, borderRadius: 12, flexShrink: 0,
+                      background: isUnread ? `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})` : CB.cream,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      fontSize: 15, fontWeight: 700, color: isUnread ? CB.white : CB.textMid,
+                    }}>{(otherPerson?.first_name || "?")[0].toUpperCase()}</div>
+                    {/* Content */}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+                        <span style={{ fontSize: 14, fontWeight: isUnread ? 800 : 600, color: CB.navy, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {staffName(otherPerson)}
+                        </span>
+                        {msg.is_urgent && <span style={{ background: "#FEF2F2", color: CB.red, fontSize: 10, fontWeight: 800, padding: "1px 6px", borderRadius: 4 }}>URGENT</span>}
+                      </div>
+                      <div style={{ fontSize: 13, fontWeight: isUnread ? 700 : 500, color: isUnread ? CB.text : CB.textMid, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {msg.subject || "(No subject)"}
+                      </div>
+                      <div style={{ fontSize: 12, color: CB.textLight, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {(msg.body || "").substring(0, 100)}
+                      </div>
+                    </div>
+                    {/* Time + read */}
+                    <div style={{ textAlign: "right", flexShrink: 0 }}>
+                      <div style={{ fontSize: 12, color: isUnread ? CB.teal : CB.textLight, fontWeight: isUnread ? 700 : 400 }}>{formatTime(msg.sent_at)}</div>
+                      {tab === "sent" && msg.read_at && <div style={{ fontSize: 11, color: CB.green, marginTop: 2 }}>✓ Read</div>}
+                      {tab === "sent" && !msg.read_at && <div style={{ fontSize: 11, color: CB.textLight, marginTop: 2 }}>Delivered</div>}
+                      {isUnread && <div style={{ width: 8, height: 8, borderRadius: 4, background: CB.teal, marginLeft: "auto", marginTop: 4 }} />}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          {/* Compose Modal */}
+          <Modal open={showCompose} onClose={() => { setShowCompose(false); setReplyTo(null); }} title={replyTo ? "Reply" : "New Message"} subtitle="Messages are encrypted and audit-logged" width={600}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              {/* Recipient */}
+              <div>
+                <label style={{ fontSize: 13, fontWeight: 700, color: CB.navy, marginBottom: 6, display: "block" }}>To</label>
+                <select value={compose.recipient_staff_id} onChange={e => setCompose(p => ({ ...p, recipient_staff_id: e.target.value }))}
+                  style={fieldStyle}>
+                  <option value="">Select staff member...</option>
+                  {staff.map(s => (
+                    <option key={s.id} value={s.id}>{s.first_name} {s.last_name} — {STAFF_ROLES.find(r => r.value === s.role)?.label || s.role}</option>
+                  ))}
+                </select>
+              </div>
+              {/* Subject */}
+              <div>
+                <label style={{ fontSize: 13, fontWeight: 700, color: CB.navy, marginBottom: 6, display: "block" }}>Subject</label>
+                <input value={compose.subject} onChange={e => setCompose(p => ({ ...p, subject: e.target.value }))} placeholder="Brief subject (no PHI)" style={fieldStyle} />
+                <div style={{ fontSize: 11, color: "#92400E", marginTop: 4 }}>⚠ Do not include client names or protected health information in the subject line.</div>
+              </div>
+              {/* Body */}
+              <div>
+                <label style={{ fontSize: 13, fontWeight: 700, color: CB.navy, marginBottom: 6, display: "block" }}>Message</label>
+                <textarea value={compose.body} onChange={e => setCompose(p => ({ ...p, body: e.target.value }))} rows={8}
+                  placeholder="Type your message..." style={{ ...fieldStyle, resize: "vertical", minHeight: 140 }} />
+              </div>
+              {/* Urgent toggle */}
+              <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
+                <input type="checkbox" checked={compose.is_urgent} onChange={e => setCompose(p => ({ ...p, is_urgent: e.target.checked }))}
+                  style={{ width: 18, height: 18, accentColor: CB.red }} />
+                <span style={{ fontSize: 14, fontWeight: 600, color: CB.red }}>Mark as Urgent</span>
+              </label>
+              {/* Reply context */}
+              {replyTo && (
+                <div style={{ padding: "12px 16px", background: CB.cream, borderRadius: 10, borderLeft: `3px solid ${CB.teal}` }}>
+                  <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 4 }}>Replying to {staffName(replyTo.sender_staff_id === myStaffId ? replyTo.recipient : replyTo.sender)} — {formatTime(replyTo.sent_at)}</div>
+                  <div style={{ fontSize: 13, color: CB.textMid, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{(replyTo.body || "").substring(0, 150)}</div>
+                </div>
+              )}
+              {/* Send button */}
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 8 }}>
+                <button onClick={() => { setShowCompose(false); setReplyTo(null); }} style={{
+                  padding: "10px 20px", background: "transparent", border: `1px solid ${CB.border}`, borderRadius: 10,
+                  fontSize: 14, fontWeight: 600, color: CB.textMid, cursor: "pointer", fontFamily: "inherit",
+                }}>Cancel</button>
+                <button onClick={handleSend} style={{
+                  padding: "10px 24px", background: CB.teal, color: CB.white, border: "none", borderRadius: 10,
+                  fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 8,
+                }}>{icons.arrowRight({ size: 15, color: CB.white })} Send</button>
+              </div>
+            </div>
+          </Modal>
         </div>
       );
     }
@@ -5340,6 +5770,8 @@
     // ═══════════════════════════════════════════════════════════════
     function AppShell() {
       const [page, setPage] = useState("dashboard");
+      const { isMobile } = useMobile();
+      const [sidebarOpen, setSidebarOpen] = useState(false);
 
       const renderPage = () => {
         switch (page) {
@@ -5353,6 +5785,7 @@
           case "compliance": return <CompliancePage />;
           case "billing": return <BillingPage />;
           case "ai": return <AIPage />;
+          case "messages": return <MessagingPage />;
           case "settings": return <OrgUnitsPage />;
           default: return <DashboardPage />;
         }
@@ -5360,8 +5793,33 @@
 
       return (
         <div style={{ display: "flex", minHeight: "100vh", background: CB.cream }}>
-          <Sidebar active={page} onNavigate={setPage} />
-          <main style={{ marginLeft: CB.sidebarW, flex: 1, padding: "32px 36px", maxWidth: `calc(100vw - ${CB.sidebarW}px)` }}>
+          <Sidebar active={page} onNavigate={setPage} isMobile={isMobile} isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+          {/* Mobile top bar */}
+          {isMobile && (
+            <div style={{
+              position: "fixed", top: 0, left: 0, right: 0, zIndex: 49, height: 56,
+              background: CB.navy, display: "flex", alignItems: "center", justifyContent: "space-between",
+              padding: "0 16px", boxShadow: "0 2px 8px rgba(10,30,51,0.15)",
+            }}>
+              <button onClick={() => setSidebarOpen(true)} style={{ background: "none", border: "none", cursor: "pointer", padding: 6 }}>
+                {icons.menu({ size: 22, color: CB.white })}
+              </button>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ width: 28, height: 28, borderRadius: 8, background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  {icons.shield({ size: 14, color: CB.white })}
+                </div>
+                <span style={{ fontSize: 17, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
+              </div>
+              <div style={{ width: 34 }} />
+            </div>
+          )}
+          <main style={{
+            marginLeft: isMobile ? 0 : CB.sidebarW,
+            flex: 1,
+            padding: isMobile ? "72px 16px 24px" : "32px 36px",
+            maxWidth: isMobile ? "100vw" : `calc(100vw - ${CB.sidebarW}px)`,
+            overflowX: "hidden",
+          }}>
             {renderPage()}
           </main>
         </div>
