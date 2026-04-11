@@ -102,11 +102,11 @@
 
     // Nav items each role can see
     const ROLE_NAV = {
-      owner:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "billing", "messages", "ai", "migration", "settings"],
-      admin:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "billing", "messages", "ai", "migration", "settings"],
-      compliance_director:  ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "billing", "messages", "ai"],
-      residential_director: ["dashboard", "clients", "training", "notes", "evv", "incidents", "messages"],
-      day_program_director: ["dashboard", "clients", "training", "notes", "evv", "incidents", "messages"],
+      owner:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "billing", "messages", "ai", "migration", "settings"],
+      admin:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "billing", "messages", "ai", "migration", "settings"],
+      compliance_director:  ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "billing", "messages", "ai"],
+      residential_director: ["dashboard", "clients", "training", "notes", "evv", "incidents", "alerts", "messages"],
+      day_program_director: ["dashboard", "clients", "training", "notes", "evv", "incidents", "alerts", "messages"],
       house_manager:        ["dashboard", "clients", "notes", "evv", "incidents", "messages"],
       bcba:                 ["dashboard", "clients", "notes", "compliance", "incidents", "messages"],
       rn:                   ["dashboard", "clients", "notes", "incidents", "messages"],
@@ -264,6 +264,7 @@
       crosshair: (p={}) => <Icon {...p} d={<><circle cx="12" cy="12" r="10"/><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/></>} />,
       menu: (p={}) => <Icon {...p} d={<><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></>} />,
       upload: (p={}) => <Icon {...p} d={<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></>} />,
+      bell: (p={}) => <Icon {...p} d={<><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></>} />,
     };
 
     // ═══════════════════════════════════════════════════════════════
@@ -492,6 +493,7 @@
         { key: "evv", label: "EVV", icon: icons.mapPin },
         { key: "compliance", label: "Compliance", icon: icons.shield },
         { key: "incidents", label: "Incidents", icon: icons.alertTriangle },
+        { key: "alerts", label: "Alerts", icon: icons.bell },
         { key: "billing", label: "Billing", icon: icons.barChart },
         { key: "ai", label: "AI Intelligence", icon: icons.zap },
         { key: "messages", label: "Messages", icon: icons.mail },
@@ -691,6 +693,7 @@
     // ═══════════════════════════════════════════════════════════════
     function DashboardPage() {
       const [stats, setStats] = useState({ staff: 0, clients: 0, trainings: 0, auths: 0 });
+      const [upcomingAlerts, setUpcomingAlerts] = useState([]);
       const [loading, setLoading] = useState(true);
       const { isMobile, isTablet } = useMobile();
 
@@ -699,11 +702,16 @@
       const loadDashboard = async () => {
         setLoading(true);
         try {
-          const [staffRes, clientRes, trainingRes, authRes] = await Promise.all([
+          const in30 = new Date(); in30.setDate(in30.getDate() + 30);
+          const nowISO = new Date().toISOString();
+          const [staffRes, clientRes, trainingRes, authRes, expTrainRes, expAuthRes, expDocRes] = await Promise.all([
             supabase.from("staff").select("id", { count: "exact", head: true }).eq("is_active", true),
             supabase.from("persons").select("id", { count: "exact", head: true }).eq("is_active", true),
-            supabase.from("staff_trainings").select("id, expires_at").lt("expires_at", new Date().toISOString()),
+            supabase.from("staff_trainings").select("id, expires_at").lt("expires_at", nowISO),
             supabase.from("person_service_authorizations").select("id", { count: "exact", head: true }),
+            supabase.from("staff_trainings").select("id, expires_at, staff(first_name, last_name), training_topic_definitions(topic_name)").lt("expires_at", in30.toISOString()).order("expires_at", { ascending: true }).limit(5),
+            supabase.from("person_service_authorizations").select("id, end_date, service_code_definitions(code), persons(first_name, last_name)").lt("end_date", in30.toISOString().split("T")[0]).order("end_date", { ascending: true }).limit(5),
+            supabase.from("documents").select("id, doc_type, expires_at, staff(first_name, last_name), persons(first_name, last_name)").eq("is_archived", false).not("expires_at", "is", null).lt("expires_at", in30.toISOString()).order("expires_at", { ascending: true }).limit(5),
           ]);
           setStats({
             staff: staffRes.count || 0,
@@ -711,6 +719,23 @@
             trainings: trainingRes.data?.length || 0,
             auths: authRes.count || 0,
           });
+          // Combine upcoming alerts
+          const now = new Date();
+          const combined = [];
+          (expTrainRes.data || []).forEach(t => {
+            const days = Math.ceil((new Date(t.expires_at) - now) / 86400000);
+            combined.push({ type: "training", days, label: t.training_topic_definitions?.topic_name || "Training", who: t.staff ? `${t.staff.first_name} ${t.staff.last_name}` : "?" });
+          });
+          (expAuthRes.data || []).forEach(a => {
+            const days = Math.ceil((new Date(a.end_date + "T00:00:00") - now) / 86400000);
+            combined.push({ type: "auth", days, label: a.service_code_definitions?.code || "Auth", who: a.persons ? `${a.persons.first_name} ${a.persons.last_name}` : "?" });
+          });
+          (expDocRes.data || []).forEach(d => {
+            const days = Math.ceil((new Date(d.expires_at) - now) / 86400000);
+            combined.push({ type: "doc", days, label: (d.doc_type || "Document").replace(/_/g, " "), who: d.staff ? `${d.staff.first_name} ${d.staff.last_name}` : d.persons ? `${d.persons.first_name} ${d.persons.last_name}` : "?" });
+          });
+          combined.sort((a, b) => a.days - b.days);
+          setUpcomingAlerts(combined.slice(0, 6));
         } catch (e) { /* dashboard load error */ }
         setLoading(false);
       };
@@ -769,6 +794,45 @@
                   ))}
                 </div>
               </div>
+              {/* Upcoming Alerts Panel */}
+              {upcomingAlerts.length > 0 && (
+                <div style={{
+                  background: CB.white, borderRadius: 16, padding: 24, marginTop: isMobile ? 16 : 20,
+                  border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
+                  animation: "fadeIn 0.5s ease 0.3s both",
+                }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      {icons.bell({ size: 16, color: CB.amber })}
+                      <h3 style={{ fontSize: 16, fontWeight: 700, color: CB.navy }}>Upcoming Expirations</h3>
+                    </div>
+                    <span style={{ fontSize: 12, color: CB.textLight, fontWeight: 600 }}>Next 30 days</span>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+                    {upcomingAlerts.map((a, i) => {
+                      const color = a.days <= 0 ? CB.red : a.days <= 7 ? CB.amber : CB.blue;
+                      return (
+                        <div key={i} style={{
+                          display: "flex", alignItems: "center", gap: 12, padding: "10px 0",
+                          borderBottom: i < upcomingAlerts.length - 1 ? `1px solid ${CB.border}` : "none",
+                        }}>
+                          <div style={{ width: 8, height: 8, borderRadius: "50%", background: color, flexShrink: 0 }} />
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <span style={{ fontSize: 13, fontWeight: 600, color: CB.text }}>{a.label}</span>
+                            <span style={{ fontSize: 12, color: CB.textMid, marginLeft: 8 }}>{a.who}</span>
+                          </div>
+                          <span style={{
+                            fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 12,
+                            background: `${color}14`, color: color, whiteSpace: "nowrap",
+                          }}>
+                            {a.days <= 0 ? `${Math.abs(a.days)}d overdue` : `${a.days}d`}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </>
           )}
         </div>
@@ -3928,6 +3992,349 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // NOTIFICATIONS & EXPIRATION ALERTS
+    // ═══════════════════════════════════════════════════════════════
+    function AlertsPage() {
+      const [loading, setLoading] = useState(true);
+      const [alerts, setAlerts] = useState([]);
+      const [filter, setFilter] = useState("all"); // all, critical, warning, upcoming
+      const [catFilter, setCatFilter] = useState("all"); // all, training, authorization, document
+      const { isMobile } = useMobile();
+      const { addToast } = useToast();
+
+      useEffect(() => { loadAlerts(); }, []);
+
+      const loadAlerts = async () => {
+        setLoading(true);
+        try {
+          const [trainRes, topicRes, staffRes, authRes, clientRes, docRes] = await Promise.all([
+            supabase.from("staff_trainings").select("id, staff_id, training_topic_id, completed_at, expires_at, staff(first_name, last_name, is_active), training_topic_definitions(topic_name, category, renewal_months)"),
+            supabase.from("training_topic_definitions").select("id, topic_name, category, deadline_days, renewal_months, requires_certification"),
+            supabase.from("staff").select("id, first_name, last_name, hire_date, is_active").eq("is_active", true),
+            supabase.from("person_service_authorizations").select("id, person_id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code), persons(first_name, last_name)"),
+            supabase.from("persons").select("id, first_name, last_name, is_active").eq("is_active", true),
+            supabase.from("documents").select("id, staff_id, person_id, doc_type, file_name, expires_at, uploaded_at, staff(first_name, last_name), persons(first_name, last_name)").eq("is_archived", false).not("expires_at", "is", null),
+          ]);
+
+          const trainings = trainRes.data || [];
+          const topics = topicRes.data || [];
+          const staff = staffRes.data || [];
+          const auths = authRes.data || [];
+          const docs = docRes.data || [];
+          const now = new Date();
+          const collected = [];
+
+          const daysUntil = (dateStr) => {
+            if (!dateStr) return Infinity;
+            const d = new Date(dateStr.includes("T") ? dateStr : dateStr + "T00:00:00");
+            return Math.ceil((d - now) / (1000 * 60 * 60 * 24));
+          };
+
+          const urgency = (days) => {
+            if (days <= 0) return "critical";
+            if (days <= 30) return "warning";
+            if (days <= 90) return "upcoming";
+            return "ok";
+          };
+
+          // ── TRAINING EXPIRATIONS ──
+          trainings.forEach(t => {
+            if (!t.expires_at) return;
+            if (t.staff && !t.staff.is_active) return;
+            const days = daysUntil(t.expires_at);
+            const urg = urgency(days);
+            if (urg === "ok") return;
+            const staffName = t.staff ? `${t.staff.first_name} ${t.staff.last_name}` : "Unknown";
+            const topicName = t.training_topic_definitions?.topic_name || "Training";
+            collected.push({
+              id: `train-${t.id}`,
+              category: "training",
+              urgency: urg,
+              days,
+              title: topicName,
+              subtitle: staffName,
+              detail: days <= 0
+                ? `Expired ${Math.abs(days)} day${Math.abs(days)!==1?"s":""} ago (${new Date(t.expires_at).toLocaleDateString()})`
+                : `Expires in ${days} day${days!==1?"s":""} (${new Date(t.expires_at).toLocaleDateString()})`,
+              date: t.expires_at,
+            });
+          });
+
+          // ── MISSING REQUIRED TRAININGS (overdue from hire date) ──
+          const requiredTopics = topics.filter(t => t.deadline_days);
+          staff.forEach(s => {
+            if (!s.hire_date) return;
+            const hireDate = new Date(s.hire_date + "T00:00:00");
+            requiredTopics.forEach(topic => {
+              const hasCompletion = trainings.find(t => t.staff_id === s.id && t.training_topic_id === topic.id);
+              if (hasCompletion) return; // handled above or completed
+              const deadline = new Date(hireDate);
+              deadline.setDate(deadline.getDate() + topic.deadline_days);
+              const days = daysUntil(deadline.toISOString());
+              const urg = urgency(days);
+              if (urg === "ok") return;
+              collected.push({
+                id: `train-missing-${s.id}-${topic.id}`,
+                category: "training",
+                urgency: urg,
+                days,
+                title: `${topic.topic_name} — Not Completed`,
+                subtitle: `${s.first_name} ${s.last_name}`,
+                detail: days <= 0
+                  ? `Due ${Math.abs(days)} day${Math.abs(days)!==1?"s":""} ago (${deadline.toLocaleDateString()})`
+                  : `Due in ${days} day${days!==1?"s":""} (${deadline.toLocaleDateString()})`,
+                date: deadline.toISOString(),
+              });
+            });
+          });
+
+          // ── SERVICE AUTHORIZATION EXPIRATIONS ──
+          auths.forEach(a => {
+            if (!a.end_date) return;
+            const days = daysUntil(a.end_date);
+            const urg = urgency(days);
+            if (urg === "ok") return;
+            const clientName = a.persons ? `${a.persons.first_name} ${a.persons.last_name}` : "Unknown Client";
+            const code = a.service_code_definitions?.code || "Service";
+            collected.push({
+              id: `auth-${a.id}`,
+              category: "authorization",
+              urgency: urg,
+              days,
+              title: `${code} Authorization`,
+              subtitle: clientName,
+              detail: days <= 0
+                ? `Expired ${Math.abs(days)} day${Math.abs(days)!==1?"s":""} ago — ${a.used_units || 0}/${a.authorized_units} units used`
+                : `Expires in ${days} day${days!==1?"s":""} — ${a.used_units || 0}/${a.authorized_units} units used`,
+              date: a.end_date,
+            });
+          });
+
+          // ── AUTHORIZATION UTILIZATION WARNINGS ──
+          auths.forEach(a => {
+            if (!a.authorized_units || a.authorized_units === 0) return;
+            const endDays = daysUntil(a.end_date);
+            if (endDays <= 0) return; // already flagged as expired
+            const pct = (a.used_units || 0) / a.authorized_units;
+            if (pct >= 0.9 && pct < 1) {
+              const clientName = a.persons ? `${a.persons.first_name} ${a.persons.last_name}` : "Unknown";
+              collected.push({
+                id: `auth-util-${a.id}`,
+                category: "authorization",
+                urgency: "warning",
+                days: endDays,
+                title: `${a.service_code_definitions?.code || "Service"} — ${Math.round(pct*100)}% Used`,
+                subtitle: clientName,
+                detail: `${a.used_units}/${a.authorized_units} units consumed, ${endDays} day${endDays!==1?"s":""} remaining`,
+                date: a.end_date,
+              });
+            } else if (pct >= 1) {
+              const clientName = a.persons ? `${a.persons.first_name} ${a.persons.last_name}` : "Unknown";
+              collected.push({
+                id: `auth-exh-${a.id}`,
+                category: "authorization",
+                urgency: "critical",
+                days: 0,
+                title: `${a.service_code_definitions?.code || "Service"} — Units Exhausted`,
+                subtitle: clientName,
+                detail: `All ${a.authorized_units} units used`,
+                date: a.end_date,
+              });
+            }
+          });
+
+          // ── DOCUMENT EXPIRATIONS ──
+          docs.forEach(d => {
+            if (!d.expires_at) return;
+            const days = daysUntil(d.expires_at);
+            const urg = urgency(days);
+            if (urg === "ok") return;
+            const ownerName = d.staff ? `${d.staff.first_name} ${d.staff.last_name}` : d.persons ? `${d.persons.first_name} ${d.persons.last_name}` : "Unknown";
+            collected.push({
+              id: `doc-${d.id}`,
+              category: "document",
+              urgency: urg,
+              days,
+              title: (d.doc_type || "Document").replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase()),
+              subtitle: ownerName,
+              detail: days <= 0
+                ? `Expired ${Math.abs(days)} day${Math.abs(days)!==1?"s":""} ago`
+                : `Expires in ${days} day${days!==1?"s":""} (${new Date(d.expires_at).toLocaleDateString()})`,
+              date: d.expires_at,
+            });
+          });
+
+          // Sort: critical first, then by days ascending
+          const urgOrder = { critical: 0, warning: 1, upcoming: 2 };
+          collected.sort((a, b) => urgOrder[a.urgency] - urgOrder[b.urgency] || a.days - b.days);
+          setAlerts(collected);
+        } catch (e) {
+          addToast("Failed to load alerts", "error");
+        }
+        setLoading(false);
+      };
+
+      const filtered = alerts.filter(a => {
+        if (filter !== "all" && a.urgency !== filter) return false;
+        if (catFilter !== "all" && a.category !== catFilter) return false;
+        return true;
+      });
+
+      const counts = { critical: 0, warning: 0, upcoming: 0 };
+      alerts.forEach(a => { if (counts[a.urgency] !== undefined) counts[a.urgency]++; });
+
+      const urgColors = { critical: CB.red, warning: CB.amber, upcoming: CB.blue };
+      const urgLabels = { critical: "Critical", warning: "Warning", upcoming: "Upcoming" };
+      const catIcons = { training: icons.book, authorization: icons.fileText, document: icons.shield };
+      const catLabels = { training: "Training", authorization: "Authorization", document: "Document" };
+
+      return (
+        <div>
+          <PageHeader title="Notifications & Alerts" subtitle="Expiration tracking — trainings, authorizations, documents"
+            action={
+              <button onClick={loadAlerts} style={{
+                display: "flex", alignItems: "center", gap: 8, padding: "10px 18px",
+                borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.white,
+                color: CB.textMid, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+              }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor = CB.navy; e.currentTarget.style.color = CB.navy; }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = CB.border; e.currentTarget.style.color = CB.textMid; }}
+              >{icons.refresh({ size: 15 })} Refresh</button>
+            }
+          />
+          {loading ? (
+            <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><Spinner size={28} /></div>
+          ) : (
+            <>
+              {/* Summary Cards */}
+              <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(3, 1fr)" : "repeat(3, 1fr)", gap: isMobile ? 10 : 16, marginBottom: isMobile ? 16 : 24 }}>
+                {[
+                  { key: "critical", label: "Critical", color: CB.red, icon: icons.alertTriangle, count: counts.critical },
+                  { key: "warning", label: "30-Day Warning", color: CB.amber, icon: icons.clock, count: counts.warning },
+                  { key: "upcoming", label: "60–90 Day", color: CB.blue, icon: icons.calendar, count: counts.upcoming },
+                ].map((card, i) => (
+                  <button key={card.key} onClick={() => setFilter(filter === card.key ? "all" : card.key)} style={{
+                    background: filter === card.key ? `${card.color}10` : CB.white,
+                    border: `1.5px solid ${filter === card.key ? card.color : CB.border}`,
+                    borderRadius: 14, padding: isMobile ? "14px 10px" : "18px 20px", cursor: "pointer",
+                    display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
+                    fontFamily: "inherit", boxShadow: CB.cardShadow,
+                    animation: `fadeIn 0.4s ease ${i * 0.05}s both`, transition: "all 0.15s",
+                  }}>
+                    <div style={{ width: 36, height: 36, borderRadius: 10, background: `${card.color}14`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      {card.icon({ size: 18, color: card.color })}
+                    </div>
+                    <span style={{ fontSize: 28, fontWeight: 800, color: card.count > 0 ? card.color : CB.textLight }}>{card.count}</span>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: CB.textMid, textTransform: "uppercase", letterSpacing: 0.5 }}>{card.label}</span>
+                  </button>
+                ))}
+              </div>
+
+              {/* Category Filter */}
+              <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
+                {[
+                  { key: "all", label: "All Categories" },
+                  { key: "training", label: "Trainings" },
+                  { key: "authorization", label: "Authorizations" },
+                  { key: "document", label: "Documents" },
+                ].map(c => (
+                  <button key={c.key} onClick={() => setCatFilter(c.key)} style={{
+                    padding: "7px 16px", borderRadius: 8, fontSize: 13, fontWeight: 600, fontFamily: "inherit",
+                    border: `1px solid ${catFilter === c.key ? CB.teal : CB.border}`,
+                    background: catFilter === c.key ? `${CB.teal}10` : CB.white,
+                    color: catFilter === c.key ? CB.tealDark : CB.textMid,
+                    cursor: "pointer", transition: "all 0.15s",
+                  }}>{c.label}</button>
+                ))}
+              </div>
+
+              {/* Alert List */}
+              {filtered.length === 0 ? (
+                <div style={{
+                  background: CB.white, borderRadius: 16, padding: 48, textAlign: "center",
+                  border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
+                }}>
+                  <div style={{ width: 56, height: 56, borderRadius: 16, background: `${CB.green}12`, display: "inline-flex", alignItems: "center", justifyContent: "center", marginBottom: 16 }}>
+                    {icons.checkCircle({ size: 28, color: CB.green })}
+                  </div>
+                  <h3 style={{ fontSize: 17, fontWeight: 700, color: CB.navy, marginBottom: 6 }}>
+                    {alerts.length === 0 ? "All Clear" : "No Matching Alerts"}
+                  </h3>
+                  <p style={{ fontSize: 14, color: CB.textMid }}>
+                    {alerts.length === 0
+                      ? "No expiring trainings, authorizations, or documents within the next 90 days."
+                      : "Try adjusting your filters to see other alerts."}
+                  </p>
+                </div>
+              ) : (
+                <div style={{
+                  background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`,
+                  boxShadow: CB.cardShadow, overflow: "hidden",
+                }}>
+                  {filtered.map((alert, i) => (
+                    <div key={alert.id} style={{
+                      display: "flex", alignItems: isMobile ? "flex-start" : "center", gap: isMobile ? 12 : 16,
+                      padding: isMobile ? "14px 16px" : "16px 24px",
+                      borderBottom: i < filtered.length - 1 ? `1px solid ${CB.border}` : "none",
+                      animation: `fadeIn 0.3s ease ${Math.min(i * 0.03, 0.5)}s both`,
+                      flexDirection: isMobile ? "column" : "row",
+                    }}>
+                      {/* Urgency Dot + Category Icon */}
+                      <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: isMobile ? "100%" : 220 }}>
+                        <div style={{
+                          width: 10, height: 10, borderRadius: "50%", flexShrink: 0,
+                          background: urgColors[alert.urgency],
+                          boxShadow: alert.urgency === "critical" ? `0 0 8px ${CB.red}60` : "none",
+                          animation: alert.urgency === "critical" ? "pulse 2s ease-in-out infinite" : "none",
+                        }} />
+                        <div style={{
+                          width: 34, height: 34, borderRadius: 9, flexShrink: 0,
+                          background: `${urgColors[alert.urgency]}12`,
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                        }}>
+                          {(catIcons[alert.category] || icons.bell)({ size: 16, color: urgColors[alert.urgency] })}
+                        </div>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: 14, fontWeight: 700, color: CB.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                            {alert.title}
+                          </div>
+                          <div style={{ fontSize: 12, color: CB.textMid }}>{alert.subtitle}</div>
+                        </div>
+                      </div>
+
+                      {/* Detail */}
+                      <div style={{ flex: 1, fontSize: 13, color: CB.textMid, minWidth: 0 }}>
+                        {alert.detail}
+                      </div>
+
+                      {/* Badge */}
+                      <div style={{
+                        padding: "4px 12px", borderRadius: 20, fontSize: 11, fontWeight: 700,
+                        background: `${urgColors[alert.urgency]}14`, color: urgColors[alert.urgency],
+                        whiteSpace: "nowrap", textTransform: "uppercase", letterSpacing: 0.5,
+                        flexShrink: 0,
+                      }}>
+                        {alert.days <= 0 ? "Expired" : `${alert.days}d`}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Summary footer */}
+              {alerts.length > 0 && (
+                <div style={{ marginTop: 16, padding: "12px 20px", background: `${CB.navy}08`, borderRadius: 12, fontSize: 13, color: CB.textMid, display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+                  <span>{alerts.length} total alert{alerts.length !== 1 ? "s" : ""} across {new Set(alerts.map(a => a.category)).size} categories</span>
+                  <span>Showing {filtered.length} of {alerts.length}</span>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // BILLING & CLAIMS — real claim engine from service notes
     // ═══════════════════════════════════════════════════════════════
     function BillingPage() {
@@ -6578,6 +6985,7 @@
           case "evv": return <EVVPage />;
           case "compliance": return <CompliancePage />;
           case "incidents": return <IncidentsPage />;
+          case "alerts": return <AlertsPage />;
           case "billing": return <BillingPage />;
           case "ai": return <AIPage />;
           case "messages": return <MessagingPage />;
