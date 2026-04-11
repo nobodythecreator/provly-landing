@@ -928,14 +928,22 @@
         if (!newAuth.service_code_id || !newAuth.authorized_units) return addToast("Select a service code and enter units", "error");
         if (!editing) return addToast("Save the client first, then add authorizations", "warning");
 
+        const startDate = newAuth.start_date || new Date().toISOString().split("T")[0];
+        let endDate = newAuth.end_date;
+        if (!endDate) {
+          const d = new Date(startDate + "T00:00:00");
+          d.setFullYear(d.getFullYear() + 1);
+          endDate = d.toISOString().split("T")[0];
+        }
+
         const payload = {
           org_id: orgId,
           person_id: editing.id,
           service_code_id: newAuth.service_code_id,
           authorized_units: parseInt(newAuth.authorized_units),
           used_units: 0,
-          start_date: newAuth.start_date || new Date().toISOString().split("T")[0],
-          end_date: newAuth.end_date || null,
+          start_date: startDate,
+          end_date: endDate,
         };
 
         const { error, data: insertData, status, statusText } = await supabase.from("person_service_authorizations").insert(payload).select();
@@ -1668,7 +1676,7 @@
         return 48; // y offset after header
       },
 
-      // Utility: field row
+      // Utility: field row — label on top, value below with underline
       _fieldRow(doc, y, fields, opts = {}) {
         const w = doc.internal.pageSize.getWidth() - 40;
         const colW = w / fields.length;
@@ -1681,13 +1689,13 @@
           doc.setFontSize(10);
           doc.setFont("helvetica", "normal");
           doc.setTextColor(0, 0, 0);
-          doc.text(String(f.value || ""), x + (opts.labelWidth || 0), y);
+          doc.text(String(f.value || ""), x, y + 6);
           // Underline
-          const lineY = y + 2;
+          const lineY = y + 8;
           doc.setDrawColor(200, 200, 200);
           doc.line(x, lineY, x + colW - 8, lineY);
         });
-        return y + 16;
+        return y + 18;
       },
 
       // Utility: section heading
@@ -1833,8 +1841,8 @@
           startY: y, margin: { left: 20, right: 20 },
           head: [["Database Checked", "Date Checked", "Result"]],
           body: [
-            ["OIG LEIE", "", "☐ Clear  ☐ Match Found"],
-            ["SAM.gov", "", "☐ Clear  ☐ Match Found"],
+            ["OIG LEIE", "", "[ ] Clear  [ ] Match Found"],
+            ["SAM.gov", "", "[ ] Clear  [ ] Match Found"],
           ],
           styles: { fontSize: 9, cellPadding: 4 },
           headStyles: { fillColor: this.HEADER_COLOR },
@@ -1844,7 +1852,7 @@
         y += 8;
         y = this._sectionHead(doc, y, "MONTHLY VERIFICATION LOG");
         const months = [];
-        for (let i = 0; i < 12; i++) months.push(["", "", "☐ Clear", "☐ Clear", "", ""]);
+        for (let i = 0; i < 12; i++) months.push(["", "", "[ ] Clear", "[ ] Clear", "", ""]);
         doc.autoTable({
           startY: y, margin: { left: 20, right: 20 },
           head: [["Month/Year", "Date Checked", "OIG Result", "SAM Result", "Checked By", "Initials"]],
@@ -1920,7 +1928,7 @@
         y += 4;
         y = this._sectionHead(doc, y, "REPORTING PERIOD");
         y = this._fieldRow(doc, y, [
-          { label: "Quarter", value: data.quarter || "☐ Q1  ☐ Q2  ☐ Q3  ☐ Q4" },
+          { label: "Quarter", value: data.quarter || "[ ] Q1  [ ] Q2  [ ] Q3  [ ] Q4" },
           { label: "Year", value: data.year || new Date().getFullYear().toString() },
         ]);
         y += 4;
@@ -1929,7 +1937,7 @@
           doc.setFontSize(9); doc.setFont("helvetica", "bold");
           doc.text(`Goal ${g}:`, 20, y); doc.setDrawColor(200,200,200); doc.line(45, y, 190, y); y += 8;
           doc.setFont("helvetica", "normal"); doc.setFontSize(8);
-          doc.text("Progress:  ☐ Met   ☐ Partially Met   ☐ Not Met   ☐ Discontinued", 20, y);
+          doc.text("Progress:  [ ] Met   [ ] Partially Met   [ ] Not Met   [ ] Discontinued", 20, y);
           doc.text("% Complete: ____", 150, y); y += 7;
           doc.text("Notes:", 20, y); doc.line(40, y, 190, y); y += 5; doc.line(20, y, 190, y); y += 8;
         }
@@ -2109,10 +2117,10 @@
             body: [
               ["Insurance Carrier:", ""],
               ["Policy Number:", ""],
-              ["Coverage Amount:", "$__________    Meets Minimum?  ☐ Yes  ☐ No"],
+              ["Coverage Amount:", "$__________    Meets Minimum?  [ ] Yes  [ ] No"],
               ["Effective Date:", ""],
-              ["EXPIRATION DATE:", "⚠️"],
-              ["Certificate on File:", "☐ Yes  ☐ No    Date Obtained: ___________"],
+              ["EXPIRATION DATE:", "** ALERT **"],
+              ["Certificate on File:", "[ ] Yes  [ ] No    Date Obtained: ___________"],
             ],
             styles: { fontSize: 9, cellPadding: 4 },
             columnStyles: { 0: { fontStyle: "bold", cellWidth: 50 } },
@@ -4243,15 +4251,24 @@
 
         // Step 2: Create auths
         if (form.auths.length > 0) {
-          const authPayloads = form.auths.map(a => ({
-            org_id: orgId, person_id: personId,
-            service_code_id: a.service_code_id,
-            authorized_units: parseInt(a.authorized_units),
-            used_units: 0,
-            start_date: a.start_date || new Date().toISOString().split("T")[0],
-            end_date: a.end_date || null,
-            rate_per_unit: a.rate_per_unit ? parseFloat(a.rate_per_unit) : null,
-          }));
+          const authPayloads = form.auths.map(a => {
+            const startDate = a.start_date || new Date().toISOString().split("T")[0];
+            let endDate = a.end_date;
+            if (!endDate) {
+              const d = new Date(startDate + "T00:00:00");
+              d.setFullYear(d.getFullYear() + 1);
+              endDate = d.toISOString().split("T")[0];
+            }
+            return {
+              org_id: orgId, person_id: personId,
+              service_code_id: a.service_code_id,
+              authorized_units: parseInt(a.authorized_units),
+              used_units: 0,
+              start_date: startDate,
+              end_date: endDate,
+              rate_per_unit: a.rate_per_unit ? parseFloat(a.rate_per_unit) : null,
+            };
+          });
           const { error: authErr } = await supabase.from("person_service_authorizations").insert(authPayloads);
           if (authErr) addToast("Client created but auth insert failed: " + authErr.message, "warning");
         }
