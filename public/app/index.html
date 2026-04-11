@@ -102,15 +102,15 @@
 
     // Nav items each role can see
     const ROLE_NAV = {
-      owner:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "billing", "messages", "ai", "migration", "settings"],
-      admin:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "billing", "messages", "ai", "migration", "settings"],
-      compliance_director:  ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "billing", "messages", "ai"],
-      residential_director: ["dashboard", "clients", "training", "notes", "evv", "messages"],
-      day_program_director: ["dashboard", "clients", "training", "notes", "evv", "messages"],
-      house_manager:        ["dashboard", "clients", "notes", "evv", "messages"],
-      bcba:                 ["dashboard", "clients", "notes", "compliance", "messages"],
-      rn:                   ["dashboard", "clients", "notes", "messages"],
-      dsp:                  ["notes", "evv", "messages"],
+      owner:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "billing", "messages", "ai", "migration", "settings"],
+      admin:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "billing", "messages", "ai", "migration", "settings"],
+      compliance_director:  ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "billing", "messages", "ai"],
+      residential_director: ["dashboard", "clients", "training", "notes", "evv", "incidents", "messages"],
+      day_program_director: ["dashboard", "clients", "training", "notes", "evv", "incidents", "messages"],
+      house_manager:        ["dashboard", "clients", "notes", "evv", "incidents", "messages"],
+      bcba:                 ["dashboard", "clients", "notes", "compliance", "incidents", "messages"],
+      rn:                   ["dashboard", "clients", "notes", "incidents", "messages"],
+      dsp:                  ["notes", "evv", "incidents", "messages"],
     };
 
     function AuthProvider({ children }) {
@@ -491,6 +491,7 @@
         { key: "notes", label: "Service Notes", icon: icons.fileText },
         { key: "evv", label: "EVV", icon: icons.mapPin },
         { key: "compliance", label: "Compliance", icon: icons.shield },
+        { key: "incidents", label: "Incidents", icon: icons.alertTriangle },
         { key: "billing", label: "Billing", icon: icons.barChart },
         { key: "ai", label: "AI Intelligence", icon: icons.zap },
         { key: "messages", label: "Messages", icon: icons.mail },
@@ -3602,6 +3603,331 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // INCIDENT REPORTING — DHHS-compliant incident documentation
+    // ═══════════════════════════════════════════════════════════════
+    const INCIDENT_TYPES = [
+      { value: "injury_client", label: "Client Injury" },
+      { value: "injury_staff", label: "Staff Injury" },
+      { value: "behavioral", label: "Behavioral Event" },
+      { value: "medication_error", label: "Medication Error" },
+      { value: "rights_violation", label: "Rights Violation / Restriction" },
+      { value: "property_damage", label: "Property Damage" },
+      { value: "abuse_neglect", label: "Abuse / Neglect Allegation" },
+      { value: "elopement", label: "Elopement / Missing Person" },
+      { value: "emergency", label: "Emergency (Police/Fire/EMS)" },
+      { value: "death", label: "Death" },
+      { value: "other", label: "Other" },
+    ];
+
+    const INCIDENT_SEVERITY = [
+      { value: "low", label: "Low", color: "#2E7D32", desc: "Minor, no injury or minimal impact" },
+      { value: "medium", label: "Medium", color: "#F57F17", desc: "Moderate impact, may need follow-up" },
+      { value: "high", label: "High", color: "#E53935", desc: "Serious injury, rights issue, or pattern" },
+      { value: "critical", label: "Critical", color: "#7B1FA2", desc: "Immediate danger, reportable to DHHS" },
+    ];
+
+    function IncidentsPage() {
+      const { orgId, staffProfile, role } = useAuth();
+      const { addToast } = useToast();
+      const perms = usePermissions();
+      const { isMobile } = useMobile();
+      const [incidents, setIncidents] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [clients, setClients] = useState([]);
+      const [staffList, setStaffList] = useState([]);
+      const [showForm, setShowForm] = useState(false);
+      const [viewing, setViewing] = useState(null);
+      const [filter, setFilter] = useState("all"); // all, open, closed
+
+      const blankForm = {
+        incident_type: "", severity: "", person_id: "", occurred_at: new Date().toISOString().slice(0, 16),
+        location: "", description: "", immediate_actions: "", injuries_desc: "",
+        witnesses: "", notifications_sent: "", status: "open",
+      };
+      const [form, setForm] = useState(blankForm);
+      const [saving, setSaving] = useState(false);
+      const [reviewNotes, setReviewNotes] = useState("");
+
+      const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
+
+      useEffect(() => { loadAll(); }, []);
+
+      const loadAll = async () => {
+        setLoading(true);
+        const [incRes, clientRes, staffRes] = await Promise.all([
+          supabase.from("incidents").select("*, persons(first_name, last_name), reporter:staff!incidents_reported_by_fkey(first_name, last_name), reviewer:staff!incidents_reviewed_by_fkey(first_name, last_name)").eq("org_id", orgId).order("occurred_at", { ascending: false }),
+          supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
+          supabase.from("staff").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
+        ]);
+        setIncidents(incRes.data || []);
+        setClients(clientRes.data || []);
+        setStaffList(staffRes.data || []);
+        setLoading(false);
+      };
+
+      const handleSubmit = async () => {
+        if (!form.incident_type) return addToast("Select incident type", "error");
+        if (!form.severity) return addToast("Select severity level", "error");
+        if (!form.description.trim()) return addToast("Description is required", "error");
+        setSaving(true);
+        const payload = {
+          org_id: orgId,
+          incident_type: form.incident_type,
+          severity: form.severity,
+          person_id: form.person_id || null,
+          occurred_at: form.occurred_at,
+          location: form.location || null,
+          description: form.description,
+          immediate_actions: form.immediate_actions || null,
+          injuries_desc: form.injuries_desc || null,
+          witnesses: form.witnesses || null,
+          notifications_sent: form.notifications_sent || null,
+          reported_by: staffProfile?.id || null,
+          status: "open",
+        };
+        const { error } = await supabase.from("incidents").insert(payload);
+        setSaving(false);
+        if (error) return addToast(error.message, "error");
+        addToast("Incident report filed", "success");
+        setForm(blankForm);
+        setShowForm(false);
+        loadAll();
+      };
+
+      const updateStatus = async (id, status, reviewNotes) => {
+        const update = { status, reviewed_by: staffProfile?.id, reviewed_at: new Date().toISOString() };
+        if (reviewNotes) update.review_notes = reviewNotes;
+        const { error } = await supabase.from("incidents").update(update).eq("id", id);
+        if (error) return addToast(error.message, "error");
+        addToast(`Incident ${status}`, "success");
+        setViewing(null);
+        loadAll();
+      };
+
+      const filtered = useMemo(() => {
+        if (filter === "all") return incidents;
+        if (filter === "open") return incidents.filter(i => i.status === "open" || i.status === "under_review");
+        return incidents.filter(i => i.status === "closed" || i.status === "resolved");
+      }, [incidents, filter]);
+
+      const sevStyle = (sev) => INCIDENT_SEVERITY.find(s => s.value === sev) || INCIDENT_SEVERITY[0];
+      const typeLabel = (t) => INCIDENT_TYPES.find(x => x.value === t)?.label || t;
+      const statusColors = { open: CB.amber, under_review: CB.blue, resolved: CB.green, closed: CB.textLight };
+
+      // ── Detail View ──
+      if (viewing) {
+        const inc = viewing;
+        const sev = sevStyle(inc.severity);
+        return (
+          <div>
+            <PageHeader title="Incident Report" subtitle={`#${inc.id?.slice(0, 8)} — Filed ${new Date(inc.created_at).toLocaleDateString()}`} action={
+              <button onClick={() => setViewing(null)} style={{ padding: "10px 18px", background: "transparent", border: `1px solid ${CB.border}`, borderRadius: 10, fontSize: 13, fontWeight: 600, color: CB.textMid, cursor: "pointer", fontFamily: "inherit" }}>← Back</button>
+            } />
+            <div style={{ background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, overflow: "hidden" }}>
+              {/* Header badges */}
+              <div style={{ padding: "20px 24px", borderBottom: `1px solid ${CB.border}`, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                <Badge text={typeLabel(inc.incident_type)} color={CB.navy} />
+                <Badge text={sev.label} color={sev.color} />
+                <Badge text={inc.status?.replace(/_/g, " ").toUpperCase()} color={statusColors[inc.status] || CB.textMid} />
+                {inc.persons && <Badge text={`${inc.persons.first_name} ${inc.persons.last_name}`} color={CB.teal} />}
+              </div>
+              {/* Details */}
+              <div style={{ padding: 24 }}>
+                <RGrid cols={2} gap={20} style={{ marginBottom: 24 }}>
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 6 }}>Date & Time</div>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: CB.navy }}>{new Date(inc.occurred_at).toLocaleString()}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 6 }}>Location</div>
+                    <div style={{ fontSize: 14, color: CB.text }}>{inc.location || "Not specified"}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 6 }}>Reported By</div>
+                    <div style={{ fontSize: 14, color: CB.text }}>{inc.reporter ? `${inc.reporter.first_name} ${inc.reporter.last_name}` : "Unknown"}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 6 }}>Reviewed By</div>
+                    <div style={{ fontSize: 14, color: CB.text }}>{inc.reviewer ? `${inc.reviewer.first_name} ${inc.reviewer.last_name}` : "Pending review"}</div>
+                  </div>
+                </RGrid>
+                {[
+                  { label: "Description", value: inc.description },
+                  { label: "Immediate Actions Taken", value: inc.immediate_actions },
+                  { label: "Injuries", value: inc.injuries_desc },
+                  { label: "Witnesses", value: inc.witnesses },
+                  { label: "Notifications Sent", value: inc.notifications_sent },
+                  { label: "Review Notes", value: inc.review_notes },
+                ].filter(s => s.value).map((section, i) => (
+                  <div key={i} style={{ marginBottom: 16 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 6 }}>{section.label}</div>
+                    <div style={{ padding: "12px 16px", background: CB.cream, borderRadius: 10, border: `1px solid ${CB.border}`, fontSize: 14, color: CB.text, lineHeight: 1.7, whiteSpace: "pre-wrap" }}>{section.value}</div>
+                  </div>
+                ))}
+              </div>
+              {/* Review actions */}
+              {perms.viewCompliance && inc.status !== "closed" && inc.status !== "resolved" && (
+                <div style={{ padding: "20px 24px", borderTop: `1px solid ${CB.border}`, background: CB.cream }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: CB.navy, marginBottom: 10 }}>Review Actions</div>
+                  <textarea value={reviewNotes} onChange={e => setReviewNotes(e.target.value)} placeholder="Add review notes (optional)..."
+                    style={{ ...fieldStyle, marginBottom: 12, minHeight: 72, resize: "vertical" }} />
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    <button onClick={() => updateStatus(inc.id, "under_review", reviewNotes)} style={{ padding: "10px 18px", borderRadius: 10, border: "none", fontSize: 13, fontWeight: 700, background: `${CB.blue}15`, color: CB.blue, cursor: "pointer", fontFamily: "inherit" }}>Mark Under Review</button>
+                    <button onClick={() => updateStatus(inc.id, "resolved", reviewNotes)} style={{ padding: "10px 18px", borderRadius: 10, border: "none", fontSize: 13, fontWeight: 700, background: `${CB.green}15`, color: CB.green, cursor: "pointer", fontFamily: "inherit" }}>Resolve</button>
+                    <button onClick={() => updateStatus(inc.id, "closed", reviewNotes)} style={{ padding: "10px 18px", borderRadius: 10, border: "none", fontSize: 13, fontWeight: 700, background: `${CB.textLight}20`, color: CB.textMid, cursor: "pointer", fontFamily: "inherit" }}>Close</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div>
+          <PageHeader title="Incident Reports" subtitle="DHHS-compliant incident documentation and tracking" action={
+            <button onClick={() => setShowForm(true)} style={{ padding: "10px 20px", background: CB.red, color: CB.white, border: "none", borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 8 }}>
+              {icons.alertTriangle({ size: 16, color: CB.white })} Report Incident
+            </button>
+          } />
+
+          {/* Filter tabs */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
+            <div style={{ display: "flex", gap: 4, background: CB.cream, padding: 4, borderRadius: 12 }}>
+              {[{ v: "all", l: "All" }, { v: "open", l: "Open" }, { v: "closed", l: "Closed" }].map(t => (
+                <button key={t.v} onClick={() => setFilter(t.v)} style={{
+                  padding: "10px 20px", borderRadius: 10, border: "none", fontSize: 14, fontWeight: 700,
+                  background: filter === t.v ? CB.navy : "transparent", color: filter === t.v ? CB.white : CB.textMid,
+                  cursor: "pointer", fontFamily: "inherit",
+                }}>{t.l}</button>
+              ))}
+            </div>
+            <div style={{ fontSize: 13, color: CB.textMid }}>{filtered.length} incident{filtered.length !== 1 ? "s" : ""}</div>
+          </div>
+
+          {/* Incident list */}
+          {loading ? <div style={{ display: "flex", justifyContent: "center", padding: 48 }}><Spinner size={24} /></div> : (
+            <div style={{ background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, overflow: "hidden" }}>
+              {filtered.length === 0 ? (
+                <div style={{ padding: 48, textAlign: "center" }}>
+                  <div style={{ fontSize: 48, marginBottom: 12 }}>📋</div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: CB.navy }}>No incidents reported</div>
+                  <div style={{ fontSize: 13, color: CB.textMid }}>Use the Report Incident button to file a new report</div>
+                </div>
+              ) : filtered.map((inc, i) => {
+                const sev = sevStyle(inc.severity);
+                return (
+                  <div key={inc.id} onClick={() => setViewing(inc)} style={{
+                    padding: "16px 24px", borderBottom: i < filtered.length - 1 ? `1px solid ${CB.border}` : "none",
+                    cursor: "pointer", display: "flex", alignItems: "center", gap: 16, transition: "background 0.1s",
+                  }}
+                    onMouseEnter={e => e.currentTarget.style.background = CB.cream}
+                    onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+                  >
+                    <div style={{
+                      width: 8, height: 8, borderRadius: 4, background: sev.color, flexShrink: 0,
+                    }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4, flexWrap: "wrap" }}>
+                        <span style={{ fontSize: 14, fontWeight: 700, color: CB.navy }}>{typeLabel(inc.incident_type)}</span>
+                        <Badge text={sev.label} color={sev.color} />
+                        <Badge text={inc.status?.replace(/_/g, " ")} color={statusColors[inc.status] || CB.textMid} />
+                      </div>
+                      <div style={{ fontSize: 13, color: CB.textMid, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {inc.persons ? `${inc.persons.first_name} ${inc.persons.last_name} — ` : ""}{(inc.description || "").substring(0, 120)}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: "right", flexShrink: 0 }}>
+                      <div style={{ fontSize: 12, color: CB.textLight }}>{new Date(inc.occurred_at).toLocaleDateString()}</div>
+                      <div style={{ fontSize: 11, color: CB.textLight }}>{inc.reporter ? `${inc.reporter.first_name} ${inc.reporter.last_name}` : ""}</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Report Incident Modal */}
+          <Modal open={showForm} onClose={() => setShowForm(false)} title="Report Incident" subtitle="All fields are logged for DHHS compliance" width={640}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              {/* Type */}
+              <FormField label="Incident Type" required>
+                <select value={form.incident_type} onChange={e => set("incident_type", e.target.value)} style={fieldStyle}>
+                  <option value="">Select type...</option>
+                  {INCIDENT_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                </select>
+              </FormField>
+              {/* Severity */}
+              <div>
+                <label style={{ fontSize: 13, fontWeight: 700, color: CB.navy, marginBottom: 8, display: "block" }}>Severity <span style={{ color: CB.red }}>*</span></label>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {INCIDENT_SEVERITY.map(s => (
+                    <button key={s.value} onClick={() => set("severity", s.value)} style={{
+                      padding: "10px 16px", borderRadius: 10, border: `2px solid ${form.severity === s.value ? s.color : CB.border}`,
+                      background: form.severity === s.value ? `${s.color}12` : CB.white,
+                      cursor: "pointer", fontFamily: "inherit", textAlign: "left", flex: 1, minWidth: 100,
+                    }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: s.color }}>{s.label}</div>
+                      <div style={{ fontSize: 11, color: CB.textMid, marginTop: 2 }}>{s.desc}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {/* Client */}
+              <FormField label="Client Involved">
+                <select value={form.person_id} onChange={e => set("person_id", e.target.value)} style={fieldStyle}>
+                  <option value="">No client / not applicable</option>
+                  {clients.map(c => <option key={c.id} value={c.id}>{c.first_name} {c.last_name}</option>)}
+                </select>
+              </FormField>
+              {/* Date/Time + Location */}
+              <RGrid cols={2} gap={12}>
+                <FormField label="Date & Time" required style={{ marginBottom: 0 }}>
+                  <input type="datetime-local" value={form.occurred_at} onChange={e => set("occurred_at", e.target.value)} style={fieldStyle} />
+                </FormField>
+                <FormField label="Location" style={{ marginBottom: 0 }}>
+                  <input value={form.location} onChange={e => set("location", e.target.value)} placeholder="Where did this occur?" style={fieldStyle} />
+                </FormField>
+              </RGrid>
+              {/* Description */}
+              <FormField label="Description" required>
+                <textarea value={form.description} onChange={e => set("description", e.target.value)} rows={4}
+                  placeholder="Describe what happened in detail..." style={{ ...fieldStyle, resize: "vertical", minHeight: 100 }} />
+              </FormField>
+              {/* Immediate Actions */}
+              <FormField label="Immediate Actions Taken">
+                <textarea value={form.immediate_actions} onChange={e => set("immediate_actions", e.target.value)} rows={3}
+                  placeholder="What was done immediately in response?" style={{ ...fieldStyle, resize: "vertical" }} />
+              </FormField>
+              {/* Injuries */}
+              <FormField label="Injuries">
+                <input value={form.injuries_desc} onChange={e => set("injuries_desc", e.target.value)} placeholder="Describe any injuries sustained" style={fieldStyle} />
+              </FormField>
+              {/* Witnesses + Notifications */}
+              <RGrid cols={2} gap={12}>
+                <FormField label="Witnesses" style={{ marginBottom: 0 }}>
+                  <input value={form.witnesses} onChange={e => set("witnesses", e.target.value)} placeholder="Names of witnesses" style={fieldStyle} />
+                </FormField>
+                <FormField label="Notifications Sent" style={{ marginBottom: 0 }}>
+                  <input value={form.notifications_sent} onChange={e => set("notifications_sent", e.target.value)} placeholder="Guardian, SC, DHHS, police..." style={fieldStyle} />
+                </FormField>
+              </RGrid>
+              {/* Submit */}
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 8 }}>
+                <button onClick={() => setShowForm(false)} style={{ padding: "10px 20px", background: "transparent", border: `1px solid ${CB.border}`, borderRadius: 10, fontSize: 14, fontWeight: 600, color: CB.textMid, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+                <button onClick={handleSubmit} disabled={saving} style={{
+                  padding: "10px 24px", background: CB.red, color: CB.white, border: "none", borderRadius: 10,
+                  fontSize: 14, fontWeight: 700, cursor: saving ? "wait" : "pointer", fontFamily: "inherit",
+                  display: "flex", alignItems: "center", gap: 8, opacity: saving ? 0.7 : 1,
+                }}>{saving ? <Spinner size={14} color={CB.white} /> : icons.alertTriangle({ size: 15, color: CB.white })} File Report</button>
+              </div>
+            </div>
+          </Modal>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // BILLING & CLAIMS — real claim engine from service notes
     // ═══════════════════════════════════════════════════════════════
     function BillingPage() {
@@ -6251,6 +6577,7 @@
           case "notes": return <ServiceNotesPage />;
           case "evv": return <EVVPage />;
           case "compliance": return <CompliancePage />;
+          case "incidents": return <IncidentsPage />;
           case "billing": return <BillingPage />;
           case "ai": return <AIPage />;
           case "messages": return <MessagingPage />;
