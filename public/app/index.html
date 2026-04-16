@@ -102,15 +102,15 @@
 
     // Nav items each role can see
     const ROLE_NAV = {
-      owner:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "billing", "messages", "ai", "migration", "settings"],
-      admin:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "billing", "messages", "ai", "migration", "settings"],
-      compliance_director:  ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "billing", "messages", "ai"],
-      residential_director: ["dashboard", "clients", "training", "notes", "evv", "incidents", "alerts", "medications", "messages"],
-      day_program_director: ["dashboard", "clients", "training", "notes", "evv", "incidents", "alerts", "medications", "messages"],
-      house_manager:        ["dashboard", "clients", "notes", "evv", "incidents", "medications", "messages"],
-      bcba:                 ["dashboard", "clients", "notes", "compliance", "incidents", "messages"],
-      rn:                   ["dashboard", "clients", "notes", "incidents", "medications", "messages"],
-      dsp:                  ["notes", "evv", "incidents", "medications", "messages"],
+      owner:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "billing", "messages", "ai", "migration", "settings"],
+      admin:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "billing", "messages", "ai", "migration", "settings"],
+      compliance_director:  ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "billing", "messages", "ai"],
+      residential_director: ["dashboard", "clients", "training", "notes", "evv", "incidents", "alerts", "medications", "goals", "messages"],
+      day_program_director: ["dashboard", "clients", "training", "notes", "evv", "incidents", "alerts", "medications", "goals", "messages"],
+      house_manager:        ["dashboard", "clients", "notes", "evv", "incidents", "medications", "goals", "messages"],
+      bcba:                 ["dashboard", "clients", "notes", "compliance", "incidents", "goals", "messages"],
+      rn:                   ["dashboard", "clients", "notes", "incidents", "medications", "goals", "messages"],
+      dsp:                  ["notes", "evv", "incidents", "medications", "goals", "messages"],
     };
 
     function AuthProvider({ children }) {
@@ -496,6 +496,7 @@
         { key: "incidents", label: "Incidents", icon: icons.alertTriangle },
         { key: "alerts", label: "Alerts", icon: icons.bell },
         { key: "medications", label: "Medications", icon: icons.capsule },
+        { key: "goals", label: "PCSP Goals", icon: icons.crosshair },
         { key: "billing", label: "Billing", icon: icons.barChart },
         { key: "ai", label: "AI Intelligence", icon: icons.zap },
         { key: "messages", label: "Messages", icon: icons.mail },
@@ -4872,6 +4873,562 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // PCSP GOAL TRACKING — ISP goals, progress notes, AI summary
+    // ═══════════════════════════════════════════════════════════════
+    const ISP_DOMAINS = [
+      "Community Living", "Health & Safety", "Employment", "Education",
+      "Social & Relationships", "Self-Advocacy", "Communication",
+      "Daily Living Skills", "Behavioral", "Financial Literacy", "Other"
+    ];
+    const GOAL_STATUSES = [
+      { value: "active", label: "Active", color: "#2E7D32" },
+      { value: "in_progress", label: "In Progress", color: "#1565C0" },
+      { value: "met", label: "Met", color: "#00897B" },
+      { value: "partially_met", label: "Partially Met", color: "#F57F17" },
+      { value: "not_met", label: "Not Met", color: "#E53935" },
+      { value: "discontinued", label: "Discontinued", color: "#94A3B8" },
+    ];
+    const PROGRESS_RATINGS = [
+      { value: 1, label: "No Progress", color: "#E53935" },
+      { value: 2, label: "Minimal", color: "#F57F17" },
+      { value: 3, label: "Moderate", color: "#1565C0" },
+      { value: 4, label: "Significant", color: "#00897B" },
+      { value: 5, label: "Goal Met", color: "#2E7D32" },
+    ];
+
+    function PCSPGoalsPage() {
+      const [clients, setClients] = useState([]);
+      const [selectedClient, setSelectedClient] = useState("");
+      const [goals, setGoals] = useState([]);
+      const [progressNotes, setProgressNotes] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [showGoalForm, setShowGoalForm] = useState(false);
+      const [editingGoal, setEditingGoal] = useState(null);
+      const [expandedGoal, setExpandedGoal] = useState(null);
+      const [showNoteForm, setShowNoteForm] = useState(null); // goal_id
+      const [showSummary, setShowSummary] = useState(false);
+      const [summaryText, setSummaryText] = useState("");
+      const [generatingSummary, setGeneratingSummary] = useState(false);
+      const [tab, setTab] = useState("goals"); // goals, summary
+      const { isMobile } = useMobile();
+      const { addToast } = useToast();
+      const { orgId, staffProfile } = useAuth();
+
+      useEffect(() => { loadClients(); }, []);
+      useEffect(() => { if (selectedClient) loadGoalData(); }, [selectedClient]);
+
+      const loadClients = async () => {
+        const { data } = await supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name");
+        setClients(data || []);
+        if (data?.length) setSelectedClient(data[0].id);
+        setLoading(false);
+      };
+
+      const loadGoalData = async () => {
+        setLoading(true);
+        try {
+          const [goalRes, noteRes] = await Promise.all([
+            supabase.from("pcsp_goals").select("*").eq("person_id", selectedClient).order("created_at", { ascending: false }),
+            supabase.from("pcsp_progress_notes").select("*, staff(first_name, last_name)").eq("person_id", selectedClient).order("note_date", { ascending: false }),
+          ]);
+          setGoals(goalRes.data || []);
+          setProgressNotes(noteRes.data || []);
+        } catch (e) { addToast("Failed to load goals", "error"); }
+        setLoading(false);
+      };
+
+      // ── Goal Form ──
+      const GoalForm = () => {
+        const [form, setForm] = useState(editingGoal || {
+          domain: "Community Living", goal_description: "", objectives: "",
+          baseline: "", target_criteria: "", target_date: "", status: "active",
+          teaching_strategies: "", support_needed: "",
+        });
+        const [saving, setSaving] = useState(false);
+        const fs = { width: "100%", padding: "10px 14px", borderRadius: 10, border: `1px solid ${CB.border}`, fontSize: 14, fontFamily: "inherit", background: CB.cream };
+
+        const handleSave = async () => {
+          if (!form.goal_description || !form.domain) return addToast("Domain and goal description required", "error");
+          setSaving(true);
+          const payload = { ...form, person_id: selectedClient, org_id: orgId };
+          delete payload.id; delete payload.created_at; delete payload.updated_at;
+          if (editingGoal) {
+            const { error } = await supabase.from("pcsp_goals").update(payload).eq("id", editingGoal.id);
+            if (error) { addToast(error.message, "error"); setSaving(false); return; }
+            addToast("Goal updated", "success");
+          } else {
+            const { error } = await supabase.from("pcsp_goals").insert(payload);
+            if (error) { addToast(error.message, "error"); setSaving(false); return; }
+            addToast("Goal created", "success");
+          }
+          setSaving(false); setShowGoalForm(false); setEditingGoal(null); loadGoalData();
+        };
+
+        return (
+          <Modal open={true} onClose={() => { setShowGoalForm(false); setEditingGoal(null); }} title={editingGoal ? "Edit Goal" : "Add ISP Goal"} width={600}>
+            <div style={{ padding: "20px 28px 24px", overflowY: "auto", maxHeight: "65vh" }}>
+              <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 14 }}>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>ISP Domain *</label>
+                  <select style={fs} value={form.domain} onChange={e => setForm(f => ({ ...f, domain: e.target.value }))}>
+                    {ISP_DOMAINS.map(d => <option key={d} value={d}>{d}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Status</label>
+                  <select style={fs} value={form.status} onChange={e => setForm(f => ({ ...f, status: e.target.value }))}>
+                    {GOAL_STATUSES.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
+                  </select>
+                </div>
+                <div style={{ gridColumn: isMobile ? "1" : "1/3" }}>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Goal Description *</label>
+                  <textarea style={{ ...fs, minHeight: 70 }} value={form.goal_description} onChange={e => setForm(f => ({ ...f, goal_description: e.target.value }))} placeholder="Individual will..." />
+                </div>
+                <div style={{ gridColumn: isMobile ? "1" : "1/3" }}>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Measurable Objectives</label>
+                  <textarea style={{ ...fs, minHeight: 60 }} value={form.objectives} onChange={e => setForm(f => ({ ...f, objectives: e.target.value }))} placeholder="1. Objective A&#10;2. Objective B" />
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Baseline</label>
+                  <input style={fs} value={form.baseline} onChange={e => setForm(f => ({ ...f, baseline: e.target.value }))} placeholder="Current performance level" />
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Target Criteria</label>
+                  <input style={fs} value={form.target_criteria} onChange={e => setForm(f => ({ ...f, target_criteria: e.target.value }))} placeholder="80% of opportunities over 3 months" />
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Target Date</label>
+                  <input style={fs} type="date" value={form.target_date} onChange={e => setForm(f => ({ ...f, target_date: e.target.value }))} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Teaching Strategies</label>
+                  <input style={fs} value={form.teaching_strategies} onChange={e => setForm(f => ({ ...f, teaching_strategies: e.target.value }))} placeholder="Modeling, prompting, etc." />
+                </div>
+                <div style={{ gridColumn: isMobile ? "1" : "1/3" }}>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Support Needed</label>
+                  <textarea style={{ ...fs, minHeight: 50 }} value={form.support_needed} onChange={e => setForm(f => ({ ...f, support_needed: e.target.value }))} placeholder="Staff assistance, adaptive equipment, etc." />
+                </div>
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 }}>
+                <button onClick={() => { setShowGoalForm(false); setEditingGoal(null); }} style={{ padding: "10px 20px", borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.white, color: CB.textMid, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+                <button onClick={handleSave} disabled={saving} style={{ padding: "10px 24px", borderRadius: 10, border: "none", background: CB.teal, color: CB.white, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", opacity: saving ? 0.7 : 1 }}>
+                  {saving ? "Saving..." : editingGoal ? "Update Goal" : "Add Goal"}
+                </button>
+              </div>
+            </div>
+          </Modal>
+        );
+      };
+
+      // ── Progress Note Form ──
+      const NoteForm = ({ goalId }) => {
+        const goal = goals.find(g => g.id === goalId);
+        const [form, setForm] = useState({
+          note_date: new Date().toISOString().split("T")[0],
+          progress_rating: 3, narrative: "", data_point: "",
+        });
+        const [saving, setSaving] = useState(false);
+        const fs = { width: "100%", padding: "10px 14px", borderRadius: 10, border: `1px solid ${CB.border}`, fontSize: 14, fontFamily: "inherit", background: CB.cream };
+
+        const handleSave = async () => {
+          if (!form.narrative) return addToast("Narrative required", "error");
+          setSaving(true);
+          const { error } = await supabase.from("pcsp_progress_notes").insert({
+            org_id: orgId, goal_id: goalId, person_id: selectedClient,
+            staff_id: staffProfile?.id || null, note_date: form.note_date,
+            progress_rating: form.progress_rating, narrative: form.narrative,
+            data_point: form.data_point || null,
+          });
+          if (error) { addToast(error.message, "error"); setSaving(false); return; }
+          addToast("Progress note saved", "success");
+          setSaving(false); setShowNoteForm(null); loadGoalData();
+        };
+
+        return (
+          <Modal open={true} onClose={() => setShowNoteForm(null)} title="Log Progress" subtitle={goal?.goal_description?.substring(0, 60) + "..."} width={480}>
+            <div style={{ padding: "20px 28px 24px" }}>
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Date</label>
+                <input style={fs} type="date" value={form.note_date} onChange={e => setForm(f => ({ ...f, note_date: e.target.value }))} />
+              </div>
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 8 }}>Progress Rating</label>
+                <div style={{ display: "flex", gap: 6 }}>
+                  {PROGRESS_RATINGS.map(r => (
+                    <button key={r.value} onClick={() => setForm(f => ({ ...f, progress_rating: r.value }))} style={{
+                      flex: 1, padding: "10px 4px", borderRadius: 10, fontSize: 11, fontWeight: 700, fontFamily: "inherit",
+                      border: `1.5px solid ${form.progress_rating === r.value ? r.color : CB.border}`,
+                      background: form.progress_rating === r.value ? `${r.color}14` : CB.white,
+                      color: form.progress_rating === r.value ? r.color : CB.textMid, cursor: "pointer",
+                      textAlign: "center", lineHeight: 1.2,
+                    }}>
+                      <div style={{ fontSize: 18, marginBottom: 2 }}>{r.value}</div>
+                      {r.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Narrative *</label>
+                <textarea style={{ ...fs, minHeight: 80 }} value={form.narrative} onChange={e => setForm(f => ({ ...f, narrative: e.target.value }))} placeholder="Describe progress observed, interventions used, and individual's response..." />
+              </div>
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Data Point (optional)</label>
+                <input style={fs} value={form.data_point} onChange={e => setForm(f => ({ ...f, data_point: e.target.value }))} placeholder="e.g. 4/5 trials, 80%, 3 out of 5 days" />
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 }}>
+                <button onClick={() => setShowNoteForm(null)} style={{ padding: "10px 20px", borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.white, color: CB.textMid, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+                <button onClick={handleSave} disabled={saving} style={{ padding: "10px 24px", borderRadius: 10, border: "none", background: CB.teal, color: CB.white, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", opacity: saving ? 0.7 : 1 }}>
+                  {saving ? "Saving..." : "Save Note"}
+                </button>
+              </div>
+            </div>
+          </Modal>
+        );
+      };
+
+      // ── AI Quarterly Summary Generator ──
+      const generateSummary = () => {
+        setGeneratingSummary(true);
+        const clientObj = clients.find(c => c.id === selectedClient);
+        const clientName = clientObj ? `${clientObj.first_name} ${clientObj.last_name}` : "Individual";
+        const now = new Date();
+        const threeMonthsAgo = new Date(now); threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
+        const quarterStart = threeMonthsAgo.toLocaleDateString();
+        const quarterEnd = now.toLocaleDateString();
+
+        let summary = `QUARTERLY PCSP PROGRESS SUMMARY\n`;
+        summary += `Individual: ${clientName}\n`;
+        summary += `Reporting Period: ${quarterStart} – ${quarterEnd}\n`;
+        summary += `Generated: ${now.toLocaleDateString()} ${now.toLocaleTimeString()}\n`;
+        summary += `${"═".repeat(50)}\n\n`;
+
+        const activeGoals = goals.filter(g => g.status !== "discontinued");
+
+        if (activeGoals.length === 0) {
+          summary += "No active goals found for this individual.\n";
+        }
+
+        activeGoals.forEach((goal, gi) => {
+          const statusDef = GOAL_STATUSES.find(s => s.value === goal.status);
+          const goalNotes = progressNotes
+            .filter(n => n.goal_id === goal.id && new Date(n.note_date) >= threeMonthsAgo)
+            .sort((a, b) => new Date(a.note_date) - new Date(b.note_date));
+
+          summary += `GOAL ${gi + 1}: ${goal.domain}\n`;
+          summary += `Status: ${statusDef?.label || goal.status}\n`;
+          summary += `Description: ${goal.goal_description}\n`;
+          if (goal.objectives) summary += `Objectives: ${goal.objectives}\n`;
+          if (goal.baseline) summary += `Baseline: ${goal.baseline}\n`;
+          if (goal.target_criteria) summary += `Target: ${goal.target_criteria}\n`;
+          summary += `\n`;
+
+          if (goalNotes.length > 0) {
+            const avgRating = (goalNotes.reduce((s, n) => s + (n.progress_rating || 0), 0) / goalNotes.length).toFixed(1);
+            const firstRating = goalNotes[0].progress_rating || 0;
+            const lastRating = goalNotes[goalNotes.length - 1].progress_rating || 0;
+            const trend = lastRating > firstRating ? "IMPROVING" : lastRating < firstRating ? "DECLINING" : "STABLE";
+
+            summary += `  Progress Notes: ${goalNotes.length} entries this quarter\n`;
+            summary += `  Average Rating: ${avgRating}/5 | Trend: ${trend}\n`;
+            summary += `  Rating Range: ${firstRating}/5 → ${lastRating}/5\n`;
+
+            const dataPoints = goalNotes.filter(n => n.data_point);
+            if (dataPoints.length > 0) {
+              summary += `  Data Points: ${dataPoints.map(d => `${d.note_date}: ${d.data_point}`).join("; ")}\n`;
+            }
+
+            summary += `\n  Recent Notes:\n`;
+            goalNotes.slice(-3).forEach(n => {
+              const ratingDef = PROGRESS_RATINGS.find(r => r.value === n.progress_rating);
+              summary += `    ${n.note_date} [${ratingDef?.label || n.progress_rating}]: ${n.narrative}\n`;
+            });
+          } else {
+            summary += `  ⚠ No progress notes recorded this quarter.\n`;
+          }
+          summary += `\n${"─".repeat(50)}\n\n`;
+        });
+
+        // Overall statistics
+        const allQuarterNotes = progressNotes.filter(n => new Date(n.note_date) >= threeMonthsAgo);
+        const met = goals.filter(g => g.status === "met").length;
+        const partial = goals.filter(g => g.status === "partially_met").length;
+        const active = goals.filter(g => g.status === "active" || g.status === "in_progress").length;
+
+        summary += `OVERALL SUMMARY\n`;
+        summary += `Total Goals: ${activeGoals.length} | Met: ${met} | Partially Met: ${partial} | Active: ${active}\n`;
+        summary += `Total Progress Notes This Quarter: ${allQuarterNotes.length}\n`;
+        if (allQuarterNotes.length > 0) {
+          const overallAvg = (allQuarterNotes.reduce((s, n) => s + (n.progress_rating || 0), 0) / allQuarterNotes.length).toFixed(1);
+          summary += `Overall Average Progress Rating: ${overallAvg}/5\n`;
+        }
+        summary += `\nRecommendations:\n`;
+        const noNotes = activeGoals.filter(g => !progressNotes.some(n => n.goal_id === g.id && new Date(n.note_date) >= threeMonthsAgo));
+        if (noNotes.length > 0) {
+          summary += `  • ${noNotes.length} goal(s) have no progress documentation this quarter — needs attention.\n`;
+        }
+        const declining = activeGoals.filter(g => {
+          const gn = progressNotes.filter(n => n.goal_id === g.id && new Date(n.note_date) >= threeMonthsAgo).sort((a, b) => new Date(a.note_date) - new Date(b.note_date));
+          return gn.length >= 2 && gn[gn.length-1].progress_rating < gn[0].progress_rating;
+        });
+        if (declining.length > 0) {
+          summary += `  • ${declining.length} goal(s) showing declining progress — consider strategy review.\n`;
+        }
+        if (met > 0) {
+          summary += `  • ${met} goal(s) met — consider adding new goals or increasing criteria.\n`;
+        }
+
+        setSummaryText(summary);
+        setGeneratingSummary(false);
+        setShowSummary(true);
+      };
+
+      // ── PDF Export ──
+      const exportPDF = () => {
+        if (!summaryText) return;
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF();
+        const lines = doc.splitTextToSize(summaryText, 170);
+        let y = 20;
+        doc.setFontSize(10);
+        lines.forEach(line => {
+          if (y > 270) { doc.addPage(); y = 20; }
+          doc.text(line, 20, y);
+          y += 5;
+        });
+        const clientObj = clients.find(c => c.id === selectedClient);
+        const name = clientObj ? `${clientObj.first_name}_${clientObj.last_name}` : "client";
+        doc.save(`PCSP_Quarterly_${name}_${new Date().toISOString().split("T")[0]}.pdf`);
+        addToast("PDF exported", "success");
+      };
+
+      const clientObj = clients.find(c => c.id === selectedClient);
+      const activeGoals = goals.filter(g => g.status !== "discontinued");
+
+      return (
+        <div>
+          <PageHeader title="PCSP Goal Tracking" subtitle={clientObj ? `${clientObj.first_name} ${clientObj.last_name} — ISP Goals & Progress` : "Select a client"}
+            action={
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={generateSummary} disabled={!selectedClient || generatingSummary} style={{
+                  display: "flex", alignItems: "center", gap: 8, padding: "10px 18px", borderRadius: 10,
+                  border: `1px solid ${CB.navy}`, background: `${CB.navy}08`, color: CB.navy,
+                  fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+                  opacity: !selectedClient ? 0.5 : 1,
+                }}>{icons.zap({ size: 15 })} Quarterly Summary</button>
+                <button onClick={() => { setEditingGoal(null); setShowGoalForm(true); }} disabled={!selectedClient} style={{
+                  display: "flex", alignItems: "center", gap: 8, padding: "10px 18px", borderRadius: 10,
+                  border: "none", background: CB.teal, color: CB.white,
+                  fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+                  opacity: !selectedClient ? 0.5 : 1,
+                }}>{icons.plus({ size: 15 })} Add Goal</button>
+              </div>
+            }
+          />
+          {/* Client Selector */}
+          <div style={{ marginBottom: 20 }}>
+            <select value={selectedClient} onChange={e => setSelectedClient(e.target.value)} style={{
+              padding: "10px 16px", borderRadius: 10, border: `1px solid ${CB.border}`, fontSize: 14, fontFamily: "inherit",
+              background: CB.white, minWidth: 220,
+            }}>
+              <option value="">Select client...</option>
+              {clients.map(c => <option key={c.id} value={c.id}>{c.last_name}, {c.first_name}</option>)}
+            </select>
+          </div>
+
+          {!selectedClient ? (
+            <div style={{ textAlign: "center", padding: 48, color: CB.textMid }}>
+              <p style={{ fontSize: 15, fontWeight: 600 }}>Select a client to manage PCSP goals</p>
+            </div>
+          ) : loading ? (
+            <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><Spinner size={28} /></div>
+          ) : (
+            <>
+              {/* Stats Row */}
+              <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(4, 1fr)", gap: isMobile ? 10 : 14, marginBottom: 20 }}>
+                {[
+                  { label: "Active Goals", value: goals.filter(g => g.status === "active" || g.status === "in_progress").length, color: CB.blue },
+                  { label: "Goals Met", value: goals.filter(g => g.status === "met").length, color: CB.green },
+                  { label: "Progress Notes", value: progressNotes.length, color: CB.teal },
+                  { label: "Avg Rating", value: progressNotes.length > 0 ? (progressNotes.reduce((s,n) => s + (n.progress_rating||0), 0) / progressNotes.length).toFixed(1) : "—", color: CB.navy },
+                ].map((s, i) => (
+                  <div key={i} style={{
+                    background: CB.white, borderRadius: 14, padding: isMobile ? "14px 12px" : "16px 20px",
+                    border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, textAlign: "center",
+                    animation: `fadeIn 0.4s ease ${i * 0.05}s both`,
+                  }}>
+                    <div style={{ fontSize: 26, fontWeight: 800, color: s.color }}>{s.value}</div>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: CB.textMid, textTransform: "uppercase", letterSpacing: 0.5 }}>{s.label}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Goals List */}
+              {activeGoals.length === 0 ? (
+                <div style={{
+                  background: CB.white, borderRadius: 16, padding: 48, textAlign: "center",
+                  border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
+                }}>
+                  <div style={{ width: 56, height: 56, borderRadius: 16, background: `${CB.teal}12`, display: "inline-flex", alignItems: "center", justifyContent: "center", marginBottom: 12 }}>
+                    {icons.crosshair({ size: 28, color: CB.teal })}
+                  </div>
+                  <p style={{ fontSize: 15, fontWeight: 600, color: CB.navy }}>No goals yet</p>
+                  <p style={{ fontSize: 13, color: CB.textMid }}>Add ISP goals to start tracking progress.</p>
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                  {activeGoals.map((goal, gi) => {
+                    const statusDef = GOAL_STATUSES.find(s => s.value === goal.status);
+                    const goalNotes = progressNotes.filter(n => n.goal_id === goal.id).slice(0, 5);
+                    const isExpanded = expandedGoal === goal.id;
+                    const avgRating = goalNotes.length > 0 ? (goalNotes.reduce((s,n) => s + (n.progress_rating||0), 0) / goalNotes.length).toFixed(1) : null;
+
+                    return (
+                      <div key={goal.id} style={{
+                        background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`,
+                        boxShadow: CB.cardShadow, overflow: "hidden",
+                        animation: `fadeIn 0.4s ease ${gi * 0.05}s both`,
+                      }}>
+                        {/* Goal Header */}
+                        <div onClick={() => setExpandedGoal(isExpanded ? null : goal.id)} style={{
+                          padding: isMobile ? "16px" : "18px 24px", cursor: "pointer",
+                          display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12,
+                        }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, flexWrap: "wrap" }}>
+                              <span style={{
+                                padding: "3px 12px", borderRadius: 8, fontSize: 11, fontWeight: 700,
+                                background: `${CB.navy}10`, color: CB.navy, textTransform: "uppercase", letterSpacing: 0.5,
+                              }}>{goal.domain}</span>
+                              <span style={{
+                                padding: "3px 12px", borderRadius: 8, fontSize: 11, fontWeight: 700,
+                                background: `${statusDef?.color || CB.textLight}14`, color: statusDef?.color || CB.textLight,
+                              }}>{statusDef?.label || goal.status}</span>
+                              {avgRating && (
+                                <span style={{ fontSize: 12, color: CB.textMid, fontWeight: 600 }}>
+                                  Avg: {avgRating}/5 ({goalNotes.length} notes)
+                                </span>
+                              )}
+                            </div>
+                            <p style={{ fontSize: 14, fontWeight: 600, color: CB.text, margin: 0, lineHeight: 1.4 }}>{goal.goal_description}</p>
+                            {goal.target_date && (
+                              <span style={{ fontSize: 12, color: CB.textLight, marginTop: 4, display: "inline-block" }}>
+                                Target: {new Date(goal.target_date + "T00:00:00").toLocaleDateString()}
+                              </span>
+                            )}
+                          </div>
+                          <div style={{ transform: isExpanded ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.2s", flexShrink: 0 }}>
+                            {icons.chevDown({ size: 18, color: CB.textLight })}
+                          </div>
+                        </div>
+
+                        {/* Expanded Detail */}
+                        {isExpanded && (
+                          <div style={{ borderTop: `1px solid ${CB.border}` }}>
+                            {/* Goal Details */}
+                            <div style={{ padding: "16px 24px", background: CB.cream, display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 12, fontSize: 13 }}>
+                              {goal.objectives && <div><strong style={{ color: CB.textMid }}>Objectives:</strong><br/>{goal.objectives}</div>}
+                              {goal.baseline && <div><strong style={{ color: CB.textMid }}>Baseline:</strong><br/>{goal.baseline}</div>}
+                              {goal.target_criteria && <div><strong style={{ color: CB.textMid }}>Target Criteria:</strong><br/>{goal.target_criteria}</div>}
+                              {goal.teaching_strategies && <div><strong style={{ color: CB.textMid }}>Teaching Strategies:</strong><br/>{goal.teaching_strategies}</div>}
+                              {goal.support_needed && <div style={{ gridColumn: isMobile ? "1" : "1/3" }}><strong style={{ color: CB.textMid }}>Support Needed:</strong><br/>{goal.support_needed}</div>}
+                            </div>
+
+                            {/* Actions */}
+                            <div style={{ padding: "12px 24px", display: "flex", gap: 8, borderTop: `1px solid ${CB.border}`, borderBottom: `1px solid ${CB.border}` }}>
+                              <button onClick={() => setShowNoteForm(goal.id)} style={{
+                                padding: "8px 16px", borderRadius: 8, border: "none", background: CB.teal, color: CB.white,
+                                fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 6,
+                              }}>{icons.plus({ size: 13 })} Log Progress</button>
+                              <button onClick={() => { setEditingGoal(goal); setShowGoalForm(true); }} style={{
+                                padding: "8px 16px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
+                                fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", color: CB.textMid,
+                              }}>Edit Goal</button>
+                            </div>
+
+                            {/* Progress Notes Timeline */}
+                            <div style={{ padding: "16px 24px" }}>
+                              <h4 style={{ fontSize: 13, fontWeight: 700, color: CB.navy, marginBottom: 12 }}>Progress Notes</h4>
+                              {goalNotes.length === 0 ? (
+                                <p style={{ fontSize: 13, color: CB.textLight, fontStyle: "italic" }}>No progress notes yet. Click "Log Progress" to add one.</p>
+                              ) : (
+                                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                                  {goalNotes.map((note, ni) => {
+                                    const ratingDef = PROGRESS_RATINGS.find(r => r.value === note.progress_rating);
+                                    return (
+                                      <div key={note.id} style={{
+                                        display: "flex", gap: 12, padding: "10px 14px", borderRadius: 10,
+                                        background: CB.cream, border: `1px solid ${CB.border}`,
+                                      }}>
+                                        <div style={{
+                                          width: 32, height: 32, borderRadius: 8, flexShrink: 0,
+                                          background: `${ratingDef?.color || CB.textLight}18`,
+                                          display: "flex", alignItems: "center", justifyContent: "center",
+                                          fontSize: 14, fontWeight: 800, color: ratingDef?.color || CB.textLight,
+                                        }}>{note.progress_rating}</div>
+                                        <div style={{ flex: 1, minWidth: 0 }}>
+                                          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                                            <span style={{ fontSize: 12, fontWeight: 600, color: ratingDef?.color || CB.textMid }}>{ratingDef?.label}</span>
+                                            <span style={{ fontSize: 11, color: CB.textLight }}>
+                                              {new Date(note.note_date + "T00:00:00").toLocaleDateString()}
+                                              {note.staff && ` — ${note.staff.first_name} ${note.staff.last_name}`}
+                                            </span>
+                                          </div>
+                                          <p style={{ fontSize: 13, color: CB.text, margin: 0, lineHeight: 1.4 }}>{note.narrative}</p>
+                                          {note.data_point && (
+                                            <div style={{ fontSize: 12, color: CB.teal, fontWeight: 600, marginTop: 4 }}>📊 {note.data_point}</div>
+                                          )}
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          )}
+
+          {showGoalForm && <GoalForm />}
+          {showNoteForm && <NoteForm goalId={showNoteForm} />}
+
+          {/* Summary Modal */}
+          {showSummary && (
+            <Modal open={true} onClose={() => setShowSummary(false)} title="Quarterly PCSP Summary" width={700}>
+              <div style={{ padding: "20px 28px 24px" }}>
+                <pre style={{
+                  whiteSpace: "pre-wrap", wordWrap: "break-word", fontSize: 12, lineHeight: 1.6,
+                  background: CB.cream, padding: 20, borderRadius: 12, border: `1px solid ${CB.border}`,
+                  maxHeight: "55vh", overflowY: "auto", fontFamily: "'Courier New', monospace",
+                }}>{summaryText}</pre>
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 16 }}>
+                  <button onClick={() => { navigator.clipboard.writeText(summaryText); addToast("Copied to clipboard", "success"); }} style={{
+                    padding: "10px 20px", borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.white,
+                    color: CB.textMid, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+                  }}>Copy</button>
+                  <button onClick={exportPDF} style={{
+                    padding: "10px 20px", borderRadius: 10, border: "none", background: CB.navy, color: CB.white,
+                    fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+                  }}>Export PDF</button>
+                  <button onClick={() => setShowSummary(false)} style={{
+                    padding: "10px 20px", borderRadius: 10, border: "none", background: CB.teal, color: CB.white,
+                    fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+                  }}>Close</button>
+                </div>
+              </div>
+            </Modal>
+          )}
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // BILLING & CLAIMS — real claim engine from service notes
     // ═══════════════════════════════════════════════════════════════
     function BillingPage() {
@@ -7524,6 +8081,7 @@
           case "incidents": return <IncidentsPage />;
           case "alerts": return <AlertsPage />;
           case "medications": return <MedicationsPage />;
+          case "goals": return <PCSPGoalsPage />;
           case "billing": return <BillingPage />;
           case "ai": return <AIPage />;
           case "messages": return <MessagingPage />;
