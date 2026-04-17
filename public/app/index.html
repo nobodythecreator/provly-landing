@@ -1705,6 +1705,8 @@
       // Caregiver Compensation — quarter hour, fixed
       CMS:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 6.85 },
       CMP:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 6.85 },
+      // Habilitation Aide Plus — monthly, *worksheet*
+      HAP:  { unit_type: "monthly", label: "Monthly", worksheet: true, max_rate: 567.00 },
     };
 
     // ═══════════════════════════════════════════════════════════════
@@ -5641,56 +5643,54 @@
       );
     }
 
+
     // ═══════════════════════════════════════════════════════════════
-    // FINANCIAL MANAGEMENT — payments, aging, claims, contracts
+    // FINANCIAL MANAGEMENT — payments, aging, claims, contracts, UPI import
     // ═══════════════════════════════════════════════════════════════
+    const UPI_UNIT_MAP = { Q: "Quarter-Hour", D: "Daily", M: "Monthly", S: "Session", H: "Hourly" };
+
     function FinancePage() {
-      const [tab, setTab] = useState("overview"); // overview, claims, payments, aging, contracts
+      const [tab, setTab] = useState("overview");
       const [contracts, setContracts] = useState([]);
       const [payments, setPayments] = useState([]);
       const [claims, setClaims] = useState([]);
-      const [lineItems, setLineItems] = useState([]);
       const [loading, setLoading] = useState(true);
       const [showPaymentForm, setShowPaymentForm] = useState(false);
-      const [showClaimForm, setShowClaimForm] = useState(false);
       const [showContractForm, setShowContractForm] = useState(false);
+      const [showImport, setShowImport] = useState(false);
       const [editingContract, setEditingContract] = useState(null);
+      const [importData, setImportData] = useState([]);
+      const [importPreview, setImportPreview] = useState(false);
+      const [importing, setImporting] = useState(false);
       const { isMobile } = useMobile();
       const { addToast } = useToast();
       const { orgId } = useAuth();
-      const perms = usePermissions();
 
       useEffect(() => { loadFinanceData(); }, []);
 
       const loadFinanceData = async () => {
         setLoading(true);
         try {
-          const [cRes, pRes, clRes, liRes] = await Promise.all([
+          const [cRes, pRes, clRes] = await Promise.all([
             supabase.from("contracts").select("*").order("created_at", { ascending: false }),
             supabase.from("payments").select("*, contracts(contract_number, contract_name)").order("payment_date", { ascending: false }),
             supabase.from("claim_submissions").select("*, contracts(contract_number), persons(first_name, last_name)").order("service_date", { ascending: false }),
-            supabase.from("payment_line_items").select("*, payments(payment_date, check_number)").order("created_at", { ascending: false }).limit(500),
           ]);
           setContracts(cRes.data || []);
           setPayments(pRes.data || []);
           setClaims(clRes.data || []);
-          setLineItems(liRes.data || []);
         } catch (e) { addToast("Failed to load financial data", "error"); }
         setLoading(false);
       };
 
-      // ── Stats ──
       const totalBilled = claims.reduce((s, c) => s + Number(c.billed_amount || 0), 0);
       const totalPaid = claims.reduce((s, c) => s + Number(c.paid_amount || 0), 0);
       const totalPayments = payments.reduce((s, p) => s + Number(p.amount || 0), 0);
       const outstanding = totalBilled - totalPaid;
       const collectionRate = totalBilled > 0 ? ((totalPaid / totalBilled) * 100).toFixed(1) : "—";
-      const pendingClaims = claims.filter(c => c.claim_status === "pending" || c.claim_status === "submitted").length;
-      const deniedClaims = claims.filter(c => c.claim_status === "denied").length;
-
-      // ── Aging Buckets ──
       const now = new Date();
-      const agingBuckets = { current: 0, thirty: 0, sixty: 0, ninety: 0, over90: 0 };
+
+      const agingBuckets = { current: 0, thirty: 0, sixty: 0, over90: 0 };
       claims.filter(c => c.claim_status !== "paid" && c.claim_status !== "void").forEach(c => {
         const subDate = c.submitted_date ? new Date(c.submitted_date + "T00:00:00") : (c.service_date ? new Date(c.service_date + "T00:00:00") : now);
         const days = Math.floor((now - subDate) / 86400000);
@@ -5701,76 +5701,93 @@
         else agingBuckets.over90 += amt;
       });
 
+      // ── UPI CSV Import ──
+      const handleFileUpload = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        Papa.parse(file, {
+          header: true, skipEmptyLines: true,
+          complete: (results) => {
+            const rows = (results.data || []).filter(r => r.service_code && r.consumer_name);
+            if (rows.length === 0) return addToast("No valid rows found in CSV", "error");
+            const parsed = rows.map(r => {
+              const units = Number(r.units) || 0;
+              const rate = Number(r.rate) || 0;
+              return {
+                consumer_name: r.consumer_name?.trim() || "", consumer_pid: r.consumer_pid?.trim() || "",
+                service_code: r.service_code?.trim() || "", rate, unit_type: r.unit_type?.trim() || "",
+                unit_label: UPI_UNIT_MAP[r.unit_type?.trim()] || r.unit_type || "",
+                service_start_date: r.service_start_date?.trim() || "", service_end_date: r.service_end_date?.trim() || "",
+                units, remaining_units: Number(r.remaining_units) || 0, monthly_max_units: Number(r.monthly_max_units) || 0,
+                sce: r.sce?.trim() || "", amount: units * rate, selected: true,
+              };
+            });
+            setImportData(parsed);
+            setImportPreview(true);
+          },
+          error: () => addToast("Failed to parse CSV", "error"),
+        });
+      };
+
+      const importTotal = importData.filter(r => r.selected).reduce((s, r) => s + r.amount, 0);
+
+      const submitImport = async () => {
+        const selected = importData.filter(r => r.selected);
+        if (selected.length === 0) return addToast("No rows selected", "error");
+        setImporting(true);
+        const contract = contracts.find(c => c.status === "active") || contracts[0];
+        const { data: persons } = await supabase.from("persons").select("id, first_name, last_name");
+        const personMap = {};
+        (persons || []).forEach(p => {
+          personMap[`${p.last_name} ${p.first_name}`.toLowerCase()] = p.id;
+          personMap[`${p.first_name} ${p.last_name}`.toLowerCase()] = p.id;
+        });
+        const parseDate = (d) => { if (!d) return null; const p = d.split("/"); return p.length === 3 ? `${p[2]}-${p[0].padStart(2,"0")}-${p[1].padStart(2,"0")}` : d; };
+        let success = 0, errors = 0;
+        for (const row of selected) {
+          const personId = personMap[row.consumer_name.toLowerCase()] || null;
+          const { error } = await supabase.from("claim_submissions").insert({
+            org_id: orgId, contract_id: contract?.id || null, person_id: personId,
+            service_code: row.service_code, service_date: parseDate(row.service_start_date),
+            billed_amount: row.amount, submitted_date: new Date().toISOString().split("T")[0],
+            claim_status: "submitted",
+            notes: `UPI Import — ${row.units} ${row.unit_label} @ $${row.rate} | PID: ${row.consumer_pid} | SCE: ${row.sce} | Remaining: ${row.remaining_units}/${row.monthly_max_units} max`,
+          });
+          if (error) errors++; else success++;
+        }
+        setImporting(false);
+        addToast(`Imported ${success} claims${errors > 0 ? ` (${errors} failed)` : ""}`, success > 0 ? "success" : "error");
+        setImportPreview(false); setImportData([]); setShowImport(false); loadFinanceData();
+      };
+
       // ── Contract Form ──
       const ContractForm = () => {
-        const [form, setForm] = useState(editingContract || {
-          contract_number: "", contract_name: "", payer: "DHHS",
-          effective_date: "", expiration_date: "", total_value: "", status: "active", notes: "",
-        });
+        const [form, setForm] = useState(editingContract || { contract_number: "", contract_name: "", payer: "DHHS", effective_date: "", expiration_date: "", status: "active", notes: "" });
         const [saving, setSaving] = useState(false);
         const fs = { width: "100%", padding: "10px 14px", borderRadius: 10, border: `1px solid ${CB.border}`, fontSize: 14, fontFamily: "inherit", background: CB.cream };
         const handleSave = async () => {
           if (!form.contract_number) return addToast("Contract number required", "error");
           setSaving(true);
-          const payload = { ...form, org_id: orgId, total_value: form.total_value ? Number(form.total_value) : null };
-          delete payload.id; delete payload.created_at;
-          if (editingContract) {
-            const { error } = await supabase.from("contracts").update(payload).eq("id", editingContract.id);
-            if (error) { addToast(error.message, "error"); setSaving(false); return; }
-            addToast("Contract updated", "success");
-          } else {
-            const { error } = await supabase.from("contracts").insert(payload);
-            if (error) { addToast(error.message, "error"); setSaving(false); return; }
-            addToast("Contract added", "success");
-          }
+          const payload = { ...form, org_id: orgId }; delete payload.id; delete payload.created_at; delete payload.total_value;
+          if (editingContract) { const { error } = await supabase.from("contracts").update(payload).eq("id", editingContract.id); if (error) { addToast(error.message, "error"); setSaving(false); return; } addToast("Contract updated", "success"); }
+          else { const { error } = await supabase.from("contracts").insert(payload); if (error) { addToast(error.message, "error"); setSaving(false); return; } addToast("Contract added", "success"); }
           setSaving(false); setShowContractForm(false); setEditingContract(null); loadFinanceData();
         };
         return (
           <Modal open={true} onClose={() => { setShowContractForm(false); setEditingContract(null); }} title={editingContract ? "Edit Contract" : "Add Contract"} width={520}>
             <div style={{ padding: "20px 28px 24px", overflowY: "auto", maxHeight: "65vh" }}>
               <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 14 }}>
-                <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Contract Number *</label>
-                  <input style={fs} value={form.contract_number} onChange={e => setForm(f => ({ ...f, contract_number: e.target.value }))} placeholder="e.g. DHHS91172" />
-                </div>
-                <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Payer</label>
-                  <select style={fs} value={form.payer} onChange={e => setForm(f => ({ ...f, payer: e.target.value }))}>
-                    <option>DHHS</option><option>DCFS</option><option>Medicaid</option><option>Private Pay</option><option>Insurance</option><option>Other</option>
-                  </select>
-                </div>
-                <div style={{ gridColumn: isMobile ? "1" : "1/3" }}>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Contract Name</label>
-                  <input style={fs} value={form.contract_name} onChange={e => setForm(f => ({ ...f, contract_name: e.target.value }))} placeholder="DSPD Community Supports Contract" />
-                </div>
-                <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Effective Date</label>
-                  <input style={fs} type="date" value={form.effective_date} onChange={e => setForm(f => ({ ...f, effective_date: e.target.value }))} />
-                </div>
-                <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Expiration Date</label>
-                  <input style={fs} type="date" value={form.expiration_date} onChange={e => setForm(f => ({ ...f, expiration_date: e.target.value }))} />
-                </div>
-                <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Total Value ($)</label>
-                  <input style={fs} type="number" step="0.01" value={form.total_value} onChange={e => setForm(f => ({ ...f, total_value: e.target.value }))} placeholder="0.00" />
-                </div>
-                <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Status</label>
-                  <select style={fs} value={form.status} onChange={e => setForm(f => ({ ...f, status: e.target.value }))}>
-                    <option value="active">Active</option><option value="pending">Pending</option><option value="expired">Expired</option><option value="terminated">Terminated</option>
-                  </select>
-                </div>
-                <div style={{ gridColumn: isMobile ? "1" : "1/3" }}>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Notes</label>
-                  <textarea style={{ ...fs, minHeight: 50 }} value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} />
-                </div>
+                <div><label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Contract Number *</label><input style={fs} value={form.contract_number} onChange={e => setForm(f => ({ ...f, contract_number: e.target.value }))} placeholder="e.g. DHHS91172" /></div>
+                <div><label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Payer</label><select style={fs} value={form.payer} onChange={e => setForm(f => ({ ...f, payer: e.target.value }))}><option>DHHS</option><option>DCFS</option><option>Medicaid</option><option>Private Pay</option><option>Insurance</option><option>Other</option></select></div>
+                <div style={{ gridColumn: isMobile ? "1" : "1/3" }}><label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Contract Name</label><input style={fs} value={form.contract_name} onChange={e => setForm(f => ({ ...f, contract_name: e.target.value }))} placeholder="DSPD Community Supports Contract" /></div>
+                <div><label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Effective Date</label><input style={fs} type="date" value={form.effective_date} onChange={e => setForm(f => ({ ...f, effective_date: e.target.value }))} /></div>
+                <div><label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Expiration Date</label><input style={fs} type="date" value={form.expiration_date} onChange={e => setForm(f => ({ ...f, expiration_date: e.target.value }))} /></div>
+                <div><label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Status</label><select style={fs} value={form.status} onChange={e => setForm(f => ({ ...f, status: e.target.value }))}><option value="active">Active</option><option value="pending">Pending</option><option value="expired">Expired</option><option value="terminated">Terminated</option></select></div>
+                <div style={{ gridColumn: isMobile ? "1" : "1/3" }}><label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Notes</label><textarea style={{ ...fs, minHeight: 50 }} value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} /></div>
               </div>
               <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 }}>
                 <button onClick={() => { setShowContractForm(false); setEditingContract(null); }} style={{ padding: "10px 20px", borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.white, color: CB.textMid, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
-                <button onClick={handleSave} disabled={saving} style={{ padding: "10px 24px", borderRadius: 10, border: "none", background: CB.teal, color: CB.white, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", opacity: saving ? 0.7 : 1 }}>
-                  {saving ? "Saving..." : editingContract ? "Update" : "Add Contract"}
-                </button>
+                <button onClick={handleSave} disabled={saving} style={{ padding: "10px 24px", borderRadius: 10, border: "none", background: CB.teal, color: CB.white, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", opacity: saving ? 0.7 : 1 }}>{saving ? "Saving..." : editingContract ? "Update" : "Add Contract"}</button>
               </div>
             </div>
           </Modal>
@@ -5779,515 +5796,243 @@
 
       // ── Payment Form ──
       const PaymentForm = () => {
-        const [form, setForm] = useState({
-          contract_id: contracts[0]?.id || "", payment_date: new Date().toISOString().split("T")[0],
-          amount: "", check_number: "", eft_trace: "", payer: "DHHS", payment_method: "EFT",
-          remittance_id: "", notes: "",
-        });
+        const [form, setForm] = useState({ contract_id: contracts[0]?.id || "", payment_date: new Date().toISOString().split("T")[0], amount: "", check_number: "", eft_trace: "", payer: "DHHS", payment_method: "EFT", remittance_id: "", notes: "" });
         const [saving, setSaving] = useState(false);
         const fs = { width: "100%", padding: "10px 14px", borderRadius: 10, border: `1px solid ${CB.border}`, fontSize: 14, fontFamily: "inherit", background: CB.cream };
         const handleSave = async () => {
           if (!form.amount || !form.payment_date) return addToast("Amount and date required", "error");
           setSaving(true);
-          const { error } = await supabase.from("payments").insert({
-            ...form, org_id: orgId, amount: Number(form.amount),
-            contract_id: form.contract_id || null,
-          });
+          const { error } = await supabase.from("payments").insert({ ...form, org_id: orgId, amount: Number(form.amount), contract_id: form.contract_id || null });
           if (error) { addToast(error.message, "error"); setSaving(false); return; }
-          addToast("Payment recorded", "success");
-          setSaving(false); setShowPaymentForm(false); loadFinanceData();
+          addToast("Payment recorded", "success"); setSaving(false); setShowPaymentForm(false); loadFinanceData();
         };
         return (
           <Modal open={true} onClose={() => setShowPaymentForm(false)} title="Record Payment" width={520}>
             <div style={{ padding: "20px 28px 24px", overflowY: "auto", maxHeight: "65vh" }}>
               <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 14 }}>
-                <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Payment Date *</label>
-                  <input style={fs} type="date" value={form.payment_date} onChange={e => setForm(f => ({ ...f, payment_date: e.target.value }))} />
-                </div>
-                <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Amount *</label>
-                  <input style={fs} type="number" step="0.01" value={form.amount} onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} placeholder="0.00" />
-                </div>
-                <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Contract</label>
-                  <select style={fs} value={form.contract_id} onChange={e => setForm(f => ({ ...f, contract_id: e.target.value }))}>
-                    <option value="">Select contract...</option>
-                    {contracts.map(c => <option key={c.id} value={c.id}>{c.contract_number} — {c.contract_name || c.payer}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Payer</label>
-                  <select style={fs} value={form.payer} onChange={e => setForm(f => ({ ...f, payer: e.target.value }))}>
-                    <option>DHHS</option><option>DCFS</option><option>Medicaid</option><option>Private Pay</option><option>Insurance</option><option>Other</option>
-                  </select>
-                </div>
-                <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Method</label>
-                  <select style={fs} value={form.payment_method} onChange={e => setForm(f => ({ ...f, payment_method: e.target.value }))}>
-                    <option value="EFT">EFT / ACH</option><option value="Check">Check</option><option value="Wire">Wire</option><option value="Other">Other</option>
-                  </select>
-                </div>
-                <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>{form.payment_method === "Check" ? "Check Number" : "EFT Trace #"}</label>
-                  <input style={fs} value={form.payment_method === "Check" ? form.check_number : form.eft_trace}
-                    onChange={e => setForm(f => form.payment_method === "Check" ? ({ ...f, check_number: e.target.value }) : ({ ...f, eft_trace: e.target.value }))} />
-                </div>
-                <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Remittance ID</label>
-                  <input style={fs} value={form.remittance_id} onChange={e => setForm(f => ({ ...f, remittance_id: e.target.value }))} placeholder="ERA/EOP reference" />
-                </div>
-                <div style={{ gridColumn: isMobile ? "1" : "1/3" }}>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Notes</label>
-                  <textarea style={{ ...fs, minHeight: 50 }} value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} />
-                </div>
+                <div><label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Payment Date *</label><input style={fs} type="date" value={form.payment_date} onChange={e => setForm(f => ({ ...f, payment_date: e.target.value }))} /></div>
+                <div><label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Amount *</label><input style={fs} type="number" step="0.01" value={form.amount} onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} placeholder="0.00" /></div>
+                <div><label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Contract</label><select style={fs} value={form.contract_id} onChange={e => setForm(f => ({ ...f, contract_id: e.target.value }))}><option value="">Select contract...</option>{contracts.map(c => <option key={c.id} value={c.id}>{c.contract_number} — {c.contract_name || c.payer}</option>)}</select></div>
+                <div><label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Payer</label><select style={fs} value={form.payer} onChange={e => setForm(f => ({ ...f, payer: e.target.value }))}><option>DHHS</option><option>DCFS</option><option>Medicaid</option><option>Private Pay</option><option>Insurance</option><option>Other</option></select></div>
+                <div><label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Method</label><select style={fs} value={form.payment_method} onChange={e => setForm(f => ({ ...f, payment_method: e.target.value }))}><option value="EFT">EFT / ACH</option><option value="Check">Check</option><option value="Wire">Wire</option><option value="Other">Other</option></select></div>
+                <div><label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>{form.payment_method === "Check" ? "Check Number" : "EFT Trace #"}</label><input style={fs} value={form.payment_method === "Check" ? form.check_number : form.eft_trace} onChange={e => setForm(f => form.payment_method === "Check" ? ({ ...f, check_number: e.target.value }) : ({ ...f, eft_trace: e.target.value }))} /></div>
+                <div><label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Remittance ID</label><input style={fs} value={form.remittance_id} onChange={e => setForm(f => ({ ...f, remittance_id: e.target.value }))} placeholder="ERA/EOP reference" /></div>
+                <div style={{ gridColumn: isMobile ? "1" : "1/3" }}><label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Notes</label><textarea style={{ ...fs, minHeight: 50 }} value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} /></div>
               </div>
               <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 }}>
                 <button onClick={() => setShowPaymentForm(false)} style={{ padding: "10px 20px", borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.white, color: CB.textMid, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
-                <button onClick={handleSave} disabled={saving} style={{ padding: "10px 24px", borderRadius: 10, border: "none", background: CB.green, color: CB.white, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", opacity: saving ? 0.7 : 1 }}>
-                  {saving ? "Saving..." : "Record Payment"}
-                </button>
+                <button onClick={handleSave} disabled={saving} style={{ padding: "10px 24px", borderRadius: 10, border: "none", background: CB.green, color: CB.white, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", opacity: saving ? 0.7 : 1 }}>{saving ? "Saving..." : "Record Payment"}</button>
               </div>
             </div>
           </Modal>
         );
       };
 
-      // ── Submit Claim Form ──
-      const ClaimForm = () => {
-        const [clients, setClients] = useState([]);
-        const [form, setForm] = useState({
-          contract_id: contracts[0]?.id || "", person_id: "", service_code: "",
-          service_date: "", billed_amount: "", submitted_date: new Date().toISOString().split("T")[0],
-          claim_status: "submitted", notes: "",
-        });
-        const [saving, setSaving] = useState(false);
-        const fs = { width: "100%", padding: "10px 14px", borderRadius: 10, border: `1px solid ${CB.border}`, fontSize: 14, fontFamily: "inherit", background: CB.cream };
-        useEffect(() => {
-          supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name").then(({ data }) => setClients(data || []));
-        }, []);
-        const handleSave = async () => {
-          if (!form.billed_amount || !form.service_date) return addToast("Service date and amount required", "error");
-          setSaving(true);
-          const { error } = await supabase.from("claim_submissions").insert({
-            ...form, org_id: orgId, billed_amount: Number(form.billed_amount),
-            contract_id: form.contract_id || null, person_id: form.person_id || null,
-          });
-          if (error) { addToast(error.message, "error"); setSaving(false); return; }
-          addToast("Claim submitted", "success");
-          setSaving(false); setShowClaimForm(false); loadFinanceData();
-        };
-        return (
-          <Modal open={true} onClose={() => setShowClaimForm(false)} title="Submit Claim" width={520}>
-            <div style={{ padding: "20px 28px 24px", overflowY: "auto", maxHeight: "65vh" }}>
-              <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 14 }}>
-                <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Contract</label>
-                  <select style={fs} value={form.contract_id} onChange={e => setForm(f => ({ ...f, contract_id: e.target.value }))}>
-                    <option value="">Select...</option>
-                    {contracts.map(c => <option key={c.id} value={c.id}>{c.contract_number}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Client</label>
-                  <select style={fs} value={form.person_id} onChange={e => setForm(f => ({ ...f, person_id: e.target.value }))}>
-                    <option value="">Select...</option>
-                    {clients.map(c => <option key={c.id} value={c.id}>{c.last_name}, {c.first_name}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Service Code</label>
-                  <input style={fs} value={form.service_code} onChange={e => setForm(f => ({ ...f, service_code: e.target.value }))} placeholder="e.g. RHS, DSG" />
-                </div>
-                <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Service Date *</label>
-                  <input style={fs} type="date" value={form.service_date} onChange={e => setForm(f => ({ ...f, service_date: e.target.value }))} />
-                </div>
-                <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Billed Amount *</label>
-                  <input style={fs} type="number" step="0.01" value={form.billed_amount} onChange={e => setForm(f => ({ ...f, billed_amount: e.target.value }))} placeholder="0.00" />
-                </div>
-                <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Submitted Date</label>
-                  <input style={fs} type="date" value={form.submitted_date} onChange={e => setForm(f => ({ ...f, submitted_date: e.target.value }))} />
-                </div>
-                <div style={{ gridColumn: isMobile ? "1" : "1/3" }}>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Notes</label>
-                  <textarea style={{ ...fs, minHeight: 50 }} value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} />
-                </div>
-              </div>
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 }}>
-                <button onClick={() => setShowClaimForm(false)} style={{ padding: "10px 20px", borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.white, color: CB.textMid, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
-                <button onClick={handleSave} disabled={saving} style={{ padding: "10px 24px", borderRadius: 10, border: "none", background: CB.teal, color: CB.white, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", opacity: saving ? 0.7 : 1 }}>
-                  {saving ? "Saving..." : "Submit Claim"}
-                </button>
-              </div>
-            </div>
-          </Modal>
-        );
-      };
-
-      // ── Claim Status Update ──
       const updateClaimStatus = async (claimId, newStatus, paidAmount) => {
         const updates = { claim_status: newStatus, updated_at: new Date().toISOString() };
         if (paidAmount !== undefined) updates.paid_amount = Number(paidAmount);
         const { error } = await supabase.from("claim_submissions").update(updates).eq("id", claimId);
         if (error) return addToast(error.message, "error");
-        addToast(`Claim ${newStatus}`, "success");
-        loadFinanceData();
+        addToast(`Claim ${newStatus}`, "success"); loadFinanceData();
       };
 
-      // ── Export Aging Report ──
       const exportAgingCSV = () => {
         const unpaid = claims.filter(c => c.claim_status !== "paid" && c.claim_status !== "void");
-        const headers = ["Service Date", "Submitted", "Client", "Code", "Contract", "Billed", "Paid", "Outstanding", "Days", "Bucket"];
-        const rows = unpaid.map(c => {
-          const subDate = c.submitted_date || c.service_date;
-          const days = subDate ? Math.floor((now - new Date(subDate + "T00:00:00")) / 86400000) : 0;
-          const bucket = days <= 30 ? "0-30" : days <= 60 ? "31-60" : days <= 90 ? "61-90" : "90+";
-          const client = c.persons ? `${c.persons.first_name} ${c.persons.last_name}` : "—";
-          return [c.service_date, c.submitted_date || "—", client, c.service_code || "—", c.contracts?.contract_number || "—",
-            (c.billed_amount||0).toFixed(2), (c.paid_amount||0).toFixed(2), ((c.billed_amount||0)-(c.paid_amount||0)).toFixed(2), days, bucket];
-        });
-        const csv = [headers, ...rows].map(r => r.map(v => `"${v}"`).join(",")).join("\n");
-        const blob = new Blob([csv], { type: "text/csv" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a"); a.href = url; a.download = `aging-report-${now.toISOString().split("T")[0]}.csv`; a.click();
-        URL.revokeObjectURL(url);
-        addToast("Aging report exported", "success");
+        const headers = ["Service Date","Submitted","Client","Code","Contract","Billed","Paid","Outstanding","Days","Bucket"];
+        const rows = unpaid.map(c => { const d = c.submitted_date || c.service_date; const days = d ? Math.floor((now - new Date(d+"T00:00:00"))/86400000) : 0; const b = days<=30?"0-30":days<=60?"31-60":days<=90?"61-90":"90+"; const cl = c.persons?`${c.persons.first_name} ${c.persons.last_name}`:"—"; return [c.service_date,c.submitted_date||"—",cl,c.service_code||"—",c.contracts?.contract_number||"—",(c.billed_amount||0).toFixed(2),(c.paid_amount||0).toFixed(2),((c.billed_amount||0)-(c.paid_amount||0)).toFixed(2),days,b]; });
+        const csv = [headers,...rows].map(r => r.map(v => `"${v}"`).join(",")).join("\n");
+        const blob = new Blob([csv],{type:"text/csv"}); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href=url; a.download=`aging-report-${now.toISOString().split("T")[0]}.csv`; a.click(); URL.revokeObjectURL(url); addToast("Aging report exported","success");
       };
 
       const statusColors = { pending: CB.amber, submitted: CB.blue, paid: CB.green, partial: "#7B1FA2", denied: CB.red, appealed: "#E65100", void: CB.textLight };
-
-      const tabs = [
-        { key: "overview", label: "Overview" },
-        { key: "claims", label: `Claims (${claims.length})` },
-        { key: "payments", label: `Payments (${payments.length})` },
-        { key: "aging", label: "Aging Report" },
-        { key: "contracts", label: `Contracts (${contracts.length})` },
-      ];
+      const tabs = [{ key:"overview",label:"Overview" },{ key:"claims",label:`Claims (${claims.length})` },{ key:"payments",label:`Payments (${payments.length})` },{ key:"aging",label:"Aging Report" },{ key:"contracts",label:`Contracts (${contracts.length})` }];
 
       return (
         <div>
-          <PageHeader title="Financial Management" subtitle="Payment tracking, claims lifecycle, aging reports — multi-contract"
-            action={
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                {tab === "aging" && <button onClick={exportAgingCSV} style={{ display: "flex", alignItems: "center", gap: 6, padding: "10px 16px", borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.white, color: CB.textMid, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>{icons.barChart({ size: 14 })} Export CSV</button>}
-                <button onClick={() => setShowClaimForm(true)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "10px 16px", borderRadius: 10, border: `1px solid ${CB.navy}`, background: `${CB.navy}08`, color: CB.navy, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>{icons.plus({ size: 14 })} Submit Claim</button>
-                <button onClick={() => setShowPaymentForm(true)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "10px 16px", borderRadius: 10, border: "none", background: CB.green, color: CB.white, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>{icons.dollar({ size: 14 })} Record Payment</button>
-              </div>
-            }
+          <PageHeader title="Financial Management" subtitle="Payment tracking, UPI claims import, aging reports — multi-contract"
+            action={<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {tab === "aging" && <button onClick={exportAgingCSV} style={{ display:"flex",alignItems:"center",gap:6,padding:"10px 16px",borderRadius:10,border:`1px solid ${CB.border}`,background:CB.white,color:CB.textMid,fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit" }}>{icons.barChart({size:14})} Export CSV</button>}
+              <button onClick={() => setShowImport(true)} style={{ display:"flex",alignItems:"center",gap:6,padding:"10px 16px",borderRadius:10,border:`1px solid ${CB.navy}`,background:`${CB.navy}08`,color:CB.navy,fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit" }}>{icons.upload({size:14})} Import UPI</button>
+              <button onClick={() => setShowPaymentForm(true)} style={{ display:"flex",alignItems:"center",gap:6,padding:"10px 16px",borderRadius:10,border:"none",background:CB.green,color:CB.white,fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit" }}>{icons.dollar({size:14})} Record Payment</button>
+            </div>}
           />
-
-          {/* Tabs */}
-          <div style={{ display: "flex", gap: 4, marginBottom: 20, background: CB.white, borderRadius: 12, padding: 4, border: `1px solid ${CB.border}`, width: "fit-content", flexWrap: "wrap" }}>
-            {tabs.map(t => (
-              <button key={t.key} onClick={() => setTab(t.key)} style={{
-                padding: "9px 18px", borderRadius: 9, border: "none", fontSize: 13, fontWeight: 600,
-                fontFamily: "inherit", cursor: "pointer", transition: "all 0.15s",
-                background: tab === t.key ? CB.navy : "transparent", color: tab === t.key ? CB.white : CB.textMid,
-              }}>{t.label}</button>
-            ))}
+          <div style={{ display:"flex",gap:4,marginBottom:20,background:CB.white,borderRadius:12,padding:4,border:`1px solid ${CB.border}`,width:"fit-content",flexWrap:"wrap" }}>
+            {tabs.map(t => <button key={t.key} onClick={() => setTab(t.key)} style={{ padding:"9px 18px",borderRadius:9,border:"none",fontSize:13,fontWeight:600,fontFamily:"inherit",cursor:"pointer",transition:"all 0.15s",background:tab===t.key?CB.navy:"transparent",color:tab===t.key?CB.white:CB.textMid }}>{t.label}</button>)}
           </div>
 
-          {loading ? (
-            <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><Spinner size={28} /></div>
-          ) : (
-            <>
-              {/* ═══ OVERVIEW TAB ═══ */}
-              {tab === "overview" && (
-                <>
-                  <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(4, 1fr)", gap: isMobile ? 10 : 16, marginBottom: 24 }}>
-                    {[
-                      { label: "Total Billed", value: `$${totalBilled.toFixed(2)}`, color: CB.navy, icon: icons.fileText },
-                      { label: "Total Received", value: `$${totalPayments.toFixed(2)}`, color: CB.green, icon: icons.checkCircle },
-                      { label: "Outstanding", value: `$${outstanding.toFixed(2)}`, color: outstanding > 0 ? CB.amber : CB.green, icon: icons.clock },
-                      { label: "Collection Rate", value: `${collectionRate}%`, color: CB.teal, icon: icons.barChart },
-                    ].map((s, i) => (
-                      <div key={i} style={{
-                        background: CB.white, borderRadius: 14, padding: isMobile ? "14px 12px" : "18px 20px",
-                        border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, textAlign: "center",
-                        animation: `fadeIn 0.4s ease ${i * 0.05}s both`,
-                      }}>
-                        <div style={{ width: 36, height: 36, borderRadius: 10, background: `${s.color}12`, display: "inline-flex", alignItems: "center", justifyContent: "center", marginBottom: 8 }}>
-                          {s.icon({ size: 18, color: s.color })}
-                        </div>
-                        <div style={{ fontSize: 24, fontWeight: 800, color: s.color }}>{s.value}</div>
-                        <div style={{ fontSize: 11, fontWeight: 600, color: CB.textMid, textTransform: "uppercase", letterSpacing: 0.5 }}>{s.label}</div>
-                      </div>
-                    ))}
+          {loading ? <div style={{ display:"flex",justifyContent:"center",padding:80 }}><Spinner size={28} /></div> : (<>
+            {/* ═══ OVERVIEW ═══ */}
+            {tab === "overview" && (<>
+              <div style={{ display:"grid",gridTemplateColumns:isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:isMobile?10:16,marginBottom:24 }}>
+                {[{label:"Total Billed",value:`$${totalBilled.toFixed(2)}`,color:CB.navy,icon:icons.fileText},{label:"Total Received",value:`$${totalPayments.toFixed(2)}`,color:CB.green,icon:icons.checkCircle},{label:"Outstanding",value:`$${outstanding.toFixed(2)}`,color:outstanding>0?CB.amber:CB.green,icon:icons.clock},{label:"Collection Rate",value:`${collectionRate}%`,color:CB.teal,icon:icons.barChart}].map((s,i) => (
+                  <div key={i} style={{ background:CB.white,borderRadius:14,padding:isMobile?"14px 12px":"18px 20px",border:`1px solid ${CB.border}`,boxShadow:CB.cardShadow,textAlign:"center",animation:`fadeIn 0.4s ease ${i*0.05}s both` }}>
+                    <div style={{ width:36,height:36,borderRadius:10,background:`${s.color}12`,display:"inline-flex",alignItems:"center",justifyContent:"center",marginBottom:8 }}>{s.icon({size:18,color:s.color})}</div>
+                    <div style={{ fontSize:24,fontWeight:800,color:s.color }}>{s.value}</div>
+                    <div style={{ fontSize:11,fontWeight:600,color:CB.textMid,textTransform:"uppercase",letterSpacing:0.5 }}>{s.label}</div>
                   </div>
-
-                  {/* Aging Preview */}
-                  <div style={{ background: CB.white, borderRadius: 16, padding: 24, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, marginBottom: 20, animation: "fadeIn 0.5s ease 0.2s both" }}>
-                    <h3 style={{ fontSize: 16, fontWeight: 700, color: CB.navy, marginBottom: 16 }}>Aging Summary</h3>
-                    <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(4, 1fr)", gap: 12 }}>
-                      {[
-                        { label: "0–30 Days", value: agingBuckets.current, color: CB.green },
-                        { label: "31–60 Days", value: agingBuckets.thirty, color: CB.amber },
-                        { label: "61–90 Days", value: agingBuckets.sixty, color: "#E65100" },
-                        { label: "90+ Days", value: agingBuckets.over90, color: CB.red },
-                      ].map((b, i) => (
-                        <div key={i} style={{ padding: "14px 16px", borderRadius: 12, background: `${b.color}08`, border: `1px solid ${b.color}20` }}>
-                          <div style={{ fontSize: 20, fontWeight: 800, color: b.color }}>${b.value.toFixed(2)}</div>
-                          <div style={{ fontSize: 12, fontWeight: 600, color: CB.textMid }}>{b.label}</div>
-                        </div>
-                      ))}
-                    </div>
+                ))}
+              </div>
+              <div style={{ background:CB.white,borderRadius:16,padding:24,border:`1px solid ${CB.border}`,boxShadow:CB.cardShadow,marginBottom:20,animation:"fadeIn 0.5s ease 0.2s both" }}>
+                <h3 style={{ fontSize:16,fontWeight:700,color:CB.navy,marginBottom:16 }}>Aging Summary</h3>
+                <div style={{ display:"grid",gridTemplateColumns:isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:12 }}>
+                  {[{label:"0–30 Days",value:agingBuckets.current,color:CB.green},{label:"31–60 Days",value:agingBuckets.thirty,color:CB.amber},{label:"61–90 Days",value:agingBuckets.sixty,color:"#E65100"},{label:"90+ Days",value:agingBuckets.over90,color:CB.red}].map((b,i) => (
+                    <div key={i} style={{ padding:"14px 16px",borderRadius:12,background:`${b.color}08`,border:`1px solid ${b.color}20` }}><div style={{ fontSize:20,fontWeight:800,color:b.color }}>${b.value.toFixed(2)}</div><div style={{ fontSize:12,fontWeight:600,color:CB.textMid }}>{b.label}</div></div>
+                  ))}
+                </div>
+              </div>
+              <div style={{ background:CB.white,borderRadius:16,padding:24,border:`1px solid ${CB.border}`,boxShadow:CB.cardShadow,animation:"fadeIn 0.5s ease 0.3s both" }}>
+                <h3 style={{ fontSize:16,fontWeight:700,color:CB.navy,marginBottom:16 }}>Recent Payments</h3>
+                {payments.length===0 ? <p style={{ fontSize:13,color:CB.textMid,fontStyle:"italic" }}>No payments recorded yet.</p> : (
+                  <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
+                    {payments.slice(0,5).map(p => <div key={p.id} style={{ display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",borderRadius:10,background:CB.cream,border:`1px solid ${CB.border}` }}><div><span style={{ fontWeight:700,color:CB.text,fontSize:14 }}>${Number(p.amount).toFixed(2)}</span><span style={{ color:CB.textMid,fontSize:12,marginLeft:10 }}>{p.contracts?.contract_number||p.payer}</span></div><div style={{ textAlign:"right" }}><div style={{ fontSize:12,color:CB.textMid }}>{new Date(p.payment_date+"T00:00:00").toLocaleDateString()}</div><div style={{ fontSize:11,color:CB.textLight }}>{p.payment_method} {p.check_number?`#${p.check_number}`:p.eft_trace||""}</div></div></div>)}
                   </div>
+                )}
+              </div>
+            </>)}
 
-                  {/* Recent Payments */}
-                  <div style={{ background: CB.white, borderRadius: 16, padding: 24, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, animation: "fadeIn 0.5s ease 0.3s both" }}>
-                    <h3 style={{ fontSize: 16, fontWeight: 700, color: CB.navy, marginBottom: 16 }}>Recent Payments</h3>
-                    {payments.length === 0 ? (
-                      <p style={{ fontSize: 13, color: CB.textMid, fontStyle: "italic" }}>No payments recorded yet.</p>
-                    ) : (
-                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                        {payments.slice(0, 5).map((p, i) => (
-                          <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", borderRadius: 10, background: CB.cream, border: `1px solid ${CB.border}` }}>
-                            <div>
-                              <span style={{ fontWeight: 700, color: CB.text, fontSize: 14 }}>${Number(p.amount).toFixed(2)}</span>
-                              <span style={{ color: CB.textMid, fontSize: 12, marginLeft: 10 }}>{p.contracts?.contract_number || p.payer}</span>
-                            </div>
-                            <div style={{ textAlign: "right" }}>
-                              <div style={{ fontSize: 12, color: CB.textMid }}>{new Date(p.payment_date + "T00:00:00").toLocaleDateString()}</div>
-                              <div style={{ fontSize: 11, color: CB.textLight }}>{p.payment_method} {p.check_number ? `#${p.check_number}` : p.eft_trace || ""}</div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
+            {/* ═══ CLAIMS ═══ */}
+            {tab === "claims" && (
+              <div style={{ background:CB.white,borderRadius:16,border:`1px solid ${CB.border}`,boxShadow:CB.cardShadow,overflow:"hidden" }}>
+                {claims.length===0 ? (
+                  <div style={{ textAlign:"center",padding:48,color:CB.textMid }}>
+                    <div style={{ width:56,height:56,borderRadius:16,background:`${CB.navy}10`,display:"inline-flex",alignItems:"center",justifyContent:"center",marginBottom:12 }}>{icons.upload({size:28,color:CB.navy})}</div>
+                    <p style={{ fontSize:15,fontWeight:600,color:CB.navy }}>No claims yet</p>
+                    <p style={{ fontSize:13 }}>Click "Import UPI" to upload your monthly UPI billing CSV.</p>
                   </div>
-                </>
-              )}
+                ) : (
+                  <div style={{ overflowX:"auto" }}>
+                    <table style={{ width:"100%",borderCollapse:"collapse",fontSize:13 }}>
+                      <thead><tr style={{ background:CB.navy }}>{["Date","Client","Code","Contract","Billed","Paid","Status","Actions"].map(h => <th key={h} style={{ padding:"10px 14px",textAlign:"left",color:CB.white,fontWeight:700,fontSize:12 }}>{h}</th>)}</tr></thead>
+                      <tbody>
+                        {claims.map((c,i) => { const sColor=statusColors[c.claim_status]||CB.textLight; return (
+                          <tr key={c.id} style={{ borderBottom:`1px solid ${CB.border}`,background:i%2===0?CB.white:CB.cream }}>
+                            <td style={{ padding:"10px 14px",fontWeight:600 }}>{c.service_date?new Date(c.service_date+"T00:00:00").toLocaleDateString():"—"}</td>
+                            <td style={{ padding:"10px 14px" }}>{c.persons?`${c.persons.first_name} ${c.persons.last_name}`:"—"}</td>
+                            <td style={{ padding:"10px 14px" }}><Badge text={c.service_code||"—"} color={CB.blue} /></td>
+                            <td style={{ padding:"10px 14px",fontSize:12,color:CB.textMid }}>{c.contracts?.contract_number||"—"}</td>
+                            <td style={{ padding:"10px 14px",fontWeight:700 }}>${Number(c.billed_amount||0).toFixed(2)}</td>
+                            <td style={{ padding:"10px 14px",fontWeight:600,color:CB.green }}>${Number(c.paid_amount||0).toFixed(2)}</td>
+                            <td style={{ padding:"10px 14px" }}><Badge text={c.claim_status} color={sColor} /></td>
+                            <td style={{ padding:"10px 14px" }}><select value={c.claim_status} onChange={e => { const ns=e.target.value; if(ns==="paid"){const a=prompt("Paid amount:",c.billed_amount);if(a)updateClaimStatus(c.id,ns,a);} else if(ns==="partial"){const a=prompt("Partial amount:");if(a)updateClaimStatus(c.id,ns,a);} else updateClaimStatus(c.id,ns); }} style={{ padding:"4px 8px",borderRadius:6,border:`1px solid ${CB.border}`,fontSize:11,fontFamily:"inherit",background:CB.white }}>{["pending","submitted","paid","partial","denied","appealed","void"].map(s => <option key={s} value={s}>{s}</option>)}</select></td>
+                          </tr>);
+                        })}
+                      </tbody>
+                    </table>
+                    <div style={{ padding:"12px 20px",borderTop:`1px solid ${CB.border}`,background:`${CB.navy}06`,display:"flex",justifyContent:"space-between",fontSize:14 }}><span style={{ fontWeight:600,color:CB.textMid }}>{claims.length} claims</span><span style={{ fontWeight:800,color:CB.navy }}>Total: ${totalBilled.toFixed(2)}</span></div>
+                  </div>
+                )}
+              </div>
+            )}
 
-              {/* ═══ CLAIMS TAB ═══ */}
-              {tab === "claims" && (
-                <div style={{ background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, overflow: "hidden" }}>
-                  {claims.length === 0 ? (
-                    <div style={{ textAlign: "center", padding: 48, color: CB.textMid }}>
-                      <p style={{ fontSize: 15, fontWeight: 600 }}>No claims submitted yet</p>
-                      <p style={{ fontSize: 13 }}>Click "Submit Claim" to track claim lifecycle.</p>
-                    </div>
-                  ) : (
-                    <div style={{ overflowX: "auto" }}>
-                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                        <thead>
-                          <tr style={{ background: CB.navy }}>
-                            {["Date", "Client", "Code", "Contract", "Billed", "Paid", "Status", "Actions"].map(h => (
-                              <th key={h} style={{ padding: "10px 14px", textAlign: "left", color: CB.white, fontWeight: 700, fontSize: 12 }}>{h}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {claims.map((c, i) => {
-                            const sColor = statusColors[c.claim_status] || CB.textLight;
-                            return (
-                              <tr key={c.id} style={{ borderBottom: `1px solid ${CB.border}`, background: i % 2 === 0 ? CB.white : CB.cream }}>
-                                <td style={{ padding: "10px 14px", fontWeight: 600 }}>{c.service_date ? new Date(c.service_date + "T00:00:00").toLocaleDateString() : "—"}</td>
-                                <td style={{ padding: "10px 14px" }}>{c.persons ? `${c.persons.first_name} ${c.persons.last_name}` : "—"}</td>
-                                <td style={{ padding: "10px 14px" }}><Badge text={c.service_code || "—"} color={CB.blue} /></td>
-                                <td style={{ padding: "10px 14px", fontSize: 12, color: CB.textMid }}>{c.contracts?.contract_number || "—"}</td>
-                                <td style={{ padding: "10px 14px", fontWeight: 700 }}>${Number(c.billed_amount || 0).toFixed(2)}</td>
-                                <td style={{ padding: "10px 14px", fontWeight: 600, color: CB.green }}>${Number(c.paid_amount || 0).toFixed(2)}</td>
-                                <td style={{ padding: "10px 14px" }}><Badge text={c.claim_status} color={sColor} /></td>
-                                <td style={{ padding: "10px 14px" }}>
-                                  <select value={c.claim_status} onChange={e => {
-                                    const newStatus = e.target.value;
-                                    if (newStatus === "paid") {
-                                      const amt = prompt("Paid amount:", c.billed_amount);
-                                      if (amt) updateClaimStatus(c.id, newStatus, amt);
-                                    } else if (newStatus === "partial") {
-                                      const amt = prompt("Partial amount paid:");
-                                      if (amt) updateClaimStatus(c.id, newStatus, amt);
-                                    } else {
-                                      updateClaimStatus(c.id, newStatus);
-                                    }
-                                  }} style={{ padding: "4px 8px", borderRadius: 6, border: `1px solid ${CB.border}`, fontSize: 11, fontFamily: "inherit", background: CB.white }}>
-                                    {["pending","submitted","paid","partial","denied","appealed","void"].map(s => <option key={s} value={s}>{s}</option>)}
-                                  </select>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
+            {/* ═══ PAYMENTS ═══ */}
+            {tab === "payments" && (
+              <div style={{ background:CB.white,borderRadius:16,border:`1px solid ${CB.border}`,boxShadow:CB.cardShadow,overflow:"hidden" }}>
+                {payments.length===0 ? <div style={{ textAlign:"center",padding:48,color:CB.textMid }}><p style={{ fontSize:15,fontWeight:600 }}>No payments recorded yet</p></div> : (
+                  <div style={{ overflowX:"auto" }}>
+                    <table style={{ width:"100%",borderCollapse:"collapse",fontSize:13 }}>
+                      <thead><tr style={{ background:CB.navy }}>{["Date","Amount","Payer","Contract","Method","Reference","Remittance"].map(h => <th key={h} style={{ padding:"10px 14px",textAlign:"left",color:CB.white,fontWeight:700,fontSize:12 }}>{h}</th>)}</tr></thead>
+                      <tbody>{payments.map((p,i) => <tr key={p.id} style={{ borderBottom:`1px solid ${CB.border}`,background:i%2===0?CB.white:CB.cream }}><td style={{ padding:"10px 14px",fontWeight:600 }}>{new Date(p.payment_date+"T00:00:00").toLocaleDateString()}</td><td style={{ padding:"10px 14px",fontWeight:800,color:CB.green,fontSize:15 }}>${Number(p.amount).toFixed(2)}</td><td style={{ padding:"10px 14px" }}>{p.payer}</td><td style={{ padding:"10px 14px",fontSize:12 }}>{p.contracts?.contract_number||"—"}</td><td style={{ padding:"10px 14px" }}><Badge text={p.payment_method} color={CB.blue} /></td><td style={{ padding:"10px 14px",fontSize:12,color:CB.textMid }}>{p.check_number?`Chk #${p.check_number}`:p.eft_trace||"—"}</td><td style={{ padding:"10px 14px",fontSize:12,color:CB.textMid }}>{p.remittance_id||"—"}</td></tr>)}</tbody>
+                    </table>
+                    <div style={{ padding:"12px 20px",borderTop:`1px solid ${CB.border}`,background:`${CB.green}06`,display:"flex",justifyContent:"space-between",fontSize:14 }}><span style={{ fontWeight:600,color:CB.textMid }}>Total Received</span><span style={{ fontWeight:800,color:CB.green }}>${totalPayments.toFixed(2)}</span></div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ═══ AGING ═══ */}
+            {tab === "aging" && (() => {
+              const unpaid = claims.filter(c => c.claim_status!=="paid"&&c.claim_status!=="void").map(c => { const d=c.submitted_date||c.service_date; const days=d?Math.floor((now-new Date(d+"T00:00:00"))/86400000):0; const bucket=days<=30?"0–30":days<=60?"31–60":days<=90?"61–90":"90+"; const bc=days<=30?CB.green:days<=60?CB.amber:days<=90?"#E65100":CB.red; return {...c,days,bucket,bucketColor:bc,outstanding:Number(c.billed_amount||0)-Number(c.paid_amount||0)}; }).sort((a,b) => b.days-a.days);
+              return (
+                <div style={{ background:CB.white,borderRadius:16,border:`1px solid ${CB.border}`,boxShadow:CB.cardShadow,overflow:"hidden" }}>
+                  {unpaid.length===0 ? <div style={{ textAlign:"center",padding:48 }}><div style={{ width:56,height:56,borderRadius:16,background:`${CB.green}12`,display:"inline-flex",alignItems:"center",justifyContent:"center",marginBottom:12 }}>{icons.checkCircle({size:28,color:CB.green})}</div><p style={{ fontSize:15,fontWeight:600,color:CB.navy }}>No outstanding claims</p></div> : (
+                    <div style={{ overflowX:"auto" }}>
+                      <table style={{ width:"100%",borderCollapse:"collapse",fontSize:13 }}>
+                        <thead><tr style={{ background:CB.navy }}>{["Service Date","Client","Code","Contract","Billed","Paid","Outstanding","Days","Bucket","Status"].map(h => <th key={h} style={{ padding:"10px 14px",textAlign:"left",color:CB.white,fontWeight:700,fontSize:12 }}>{h}</th>)}</tr></thead>
+                        <tbody>{unpaid.map((c,i) => <tr key={c.id} style={{ borderBottom:`1px solid ${CB.border}`,background:i%2===0?CB.white:CB.cream }}><td style={{ padding:"10px 14px",fontWeight:600 }}>{c.service_date?new Date(c.service_date+"T00:00:00").toLocaleDateString():"—"}</td><td style={{ padding:"10px 14px" }}>{c.persons?`${c.persons.first_name} ${c.persons.last_name}`:"—"}</td><td style={{ padding:"10px 14px" }}><Badge text={c.service_code||"—"} color={CB.blue} /></td><td style={{ padding:"10px 14px",fontSize:12 }}>{c.contracts?.contract_number||"—"}</td><td style={{ padding:"10px 14px" }}>${Number(c.billed_amount||0).toFixed(2)}</td><td style={{ padding:"10px 14px",color:CB.green }}>${Number(c.paid_amount||0).toFixed(2)}</td><td style={{ padding:"10px 14px",fontWeight:700,color:c.bucketColor }}>${c.outstanding.toFixed(2)}</td><td style={{ padding:"10px 14px",fontWeight:700,color:c.bucketColor }}>{c.days}</td><td style={{ padding:"10px 14px" }}><Badge text={c.bucket} color={c.bucketColor} /></td><td style={{ padding:"10px 14px" }}><Badge text={c.claim_status} color={statusColors[c.claim_status]} /></td></tr>)}</tbody>
                       </table>
+                      <div style={{ padding:"12px 20px",borderTop:`1px solid ${CB.border}`,background:`${CB.amber}06`,display:"flex",justifyContent:"space-between",fontSize:14 }}><span style={{ fontWeight:600,color:CB.textMid }}>Total Outstanding</span><span style={{ fontWeight:800,color:CB.red }}>${unpaid.reduce((s,c)=>s+c.outstanding,0).toFixed(2)}</span></div>
                     </div>
                   )}
                 </div>
-              )}
+              );
+            })()}
 
-              {/* ═══ PAYMENTS TAB ═══ */}
-              {tab === "payments" && (
-                <div style={{ background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, overflow: "hidden" }}>
-                  {payments.length === 0 ? (
-                    <div style={{ textAlign: "center", padding: 48, color: CB.textMid }}>
-                      <p style={{ fontSize: 15, fontWeight: 600 }}>No payments recorded yet</p>
-                    </div>
-                  ) : (
-                    <div style={{ overflowX: "auto" }}>
-                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                        <thead>
-                          <tr style={{ background: CB.navy }}>
-                            {["Date", "Amount", "Payer", "Contract", "Method", "Reference", "Remittance"].map(h => (
-                              <th key={h} style={{ padding: "10px 14px", textAlign: "left", color: CB.white, fontWeight: 700, fontSize: 12 }}>{h}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {payments.map((p, i) => (
-                            <tr key={p.id} style={{ borderBottom: `1px solid ${CB.border}`, background: i % 2 === 0 ? CB.white : CB.cream }}>
-                              <td style={{ padding: "10px 14px", fontWeight: 600 }}>{new Date(p.payment_date + "T00:00:00").toLocaleDateString()}</td>
-                              <td style={{ padding: "10px 14px", fontWeight: 800, color: CB.green, fontSize: 15 }}>${Number(p.amount).toFixed(2)}</td>
-                              <td style={{ padding: "10px 14px" }}>{p.payer}</td>
-                              <td style={{ padding: "10px 14px", fontSize: 12 }}>{p.contracts?.contract_number || "—"}</td>
-                              <td style={{ padding: "10px 14px" }}><Badge text={p.payment_method} color={CB.blue} /></td>
-                              <td style={{ padding: "10px 14px", fontSize: 12, color: CB.textMid }}>{p.check_number ? `Chk #${p.check_number}` : p.eft_trace || "—"}</td>
-                              <td style={{ padding: "10px 14px", fontSize: 12, color: CB.textMid }}>{p.remittance_id || "—"}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                  {payments.length > 0 && (
-                    <div style={{ padding: "12px 20px", borderTop: `1px solid ${CB.border}`, background: `${CB.green}06`, display: "flex", justifyContent: "space-between", fontSize: 14 }}>
-                      <span style={{ fontWeight: 600, color: CB.textMid }}>Total Received</span>
-                      <span style={{ fontWeight: 800, color: CB.green }}>${totalPayments.toFixed(2)}</span>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* ═══ AGING TAB ═══ */}
-              {tab === "aging" && (() => {
-                const unpaid = claims.filter(c => c.claim_status !== "paid" && c.claim_status !== "void").map(c => {
-                  const subDate = c.submitted_date || c.service_date;
-                  const days = subDate ? Math.floor((now - new Date(subDate + "T00:00:00")) / 86400000) : 0;
-                  const bucket = days <= 30 ? "0–30" : days <= 60 ? "31–60" : days <= 90 ? "61–90" : "90+";
-                  const bucketColor = days <= 30 ? CB.green : days <= 60 ? CB.amber : days <= 90 ? "#E65100" : CB.red;
-                  return { ...c, days, bucket, bucketColor, outstanding: Number(c.billed_amount || 0) - Number(c.paid_amount || 0) };
-                }).sort((a, b) => b.days - a.days);
-                return (
-                  <div style={{ background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, overflow: "hidden" }}>
-                    {unpaid.length === 0 ? (
-                      <div style={{ textAlign: "center", padding: 48 }}>
-                        <div style={{ width: 56, height: 56, borderRadius: 16, background: `${CB.green}12`, display: "inline-flex", alignItems: "center", justifyContent: "center", marginBottom: 12 }}>
-                          {icons.checkCircle({ size: 28, color: CB.green })}
+            {/* ═══ CONTRACTS ═══ */}
+            {tab === "contracts" && (
+              <div>
+                <div style={{ display:"flex",justifyContent:"flex-end",marginBottom:16 }}><button onClick={() => {setEditingContract(null);setShowContractForm(true);}} style={{ padding:"10px 20px",borderRadius:10,border:"none",background:CB.teal,color:CB.white,fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",gap:8 }}>{icons.plus({size:15})} Add Contract</button></div>
+                {contracts.length===0 ? <div style={{ textAlign:"center",padding:48,background:CB.white,borderRadius:16,border:`1px solid ${CB.border}` }}><p style={{ fontSize:15,fontWeight:600,color:CB.navy }}>No contracts yet</p><p style={{ fontSize:13,color:CB.textMid }}>Add your DHHS, DCFS, or other payer contracts.</p></div> : (
+                  <div style={{ display:"flex",flexDirection:"column",gap:12 }}>
+                    {contracts.map((c,i) => { const sColor=c.status==="active"?CB.green:c.status==="pending"?CB.amber:c.status==="expired"?CB.red:CB.textLight; const cc=claims.filter(cl=>cl.contract_id===c.id); const cp=payments.filter(p=>p.contract_id===c.id); const billed=cc.reduce((s,cl)=>s+Number(cl.billed_amount||0),0); const received=cp.reduce((s,p)=>s+Number(p.amount||0),0);
+                      return (<div key={c.id} style={{ background:CB.white,borderRadius:14,padding:isMobile?16:20,border:`1px solid ${CB.border}`,boxShadow:CB.cardShadow,animation:`fadeIn 0.4s ease ${i*0.05}s both` }}>
+                        <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12 }}>
+                          <div><div style={{ display:"flex",alignItems:"center",gap:10,marginBottom:4 }}><span style={{ fontSize:18,fontWeight:800,color:CB.navy }}>{c.contract_number}</span><Badge text={c.status} color={sColor} /></div><div style={{ fontSize:13,color:CB.textMid }}>{c.contract_name||c.payer}</div>{c.effective_date&&<div style={{ fontSize:12,color:CB.textLight,marginTop:2 }}>{new Date(c.effective_date+"T00:00:00").toLocaleDateString()}{c.expiration_date&&` — ${new Date(c.expiration_date+"T00:00:00").toLocaleDateString()}`}</div>}</div>
+                          <button onClick={() => {setEditingContract(c);setShowContractForm(true);}} style={{ padding:"6px 14px",borderRadius:8,border:`1px solid ${CB.border}`,background:CB.white,fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"inherit",color:CB.textMid }}>Edit</button>
                         </div>
-                        <p style={{ fontSize: 15, fontWeight: 600, color: CB.navy }}>No outstanding claims</p>
-                      </div>
-                    ) : (
-                      <div style={{ overflowX: "auto" }}>
-                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                          <thead>
-                            <tr style={{ background: CB.navy }}>
-                              {["Service Date", "Client", "Code", "Contract", "Billed", "Paid", "Outstanding", "Days", "Bucket", "Status"].map(h => (
-                                <th key={h} style={{ padding: "10px 14px", textAlign: "left", color: CB.white, fontWeight: 700, fontSize: 12 }}>{h}</th>
-                              ))}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {unpaid.map((c, i) => (
-                              <tr key={c.id} style={{ borderBottom: `1px solid ${CB.border}`, background: i % 2 === 0 ? CB.white : CB.cream }}>
-                                <td style={{ padding: "10px 14px", fontWeight: 600 }}>{c.service_date ? new Date(c.service_date + "T00:00:00").toLocaleDateString() : "—"}</td>
-                                <td style={{ padding: "10px 14px" }}>{c.persons ? `${c.persons.first_name} ${c.persons.last_name}` : "—"}</td>
-                                <td style={{ padding: "10px 14px" }}><Badge text={c.service_code || "—"} color={CB.blue} /></td>
-                                <td style={{ padding: "10px 14px", fontSize: 12 }}>{c.contracts?.contract_number || "—"}</td>
-                                <td style={{ padding: "10px 14px" }}>${Number(c.billed_amount || 0).toFixed(2)}</td>
-                                <td style={{ padding: "10px 14px", color: CB.green }}>${Number(c.paid_amount || 0).toFixed(2)}</td>
-                                <td style={{ padding: "10px 14px", fontWeight: 700, color: c.bucketColor }}>${c.outstanding.toFixed(2)}</td>
-                                <td style={{ padding: "10px 14px", fontWeight: 700, color: c.bucketColor }}>{c.days}</td>
-                                <td style={{ padding: "10px 14px" }}><Badge text={c.bucket} color={c.bucketColor} /></td>
-                                <td style={{ padding: "10px 14px" }}><Badge text={c.claim_status} color={statusColors[c.claim_status]} /></td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                        <div style={{ padding: "12px 20px", borderTop: `1px solid ${CB.border}`, background: `${CB.amber}06`, display: "flex", justifyContent: "space-between", fontSize: 14 }}>
-                          <span style={{ fontWeight: 600, color: CB.textMid }}>Total Outstanding</span>
-                          <span style={{ fontWeight: 800, color: CB.red }}>${unpaid.reduce((s, c) => s + c.outstanding, 0).toFixed(2)}</span>
+                        <div style={{ display:"grid",gridTemplateColumns:isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:10 }}>
+                          {[{label:"Claims",value:cc.length,color:CB.navy},{label:"Billed",value:`$${billed.toFixed(2)}`,color:CB.blue},{label:"Received",value:`$${received.toFixed(2)}`,color:CB.green},{label:"Outstanding",value:`$${(billed-received).toFixed(2)}`,color:billed-received>0?CB.amber:CB.green}].map((s,si) => <div key={si} style={{ padding:"10px 14px",borderRadius:10,background:CB.cream,textAlign:"center" }}><div style={{ fontSize:16,fontWeight:800,color:s.color }}>{s.value}</div><div style={{ fontSize:11,fontWeight:600,color:CB.textMid }}>{s.label}</div></div>)}
                         </div>
-                      </div>
-                    )}
+                      </div>);
+                    })}
                   </div>
-                );
-              })()}
-
-              {/* ═══ CONTRACTS TAB ═══ */}
-              {tab === "contracts" && (
-                <div>
-                  <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
-                    <button onClick={() => { setEditingContract(null); setShowContractForm(true); }} style={{
-                      padding: "10px 20px", borderRadius: 10, border: "none", background: CB.teal, color: CB.white,
-                      fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 8,
-                    }}>{icons.plus({ size: 15 })} Add Contract</button>
-                  </div>
-                  {contracts.length === 0 ? (
-                    <div style={{ textAlign: "center", padding: 48, background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}` }}>
-                      <p style={{ fontSize: 15, fontWeight: 600, color: CB.navy }}>No contracts yet</p>
-                      <p style={{ fontSize: 13, color: CB.textMid }}>Add your DHHS, DCFS, or other payer contracts.</p>
-                    </div>
-                  ) : (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                      {contracts.map((c, i) => {
-                        const sColor = c.status === "active" ? CB.green : c.status === "pending" ? CB.amber : c.status === "expired" ? CB.red : CB.textLight;
-                        const contractPayments = payments.filter(p => p.contract_id === c.id);
-                        const contractClaims = claims.filter(cl => cl.contract_id === c.id);
-                        const contractBilled = contractClaims.reduce((s, cl) => s + Number(cl.billed_amount || 0), 0);
-                        const contractReceived = contractPayments.reduce((s, p) => s + Number(p.amount || 0), 0);
-                        return (
-                          <div key={c.id} style={{
-                            background: CB.white, borderRadius: 14, padding: isMobile ? 16 : 20,
-                            border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
-                            animation: `fadeIn 0.4s ease ${i * 0.05}s both`,
-                          }}>
-                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
-                              <div>
-                                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
-                                  <span style={{ fontSize: 18, fontWeight: 800, color: CB.navy }}>{c.contract_number}</span>
-                                  <Badge text={c.status} color={sColor} />
-                                </div>
-                                <div style={{ fontSize: 13, color: CB.textMid }}>{c.contract_name || c.payer}</div>
-                                {c.effective_date && <div style={{ fontSize: 12, color: CB.textLight, marginTop: 2 }}>
-                                  {new Date(c.effective_date + "T00:00:00").toLocaleDateString()}
-                                  {c.expiration_date && ` — ${new Date(c.expiration_date + "T00:00:00").toLocaleDateString()}`}
-                                </div>}
-                              </div>
-                              <button onClick={() => { setEditingContract(c); setShowContractForm(true); }} style={{
-                                padding: "6px 14px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
-                                fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", color: CB.textMid,
-                              }}>Edit</button>
-                            </div>
-                            <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(4, 1fr)", gap: 10 }}>
-                              {[
-                                { label: "Claims", value: contractClaims.length, color: CB.navy },
-                                { label: "Billed", value: `$${contractBilled.toFixed(2)}`, color: CB.blue },
-                                { label: "Received", value: `$${contractReceived.toFixed(2)}`, color: CB.green },
-                                { label: "Outstanding", value: `$${(contractBilled - contractReceived).toFixed(2)}`, color: contractBilled - contractReceived > 0 ? CB.amber : CB.green },
-                              ].map((s, si) => (
-                                <div key={si} style={{ padding: "10px 14px", borderRadius: 10, background: CB.cream, textAlign: "center" }}>
-                                  <div style={{ fontSize: 16, fontWeight: 800, color: s.color }}>{s.value}</div>
-                                  <div style={{ fontSize: 11, fontWeight: 600, color: CB.textMid }}>{s.label}</div>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
-            </>
-          )}
+                )}
+              </div>
+            )}
+          </>)}
 
           {showContractForm && <ContractForm />}
           {showPaymentForm && <PaymentForm />}
-          {showClaimForm && <ClaimForm />}
+
+          {/* ═══ UPI IMPORT MODAL ═══ */}
+          {showImport && (
+            <Modal open={true} onClose={() => {setShowImport(false);setImportPreview(false);setImportData([]);}} title="Import UPI Billing CSV" subtitle="Upload your monthly UPI export to create claims automatically" width={isMobile?"100%":800}>
+              <div style={{ padding:"20px 28px 24px",overflowY:"auto",maxHeight:"70vh" }}>
+                {!importPreview ? (
+                  <div>
+                    <div style={{ border:`2px dashed ${CB.border}`,borderRadius:16,padding:40,textAlign:"center",background:CB.cream,marginBottom:16 }}>
+                      <div style={{ width:56,height:56,borderRadius:16,background:`${CB.navy}10`,display:"inline-flex",alignItems:"center",justifyContent:"center",marginBottom:12 }}>{icons.upload({size:28,color:CB.navy})}</div>
+                      <p style={{ fontSize:15,fontWeight:600,color:CB.navy,marginBottom:8 }}>Upload UPI CSV</p>
+                      <p style={{ fontSize:13,color:CB.textMid,marginBottom:16 }}>File should contain: consumer_name, consumer_pid, service_code, rate, unit_type, units, service_start_date, service_end_date</p>
+                      <input type="file" accept=".csv" onChange={handleFileUpload} style={{ fontSize:14 }} />
+                    </div>
+                    <div style={{ fontSize:12,color:CB.textLight,padding:"8px 12px",background:`${CB.navy}06`,borderRadius:10 }}>Expected format: UPI monthly billing export (e.g. <strong>2026-03HopeHavenServices.csv</strong>)</div>
+                  </div>
+                ) : (
+                  <div>
+                    <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16,flexWrap:"wrap",gap:10 }}>
+                      <div><span style={{ fontSize:14,fontWeight:700,color:CB.navy }}>{importData.length} service lines</span><span style={{ fontSize:13,color:CB.textMid,marginLeft:10 }}>{new Set(importData.map(r=>r.consumer_name)).size} clients — {new Set(importData.map(r=>r.service_code)).size} service codes</span></div>
+                      <div style={{ fontSize:20,fontWeight:800,color:CB.teal }}>${importTotal.toLocaleString("en-US",{minimumFractionDigits:2})}</div>
+                    </div>
+                    <div style={{ overflowX:"auto",marginBottom:16 }}>
+                      <table style={{ width:"100%",borderCollapse:"collapse",fontSize:12 }}>
+                        <thead><tr style={{ background:CB.navy }}><th style={{ padding:"8px 10px",color:CB.white,fontWeight:700,textAlign:"center",width:30 }}><input type="checkbox" checked={importData.every(r=>r.selected)} onChange={e => setImportData(d=>d.map(r=>({...r,selected:e.target.checked})))} /></th>{["Client","PID","Code","Rate","Type","Units","Remaining","SCE","Amount"].map(h => <th key={h} style={{ padding:"8px 10px",textAlign:"left",color:CB.white,fontWeight:700 }}>{h}</th>)}</tr></thead>
+                        <tbody>{importData.map((r,i) => <tr key={i} style={{ borderBottom:`1px solid ${CB.border}`,background:r.selected?(i%2===0?CB.white:CB.cream):`${CB.red}06`,opacity:r.selected?1:0.5 }}><td style={{ padding:"8px 10px",textAlign:"center" }}><input type="checkbox" checked={r.selected} onChange={e => setImportData(d=>d.map((x,j)=>j===i?{...x,selected:e.target.checked}:x))} /></td><td style={{ padding:"8px 10px",fontWeight:600 }}>{r.consumer_name}</td><td style={{ padding:"8px 10px",color:CB.textMid }}>{r.consumer_pid}</td><td style={{ padding:"8px 10px" }}><Badge text={r.service_code} color={CB.blue} /></td><td style={{ padding:"8px 10px",fontWeight:600 }}>${r.rate.toFixed(2)}</td><td style={{ padding:"8px 10px",color:CB.textMid }}>{r.unit_label}</td><td style={{ padding:"8px 10px",fontWeight:700 }}>{r.units}</td><td style={{ padding:"8px 10px",fontSize:11,color:r.remaining_units<50?CB.amber:CB.textMid }}>{r.remaining_units}/{r.monthly_max_units}</td><td style={{ padding:"8px 10px",fontSize:11,color:CB.textMid }}>{r.sce}</td><td style={{ padding:"8px 10px",fontWeight:800,color:CB.navy }}>${r.amount.toLocaleString("en-US",{minimumFractionDigits:2})}</td></tr>)}</tbody>
+                      </table>
+                    </div>
+                    <div style={{ marginBottom:16 }}>
+                      <h4 style={{ fontSize:13,fontWeight:700,color:CB.navy,marginBottom:8 }}>Per-Client Totals</h4>
+                      <div style={{ display:"grid",gridTemplateColumns:isMobile?"1fr":"repeat(3,1fr)",gap:10 }}>
+                        {[...new Set(importData.filter(r=>r.selected).map(r=>r.consumer_name))].map(name => { const cr=importData.filter(r=>r.selected&&r.consumer_name===name); const ct=cr.reduce((s,r)=>s+r.amount,0);
+                          return <div key={name} style={{ padding:"12px 16px",borderRadius:10,background:CB.cream,border:`1px solid ${CB.border}` }}><div style={{ fontSize:14,fontWeight:700,color:CB.navy }}>{name}</div><div style={{ fontSize:11,color:CB.textMid }}>{cr.length} services — {cr.map(r=>r.service_code).join(", ")}</div><div style={{ fontSize:18,fontWeight:800,color:CB.teal,marginTop:4 }}>${ct.toLocaleString("en-US",{minimumFractionDigits:2})}</div></div>;
+                        })}
+                      </div>
+                    </div>
+                    <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap" }}>
+                      <button onClick={() => {setImportPreview(false);setImportData([]);}} style={{ padding:"10px 20px",borderRadius:10,border:`1px solid ${CB.border}`,background:CB.white,color:CB.textMid,fontSize:14,fontWeight:600,cursor:"pointer",fontFamily:"inherit" }}>Upload Different File</button>
+                      <div style={{ display:"flex",alignItems:"center",gap:12 }}>
+                        <span style={{ fontSize:14,fontWeight:700,color:CB.navy }}>{importData.filter(r=>r.selected).length} of {importData.length} selected</span>
+                        <button onClick={submitImport} disabled={importing} style={{ padding:"10px 28px",borderRadius:10,border:"none",background:CB.teal,color:CB.white,fontSize:14,fontWeight:700,cursor:"pointer",fontFamily:"inherit",opacity:importing?0.7:1 }}>{importing?"Importing...":`Import ${importData.filter(r=>r.selected).length} Claims — $${importTotal.toLocaleString("en-US",{minimumFractionDigits:2})}`}</button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </Modal>
+          )}
         </div>
       );
     }
+
 
     // ═══════════════════════════════════════════════════════════════
     // ORG UNITS — recursive tree builder (UPI-compatible structure)
