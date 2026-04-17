@@ -2449,9 +2449,10 @@
       const [form, setForm] = useState({
         staff_id: "", person_id: "", service_code_id: "",
         service_date: new Date().toISOString().split("T")[0],
-        start_time: "", end_time: "", note_text: "",
+        start_time: "", end_time: "", note_text: "", goal_id: "",
       });
       const [extraFields, setExtraFields] = useState({});
+      const [goals, setGoals] = useState([]);
 
       useEffect(() => {
         if (open) {
@@ -2464,23 +2465,27 @@
             setClients(c.data || []);
             setServiceCodes(sc.data || []);
           });
-          setForm({ staff_id: "", person_id: "", service_code_id: "", service_date: new Date().toISOString().split("T")[0], start_time: "", end_time: "", note_text: "" });
+          setForm({ staff_id: "", person_id: "", service_code_id: "", service_date: new Date().toISOString().split("T")[0], start_time: "", end_time: "", note_text: "", goal_id: "" });
           setExtraFields({});
           setSelectedCode(null);
           setClientAuths([]);
+          setGoals([]);
         }
       }, [open]);
 
       // Load client auths when person changes
       const handleClientChange = async (personId) => {
-        setForm(prev => ({ ...prev, person_id: personId }));
+        setForm(prev => ({ ...prev, person_id: personId, goal_id: "" }));
         if (personId) {
-          const { data } = await supabase.from("person_service_authorizations")
-            .select("id, service_code_id, authorized_units, used_units, service_code_definitions(code)")
-            .eq("person_id", personId);
-          setClientAuths(data || []);
+          const [authData, goalData] = await Promise.all([
+            supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, service_code_definitions(code)").eq("person_id", personId),
+            supabase.from("pcsp_goals").select("id, domain, goal_description, status").eq("person_id", personId).in("status", ["active", "in_progress"]).order("domain"),
+          ]);
+          setClientAuths(authData.data || []);
+          setGoals(goalData.data || []);
         } else {
           setClientAuths([]);
+          setGoals([]);
         }
       };
 
@@ -2523,8 +2528,13 @@
             .join("\n\n");
           fullNote = sections + (fullNote ? `\n\n[Additional Notes]\n${fullNote}` : "");
         }
+        // Prepend goal reference if selected
+        const selectedGoal = goals.find(g => g.id === form.goal_id);
+        if (selectedGoal) {
+          fullNote = `[PCSP Goal: ${selectedGoal.domain}]\n${selectedGoal.goal_description.substring(0, 120)}\n\n${fullNote}`;
+        }
 
-        const { error } = await supabase.from("service_notes").insert({
+        const insertPayload = {
           org_id: orgId,
           staff_id: form.staff_id,
           person_id: form.person_id,
@@ -2536,7 +2546,11 @@
           billable_units: calculateBillableUnits(selectedCode, duration_minutes),
           summary_note: fullNote,
           status: "draft",
-        });
+        };
+        // Try to include goal_id if column exists
+        if (form.goal_id) insertPayload.goal_id = form.goal_id;
+
+        const { error } = await supabase.from("service_notes").insert(insertPayload);
         setSaving(false);
         if (error) return addToast(error.message, "error");
         addToast("Service note saved", "success");
@@ -2693,6 +2707,15 @@
             </div>
           )}
 
+          {/* PCSP Goal Link */}
+          {goals.length > 0 && (
+            <FormField label="Link to PCSP Goal (optional)">
+              <select style={fieldStyle} value={form.goal_id} onChange={e => set("goal_id", e.target.value)}>
+                <option value="">No goal linked</option>
+                {goals.map(g => <option key={g.id} value={g.id}>{g.domain} — {g.goal_description.substring(0, 60)}{g.goal_description.length > 60 ? "..." : ""}</option>)}
+              </select>
+            </FormField>
+          )}
           <FormField label="Additional Notes">
             <textarea style={{ ...fieldStyle, minHeight: 64, resize: "vertical" }} value={form.note_text} onChange={e => set("note_text", e.target.value)} placeholder="Any additional observations or notes..." />
           </FormField>
@@ -3756,10 +3779,28 @@
           reported_by: staffProfile?.id || null,
           status: "open",
         };
-        const { error } = await supabase.from("incidents").insert(payload);
+        const { error, data: newIncident } = await supabase.from("incidents").insert(payload).select("id").single();
         setSaving(false);
         if (error) return addToast(error.message, "error");
         addToast("Incident report filed", "success");
+        // ── Auto-notify compliance director(s) ──
+        try {
+          const { data: compStaff } = await supabase.from("staff").select("id").in("role", ["compliance_director", "owner", "admin"]).eq("is_active", true);
+          const senderName = staffProfile ? `${staffProfile.first_name} ${staffProfile.last_name}` : "System";
+          const clientName = clients.find(c => c.id === form.person_id);
+          const clientLabel = clientName ? `${clientName.first_name} ${clientName.last_name}` : "Unknown";
+          const sevLabel = { minor: "Minor", moderate: "Moderate", serious: "Serious", critical: "Critical" }[form.severity] || form.severity;
+          const typeLabel = INCIDENT_TYPES.find(t => t.value === form.incident_type)?.label || form.incident_type;
+          for (const staff of (compStaff || [])) {
+            if (staff.id === staffProfile?.id) continue;
+            await supabase.from("messages").insert({
+              org_id: orgId, sender_staff_id: staffProfile?.id, recipient_staff_id: staff.id,
+              subject: `⚠ Incident Report: ${typeLabel} — ${sevLabel}`,
+              body: `An incident report has been filed.\n\nType: ${typeLabel}\nSeverity: ${sevLabel}\nClient: ${clientLabel}\nDate: ${form.occurred_at}\nLocation: ${form.location || "N/A"}\n\nDescription: ${form.description.substring(0, 300)}${form.description.length > 300 ? "..." : ""}\n\nPlease review in the Incidents module.`,
+              is_urgent: form.severity === "critical" || form.severity === "serious",
+            });
+          }
+        } catch (e) { /* notification send error — non-blocking */ }
         setForm(blankForm);
         setShowForm(false);
         loadAll();
@@ -4014,13 +4055,15 @@
       const loadAlerts = async () => {
         setLoading(true);
         try {
-          const [trainRes, topicRes, staffRes, authRes, clientRes, docRes] = await Promise.all([
+          const [trainRes, topicRes, staffRes, authRes, clientRes, docRes, medRes, medLogRes] = await Promise.all([
             supabase.from("staff_trainings").select("id, staff_id, training_topic_id, completed_at, expires_at, staff(first_name, last_name, is_active), training_topic_definitions(topic_name, category, renewal_months)"),
             supabase.from("training_topic_definitions").select("id, topic_name, category, deadline_days, renewal_months, requires_certification"),
             supabase.from("staff").select("id, first_name, last_name, hire_date, is_active").eq("is_active", true),
             supabase.from("person_service_authorizations").select("id, person_id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code), persons(first_name, last_name)"),
             supabase.from("persons").select("id, first_name, last_name, is_active").eq("is_active", true),
             supabase.from("documents").select("id, staff_id, person_id, doc_type, file_name, expires_at, uploaded_at, staff(first_name, last_name), persons(first_name, last_name)").eq("is_archived", false).not("expires_at", "is", null),
+            supabase.from("medications").select("id, person_id, medication_name, dosage, frequency, schedule_times, is_prn, is_active, persons(first_name, last_name)").eq("is_active", true),
+            supabase.from("medication_logs").select("id, medication_id, person_id, scheduled_date, scheduled_time, status").gte("scheduled_date", new Date(new Date().setDate(new Date().getDate() - 3)).toISOString().split("T")[0]),
           ]);
 
           const trainings = trainRes.data || [];
@@ -4171,6 +4214,46 @@
             });
           });
 
+          // ── MISSED MEDICATION DOSES (last 3 days) ──
+          const meds = medRes.data || [];
+          const medLogs = medLogRes.data || [];
+          const threeDaysAgo = new Date(now); threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+          const nowDateStr = now.toISOString().split("T")[0];
+          const nowTimeStr = now.toTimeString().slice(0, 5);
+          meds.filter(m => !m.is_prn && m.schedule_times?.length).forEach(med => {
+            const clientName = med.persons ? `${med.persons.first_name} ${med.persons.last_name}` : "Unknown";
+            for (let d = new Date(threeDaysAgo); d <= now; d.setDate(d.getDate() + 1)) {
+              const dateStr = d.toISOString().split("T")[0];
+              (med.schedule_times || []).forEach(time => {
+                if (dateStr === nowDateStr && time > nowTimeStr) return;
+                const hasLog = medLogs.find(l => l.medication_id === med.id && l.scheduled_date === dateStr && l.scheduled_time === time);
+                if (!hasLog) {
+                  collected.push({
+                    id: `med-miss-${med.id}-${dateStr}-${time}`,
+                    category: "medication",
+                    urgency: "critical",
+                    days: 0,
+                    title: `${med.medication_name} ${med.dosage} — Missed`,
+                    subtitle: clientName,
+                    detail: `Not logged: ${dateStr} at ${time}`,
+                    date: dateStr,
+                  });
+                } else if (hasLog.status === "refused" || hasLog.status === "held") {
+                  collected.push({
+                    id: `med-flag-${med.id}-${dateStr}-${time}`,
+                    category: "medication",
+                    urgency: "warning",
+                    days: 0,
+                    title: `${med.medication_name} ${med.dosage} — ${hasLog.status === "refused" ? "Refused" : "Held"}`,
+                    subtitle: clientName,
+                    detail: `${dateStr} at ${time}`,
+                    date: dateStr,
+                  });
+                }
+              });
+            }
+          });
+
           // Sort: critical first, then by days ascending
           const urgOrder = { critical: 0, warning: 1, upcoming: 2 };
           collected.sort((a, b) => urgOrder[a.urgency] - urgOrder[b.urgency] || a.days - b.days);
@@ -4192,8 +4275,8 @@
 
       const urgColors = { critical: CB.red, warning: CB.amber, upcoming: CB.blue };
       const urgLabels = { critical: "Critical", warning: "Warning", upcoming: "Upcoming" };
-      const catIcons = { training: icons.book, authorization: icons.fileText, document: icons.shield };
-      const catLabels = { training: "Training", authorization: "Authorization", document: "Document" };
+      const catIcons = { training: icons.book, authorization: icons.fileText, document: icons.shield, medication: icons.capsule };
+      const catLabels = { training: "Training", authorization: "Authorization", document: "Document", medication: "Medication" };
 
       return (
         <div>
@@ -4244,6 +4327,7 @@
                   { key: "training", label: "Trainings" },
                   { key: "authorization", label: "Authorizations" },
                   { key: "document", label: "Documents" },
+                  { key: "medication", label: "Medications" },
                 ].map(c => (
                   <button key={c.key} onClick={() => setCatFilter(c.key)} style={{
                     padding: "7px 16px", borderRadius: 8, fontSize: 13, fontWeight: 600, fontFamily: "inherit",
