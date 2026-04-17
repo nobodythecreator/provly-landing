@@ -102,11 +102,11 @@
 
     // Nav items each role can see
     const ROLE_NAV = {
-      owner:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "billing", "finance", "messages", "ai", "migration", "settings"],
-      admin:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "billing", "finance", "messages", "ai", "migration", "settings"],
-      compliance_director:  ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "billing", "finance", "messages", "ai"],
-      residential_director: ["dashboard", "clients", "training", "notes", "evv", "incidents", "alerts", "medications", "goals", "messages"],
-      day_program_director: ["dashboard", "clients", "training", "notes", "evv", "incidents", "alerts", "medications", "goals", "messages"],
+      owner:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "billing", "finance", "docs", "messages", "ai", "migration", "settings"],
+      admin:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "billing", "finance", "docs", "messages", "ai", "migration", "settings"],
+      compliance_director:  ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "billing", "finance", "docs", "messages", "ai"],
+      residential_director: ["dashboard", "clients", "training", "notes", "evv", "incidents", "alerts", "medications", "goals", "docs", "messages"],
+      day_program_director: ["dashboard", "clients", "training", "notes", "evv", "incidents", "alerts", "medications", "goals", "docs", "messages"],
       house_manager:        ["dashboard", "clients", "notes", "evv", "incidents", "medications", "goals", "messages"],
       bcba:                 ["dashboard", "clients", "notes", "compliance", "incidents", "goals", "messages"],
       rn:                   ["dashboard", "clients", "notes", "incidents", "medications", "goals", "messages"],
@@ -500,6 +500,7 @@
         { key: "goals", label: "PCSP Goals", icon: icons.crosshair },
         { key: "billing", label: "Billing", icon: icons.barChart },
         { key: "finance", label: "Finance", icon: icons.dollar },
+        { key: "docs", label: "Doc Engine", icon: icons.fileText },
         { key: "ai", label: "AI Intelligence", icon: icons.zap },
         { key: "messages", label: "Messages", icon: icons.mail },
         { key: "migration", label: "Data Migration", icon: icons.upload },
@@ -6118,6 +6119,513 @@
     }
 
 
+
+    // ═══════════════════════════════════════════════════════════════
+    // DOCUMENT ENGINE — PDF generation from Hope Haven templates
+    // ═══════════════════════════════════════════════════════════════
+    const DOC_TEMPLATES = [
+      { id: "staff_cover_sheet", name: "Staff File Cover Sheet", category: "Staff", desc: "Sections A–D checklist with completion status", entity: "staff" },
+      { id: "staff_training_log", name: "Staff Training Log", category: "Staff", desc: "All completed trainings with dates and expiration", entity: "staff" },
+      { id: "staff_compliance", name: "Staff Compliance Summary", category: "Staff", desc: "Per-staff training and document compliance overview", entity: "staff" },
+      { id: "client_face_sheet", name: "Client Face Sheet", category: "Client", desc: "Tab 1 — demographics, contacts, medical info", entity: "client" },
+      { id: "client_binder_cover", name: "Client Binder Cover Sheet", category: "Client", desc: "Tabs 1–10 document checklist with status", entity: "client" },
+      { id: "mar_monthly", name: "Medication Tracking Sheet", category: "Client", desc: "Tab 3 — Monthly MAR for state review", entity: "client" },
+      { id: "pcsp_summary", name: "PCSP Quarterly Summary", category: "Client", desc: "Tab 6 — Goals, progress ratings, trend analysis", entity: "client" },
+      { id: "incident_report", name: "Incident Report", category: "Operations", desc: "Printable incident report with details and review", entity: "incident" },
+      { id: "service_note_detail", name: "Service Note Detail", category: "Operations", desc: "Individual service note with billing info", entity: "note" },
+      { id: "monthly_billing", name: "Monthly Billing Summary", category: "Finance", desc: "All claims for a billing period by client and code", entity: "org" },
+      { id: "emergency_contacts", name: "Emergency Contact Sheet", category: "Client", desc: "Printable emergency contacts for posting", entity: "client" },
+      { id: "rights_ack", name: "Rights Acknowledgment", category: "Client", desc: "Tab 7 — Individual rights form for signature", entity: "client" },
+      { id: "belongings_inventory", name: "Personal Belongings Inventory", category: "Client", desc: "Tab 8 — Belongings log for move-in/out", entity: "client" },
+      { id: "org_compliance_report", name: "Organization Compliance Report", category: "Operations", desc: "Full compliance dashboard export with scores", entity: "org" },
+    ];
+
+    function DocEnginePage() {
+      const [selectedTemplate, setSelectedTemplate] = useState(null);
+      const [entityId, setEntityId] = useState("");
+      const [staffList, setStaffList] = useState([]);
+      const [clientList, setClientList] = useState([]);
+      const [incidents, setIncidents] = useState([]);
+      const [generating, setGenerating] = useState(false);
+      const [catFilter, setCatFilter] = useState("all");
+      const { isMobile } = useMobile();
+      const { addToast } = useToast();
+      const { orgId } = useAuth();
+
+      useEffect(() => {
+        Promise.all([
+          supabase.from("staff").select("id, first_name, last_name, role, hire_date, is_active").eq("is_active", true).order("last_name"),
+          supabase.from("persons").select("id, first_name, last_name, date_of_birth, medicaid_number, is_active").eq("is_active", true).order("last_name"),
+          supabase.from("incidents").select("id, incident_type, severity, occurred_at, status, description").order("occurred_at", { ascending: false }).limit(50),
+        ]).then(([s, c, inc]) => {
+          setStaffList(s.data || []);
+          setClientList(c.data || []);
+          setIncidents(inc.data || []);
+        });
+      }, []);
+
+      const pdfHeader = (doc, title, subtitle) => {
+        doc.setFontSize(18); doc.setFont(undefined, "bold"); doc.text("Hope Haven Services Inc.", 20, 20);
+        doc.setFontSize(10); doc.setFont(undefined, "normal"); doc.text("DHHS Contract: DHHS91172", 20, 27);
+        doc.setFontSize(14); doc.setFont(undefined, "bold"); doc.text(title, 20, 38);
+        if (subtitle) { doc.setFontSize(10); doc.setFont(undefined, "normal"); doc.text(subtitle, 20, 45); }
+        doc.setLineWidth(0.5); doc.line(20, subtitle ? 48 : 42, 190, subtitle ? 48 : 42);
+        return subtitle ? 55 : 48;
+      };
+
+      const pdfFooter = (doc) => {
+        const pages = doc.internal.getNumberOfPages();
+        for (let i = 1; i <= pages; i++) {
+          doc.setPage(i);
+          doc.setFontSize(8); doc.setFont(undefined, "normal"); doc.setTextColor(150);
+          doc.text(`Generated by Provly — ${new Date().toLocaleString()} — Page ${i} of ${pages}`, 20, 285);
+          doc.setTextColor(0);
+        }
+      };
+
+      const generatePDF = async () => {
+        if (!selectedTemplate) return;
+        const tmpl = selectedTemplate;
+        setGenerating(true);
+        const { jsPDF } = window.jspdf;
+
+        try {
+          // ═══ STAFF COVER SHEET ═══
+          if (tmpl.id === "staff_cover_sheet") {
+            const { data: staff } = await supabase.from("staff").select("*").eq("id", entityId).single();
+            const { data: docs } = await supabase.from("documents").select("doc_type, file_name, uploaded_at, expires_at").eq("staff_id", entityId).eq("is_archived", false);
+            if (!staff) { addToast("Staff not found", "error"); setGenerating(false); return; }
+            const doc = new jsPDF();
+            let y = pdfHeader(doc, "Staff File Cover Sheet", `${staff.first_name} ${staff.last_name} — ${staff.role || "DSP"}`);
+            doc.setFontSize(10);
+            doc.text(`Hire Date: ${staff.hire_date || "N/A"}  |  Email: ${staff.email || "N/A"}  |  Phone: ${staff.phone || "N/A"}`, 20, y); y += 10;
+            const uploadedTypes = new Set((docs || []).map(d => d.doc_type));
+            const sections = {};
+            STAFF_DOC_TYPES.forEach(dt => { if (!sections[dt.section]) sections[dt.section] = []; sections[dt.section].push(dt); });
+            Object.entries(sections).forEach(([section, types]) => {
+              doc.setFontSize(11); doc.setFont(undefined, "bold"); doc.text(section, 20, y); y += 6;
+              doc.setFontSize(9); doc.setFont(undefined, "normal");
+              types.forEach(t => {
+                if (y > 270) { doc.addPage(); y = 20; }
+                const has = uploadedTypes.has(t.value);
+                const docRecord = (docs || []).find(d => d.doc_type === t.value);
+                doc.text(`${has ? "☑" : "☐"} ${t.label}${t.required ? " *" : ""}${docRecord?.expires_at ? ` (exp: ${new Date(docRecord.expires_at).toLocaleDateString()})` : ""}`, 24, y); y += 5;
+              });
+              y += 4;
+            });
+            pdfFooter(doc); doc.save(`Staff_Cover_Sheet_${staff.last_name}_${staff.first_name}.pdf`);
+          }
+
+          // ═══ STAFF TRAINING LOG ═══
+          else if (tmpl.id === "staff_training_log") {
+            const { data: staff } = await supabase.from("staff").select("*").eq("id", entityId).single();
+            const { data: trainings } = await supabase.from("staff_trainings").select("completed_at, expires_at, training_topic_definitions(topic_name, category)").eq("staff_id", entityId).order("completed_at", { ascending: false });
+            const doc = new jsPDF();
+            let y = pdfHeader(doc, "Staff Training Log", `${staff.first_name} ${staff.last_name}`);
+            doc.autoTable({
+              startY: y, head: [["Training Topic", "Category", "Completed", "Expires", "Status"]],
+              body: (trainings || []).map(t => {
+                const exp = t.expires_at ? new Date(t.expires_at) : null;
+                const status = !exp ? "No Expiry" : exp < new Date() ? "EXPIRED" : "Current";
+                return [t.training_topic_definitions?.topic_name || "?", t.training_topic_definitions?.category || "", new Date(t.completed_at).toLocaleDateString(), exp ? exp.toLocaleDateString() : "N/A", status];
+              }),
+              styles: { fontSize: 8 }, headStyles: { fillColor: [10, 30, 51] },
+            });
+            pdfFooter(doc); doc.save(`Training_Log_${staff.last_name}.pdf`);
+          }
+
+          // ═══ STAFF COMPLIANCE SUMMARY ═══
+          else if (tmpl.id === "staff_compliance") {
+            const { data: staff } = await supabase.from("staff").select("*").eq("id", entityId).single();
+            const { data: trainings } = await supabase.from("staff_trainings").select("completed_at, expires_at, training_topic_definitions(topic_name, category, deadline_days)").eq("staff_id", entityId);
+            const { data: docs } = await supabase.from("documents").select("doc_type, expires_at").eq("staff_id", entityId).eq("is_archived", false);
+            const doc = new jsPDF();
+            let y = pdfHeader(doc, "Staff Compliance Summary", `${staff.first_name} ${staff.last_name} — ${staff.role || "DSP"}`);
+            const now = new Date();
+            const totalReqDocs = STAFF_DOC_TYPES.filter(d => d.required).length;
+            const uploadedReq = STAFF_DOC_TYPES.filter(d => d.required && (docs || []).some(ud => ud.doc_type === d.value)).length;
+            const expiredDocs = (docs || []).filter(d => d.expires_at && new Date(d.expires_at) < now).length;
+            const totalTrainings = (trainings || []).length;
+            const expiredTrainings = (trainings || []).filter(t => t.expires_at && new Date(t.expires_at) < now).length;
+            doc.setFontSize(10);
+            doc.text(`Documents: ${uploadedReq}/${totalReqDocs} required uploaded  |  ${expiredDocs} expired`, 20, y); y += 6;
+            doc.text(`Trainings: ${totalTrainings} completed  |  ${expiredTrainings} expired`, 20, y); y += 6;
+            doc.text(`Doc Compliance: ${totalReqDocs > 0 ? Math.round((uploadedReq/totalReqDocs)*100) : 100}%  |  Training Compliance: ${totalTrainings > 0 ? Math.round(((totalTrainings-expiredTrainings)/totalTrainings)*100) : 0}%`, 20, y); y += 10;
+            doc.autoTable({
+              startY: y, head: [["Item", "Type", "Status", "Expires"]],
+              body: [
+                ...STAFF_DOC_TYPES.filter(d => d.required).map(d => {
+                  const ud = (docs || []).find(x => x.doc_type === d.value);
+                  return [d.label, "Document", ud ? (ud.expires_at && new Date(ud.expires_at) < now ? "EXPIRED" : "✓ On File") : "✗ Missing", ud?.expires_at ? new Date(ud.expires_at).toLocaleDateString() : "—"];
+                }),
+                ...(trainings || []).map(t => [t.training_topic_definitions?.topic_name || "?", "Training", t.expires_at && new Date(t.expires_at) < now ? "EXPIRED" : "Current", t.expires_at ? new Date(t.expires_at).toLocaleDateString() : "N/A"]),
+              ],
+              styles: { fontSize: 8 }, headStyles: { fillColor: [10, 30, 51] },
+            });
+            pdfFooter(doc); doc.save(`Compliance_Summary_${staff.last_name}.pdf`);
+          }
+
+          // ═══ CLIENT FACE SHEET ═══
+          else if (tmpl.id === "client_face_sheet") {
+            const { data: client } = await supabase.from("persons").select("*").eq("id", entityId).single();
+            const { data: auths } = await supabase.from("person_service_authorizations").select("authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code)").eq("person_id", entityId);
+            const doc = new jsPDF();
+            let y = pdfHeader(doc, "Client Face Sheet — Tab 1", `${client.first_name} ${client.last_name}`);
+            doc.setFontSize(10);
+            const fields = [
+              ["Full Name", `${client.first_name} ${client.last_name}`], ["Date of Birth", client.date_of_birth || "N/A"],
+              ["Medicaid #", client.medicaid_number || "N/A"], ["SSN", client.ssn ? "On file" : "N/A"],
+              ["Address", client.address || "N/A"], ["Phone", client.phone || "N/A"],
+              ["Emergency Contact", client.emergency_contact_name || "N/A"], ["Emergency Phone", client.emergency_contact_phone || "N/A"],
+              ["Physician", client.physician_name || "N/A"], ["Physician Phone", client.physician_phone || "N/A"],
+              ["Diagnosis", client.primary_diagnosis || "N/A"], ["Allergies", client.allergies || "None listed"],
+              ["Support Coordinator", client.support_coordinator || "N/A"], ["Guardian", client.guardian_name || "Self"],
+            ];
+            fields.forEach(([label, val]) => {
+              if (y > 270) { doc.addPage(); y = 20; }
+              doc.setFont(undefined, "bold"); doc.text(`${label}:`, 20, y);
+              doc.setFont(undefined, "normal"); doc.text(val, 70, y); y += 6;
+            });
+            if (auths?.length) {
+              y += 6; doc.setFontSize(12); doc.setFont(undefined, "bold"); doc.text("Service Authorizations", 20, y); y += 8;
+              doc.autoTable({
+                startY: y, head: [["Code", "Units", "Used", "Rate", "Start", "End"]],
+                body: auths.map(a => [a.service_code_definitions?.code || "?", a.authorized_units, a.used_units || 0, a.rate_per_unit ? `$${Number(a.rate_per_unit).toFixed(2)}` : "WS", a.start_date || "—", a.end_date || "—"]),
+                styles: { fontSize: 8 }, headStyles: { fillColor: [0, 137, 123] },
+              });
+            }
+            pdfFooter(doc); doc.save(`Face_Sheet_${client.last_name}_${client.first_name}.pdf`);
+          }
+
+          // ═══ CLIENT BINDER COVER ═══
+          else if (tmpl.id === "client_binder_cover") {
+            const { data: client } = await supabase.from("persons").select("*").eq("id", entityId).single();
+            const { data: docs } = await supabase.from("documents").select("doc_type, file_name, uploaded_at, expires_at").eq("person_id", entityId).eq("is_archived", false);
+            const doc = new jsPDF();
+            let y = pdfHeader(doc, "Client Binder Cover Sheet — Tabs 1–10", `${client.first_name} ${client.last_name}`);
+            const uploadedTypes = new Set((docs || []).map(d => d.doc_type));
+            const tabs = {};
+            CLIENT_DOC_TYPES.forEach(dt => { const key = `Tab ${dt.tab}`; if (!tabs[key]) tabs[key] = []; tabs[key].push(dt); });
+            Object.entries(tabs).forEach(([tabName, types]) => {
+              if (y > 265) { doc.addPage(); y = 20; }
+              doc.setFontSize(11); doc.setFont(undefined, "bold"); doc.text(tabName, 20, y); y += 6;
+              doc.setFontSize(9); doc.setFont(undefined, "normal");
+              types.forEach(t => {
+                if (y > 275) { doc.addPage(); y = 20; }
+                const has = uploadedTypes.has(t.value);
+                doc.text(`${has ? "☑" : "☐"} ${t.label}${t.required ? " *" : ""}`, 24, y); y += 5;
+              });
+              y += 3;
+            });
+            pdfFooter(doc); doc.save(`Binder_Cover_${client.last_name}.pdf`);
+          }
+
+          // ═══ MEDICATION TRACKING SHEET ═══
+          else if (tmpl.id === "mar_monthly") {
+            const { data: client } = await supabase.from("persons").select("first_name, last_name").eq("id", entityId).single();
+            const { data: meds } = await supabase.from("medications").select("*").eq("person_id", entityId).eq("is_active", true);
+            const startDate = new Date(); startDate.setDate(1);
+            const endDate = new Date(startDate.getFullYear(), startDate.getMonth() + 1, 0);
+            const { data: logs } = await supabase.from("medication_logs").select("medication_id, scheduled_date, scheduled_time, status").eq("person_id", entityId).gte("scheduled_date", startDate.toISOString().split("T")[0]).lte("scheduled_date", endDate.toISOString().split("T")[0]);
+            const doc = new jsPDF("landscape");
+            const monthName = startDate.toLocaleString("default", { month: "long", year: "numeric" });
+            let y = pdfHeader(doc, `Medication Administration Record — ${monthName}`, `${client.first_name} ${client.last_name}`);
+            const daysInMonth = endDate.getDate();
+            const dayHeaders = Array.from({ length: daysInMonth }, (_, i) => String(i + 1));
+            (meds || []).forEach(med => {
+              if (y > 170) { doc.addPage(); y = 20; }
+              doc.setFontSize(9); doc.setFont(undefined, "bold");
+              doc.text(`${med.medication_name} ${med.dosage} — ${med.route} — ${med.frequency}`, 20, y); y += 5;
+              (med.schedule_times || ["08:00"]).forEach(time => {
+                const row = dayHeaders.map(d => {
+                  const dateStr = `${startDate.getFullYear()}-${String(startDate.getMonth()+1).padStart(2,"0")}-${d.padStart(2,"0")}`;
+                  const log = (logs || []).find(l => l.medication_id === med.id && l.scheduled_date === dateStr && l.scheduled_time === time);
+                  return log ? { given: "✓", refused: "R", held: "H", not_available: "NA", self_administered: "SA" }[log.status] || "?" : "";
+                });
+                doc.autoTable({
+                  startY: y, head: [[`${time}`, ...dayHeaders]], body: [["", ...row]],
+                  styles: { fontSize: 6, cellPadding: 1.5 }, headStyles: { fillColor: [10, 30, 51], fontSize: 6 },
+                  columnStyles: Object.fromEntries(dayHeaders.map((_, i) => [i + 1, { cellWidth: 7 }])),
+                  margin: { left: 20 },
+                });
+                y = doc.lastAutoTable.finalY + 4;
+              });
+              y += 4;
+            });
+            doc.setFontSize(7); doc.text("Legend: ✓ = Given, R = Refused, H = Held, NA = Not Available, SA = Self-Administered", 20, y);
+            pdfFooter(doc); doc.save(`MAR_${monthName.replace(" ","_")}_${client.last_name}.pdf`);
+          }
+
+          // ═══ PCSP QUARTERLY SUMMARY ═══
+          else if (tmpl.id === "pcsp_summary") {
+            const { data: client } = await supabase.from("persons").select("first_name, last_name").eq("id", entityId).single();
+            const { data: goals } = await supabase.from("pcsp_goals").select("*").eq("person_id", entityId).neq("status", "discontinued");
+            const { data: notes } = await supabase.from("pcsp_progress_notes").select("*, staff(first_name, last_name)").eq("person_id", entityId).order("note_date", { ascending: false });
+            const doc = new jsPDF();
+            const now = new Date(); const threeAgo = new Date(now); threeAgo.setMonth(threeAgo.getMonth() - 3);
+            let y = pdfHeader(doc, "PCSP Quarterly Summary — Tab 6", `${client.first_name} ${client.last_name} — ${threeAgo.toLocaleDateString()} to ${now.toLocaleDateString()}`);
+            (goals || []).forEach((g, gi) => {
+              if (y > 250) { doc.addPage(); y = 20; }
+              doc.setFontSize(11); doc.setFont(undefined, "bold"); doc.text(`Goal ${gi+1}: ${g.domain} [${g.status}]`, 20, y); y += 6;
+              doc.setFontSize(9); doc.setFont(undefined, "normal");
+              const lines = doc.splitTextToSize(g.goal_description, 170); lines.forEach(l => { doc.text(l, 20, y); y += 4; }); y += 2;
+              if (g.target_criteria) { doc.text(`Target: ${g.target_criteria}`, 20, y); y += 5; }
+              const gNotes = (notes || []).filter(n => n.goal_id === g.id && new Date(n.note_date) >= threeAgo);
+              if (gNotes.length > 0) {
+                const avg = (gNotes.reduce((s,n) => s + (n.progress_rating||0), 0) / gNotes.length).toFixed(1);
+                doc.text(`Progress Notes: ${gNotes.length} | Avg Rating: ${avg}/5`, 20, y); y += 5;
+                gNotes.slice(0, 4).forEach(n => {
+                  if (y > 270) { doc.addPage(); y = 20; }
+                  doc.text(`  ${n.note_date} [${n.progress_rating}/5]: ${n.narrative?.substring(0, 100) || ""}`, 24, y); y += 4;
+                });
+              } else { doc.text("  No progress notes this quarter.", 24, y); y += 4; }
+              y += 6;
+            });
+            pdfFooter(doc); doc.save(`PCSP_Summary_${client.last_name}.pdf`);
+          }
+
+          // ═══ INCIDENT REPORT ═══
+          else if (tmpl.id === "incident_report") {
+            const { data: inc } = await supabase.from("incidents").select("*, persons(first_name, last_name), reporter:staff!incidents_reported_by_fkey(first_name, last_name), reviewer:staff!incidents_reviewed_by_fkey(first_name, last_name)").eq("id", entityId).single();
+            if (!inc) { addToast("Incident not found", "error"); setGenerating(false); return; }
+            const doc = new jsPDF();
+            let y = pdfHeader(doc, `Incident Report — ${inc.incident_type?.replace(/_/g, " ") || "Unknown"}`, `Severity: ${inc.severity} | Status: ${inc.status}`);
+            doc.setFontSize(10);
+            const fields = [
+              ["Date/Time", inc.occurred_at ? new Date(inc.occurred_at).toLocaleString() : "N/A"],
+              ["Client", inc.persons ? `${inc.persons.first_name} ${inc.persons.last_name}` : "N/A"],
+              ["Location", inc.location || "N/A"],
+              ["Reported By", inc.reporter ? `${inc.reporter.first_name} ${inc.reporter.last_name}` : "N/A"],
+              ["Filed", inc.created_at ? new Date(inc.created_at).toLocaleString() : "N/A"],
+            ];
+            fields.forEach(([l, v]) => { doc.setFont(undefined, "bold"); doc.text(`${l}:`, 20, y); doc.setFont(undefined, "normal"); doc.text(v, 60, y); y += 6; });
+            y += 4; doc.setFont(undefined, "bold"); doc.text("Description:", 20, y); y += 5;
+            doc.setFont(undefined, "normal"); const descLines = doc.splitTextToSize(inc.description || "", 170); descLines.forEach(l => { if (y > 270) { doc.addPage(); y = 20; } doc.text(l, 20, y); y += 4; });
+            if (inc.immediate_actions) { y += 4; doc.setFont(undefined, "bold"); doc.text("Immediate Actions:", 20, y); y += 5; doc.setFont(undefined, "normal"); doc.splitTextToSize(inc.immediate_actions, 170).forEach(l => { doc.text(l, 20, y); y += 4; }); }
+            if (inc.injuries_desc) { y += 4; doc.setFont(undefined, "bold"); doc.text("Injuries:", 20, y); y += 5; doc.setFont(undefined, "normal"); doc.text(inc.injuries_desc, 20, y); y += 4; }
+            if (inc.review_notes) { y += 6; doc.setFont(undefined, "bold"); doc.text("Review Notes:", 20, y); y += 5; doc.setFont(undefined, "normal"); doc.splitTextToSize(inc.review_notes, 170).forEach(l => { doc.text(l, 20, y); y += 4; }); }
+            y += 12; doc.line(20, y, 90, y); doc.text("Signature", 20, y + 4); doc.line(110, y, 190, y); doc.text("Date", 110, y + 4);
+            pdfFooter(doc); doc.save(`Incident_Report_${inc.id?.slice(0, 8)}.pdf`);
+          }
+
+          // ═══ MONTHLY BILLING SUMMARY ═══
+          else if (tmpl.id === "monthly_billing") {
+            const monthStart = new Date(); monthStart.setDate(1); monthStart.setMonth(monthStart.getMonth() - 1);
+            const monthEnd = new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0);
+            const monthLabel = monthStart.toLocaleString("default", { month: "long", year: "numeric" });
+            const { data: claims } = await supabase.from("claim_submissions").select("*, persons(first_name, last_name), contracts(contract_number)").gte("service_date", monthStart.toISOString().split("T")[0]).lte("service_date", monthEnd.toISOString().split("T")[0]);
+            const doc = new jsPDF();
+            let y = pdfHeader(doc, `Monthly Billing Summary — ${monthLabel}`, `Hope Haven Services Inc. — DHHS91172`);
+            const total = (claims || []).reduce((s, c) => s + Number(c.billed_amount || 0), 0);
+            const paid = (claims || []).reduce((s, c) => s + Number(c.paid_amount || 0), 0);
+            doc.setFontSize(10); doc.text(`Total Claims: ${(claims || []).length}  |  Billed: $${total.toFixed(2)}  |  Paid: $${paid.toFixed(2)}  |  Outstanding: $${(total - paid).toFixed(2)}`, 20, y); y += 8;
+            doc.autoTable({
+              startY: y, head: [["Date", "Client", "Code", "Contract", "Billed", "Paid", "Status"]],
+              body: (claims || []).map(c => [c.service_date || "—", c.persons ? `${c.persons.first_name} ${c.persons.last_name}` : "—", c.service_code || "—", c.contracts?.contract_number || "—", `$${Number(c.billed_amount||0).toFixed(2)}`, `$${Number(c.paid_amount||0).toFixed(2)}`, c.claim_status]),
+              styles: { fontSize: 8 }, headStyles: { fillColor: [10, 30, 51] },
+            });
+            pdfFooter(doc); doc.save(`Billing_Summary_${monthLabel.replace(" ", "_")}.pdf`);
+          }
+
+          // ═══ EMERGENCY CONTACTS ═══
+          else if (tmpl.id === "emergency_contacts") {
+            const { data: client } = await supabase.from("persons").select("*").eq("id", entityId).single();
+            const doc = new jsPDF();
+            let y = pdfHeader(doc, "Emergency Contact Sheet", `${client.first_name} ${client.last_name}`);
+            doc.setFontSize(12);
+            const contacts = [
+              ["Primary Emergency Contact", client.emergency_contact_name, client.emergency_contact_phone, client.emergency_contact_relationship],
+              ["Secondary Emergency Contact", client.emergency_contact2_name, client.emergency_contact2_phone, client.emergency_contact2_relationship],
+              ["Physician", client.physician_name, client.physician_phone, "Primary Care"],
+              ["Guardian/Representative", client.guardian_name, client.guardian_phone, client.guardian_relationship],
+              ["Support Coordinator", client.support_coordinator, client.support_coordinator_phone, "SCE"],
+            ];
+            contacts.forEach(([label, name, phone, rel]) => {
+              if (y > 260) { doc.addPage(); y = 20; }
+              doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.text(label, 20, y); y += 6;
+              doc.setFont(undefined, "normal"); doc.setFontSize(10);
+              doc.text(`Name: ${name || "N/A"}`, 24, y); y += 5;
+              doc.text(`Phone: ${phone || "N/A"}`, 24, y); y += 5;
+              doc.text(`Relationship: ${rel || "N/A"}`, 24, y); y += 8;
+            });
+            y += 8; doc.setFontSize(9); doc.setFont(undefined, "bold"); doc.text("In case of emergency, call 911 first.", 20, y);
+            pdfFooter(doc); doc.save(`Emergency_Contacts_${client.last_name}.pdf`);
+          }
+
+          // ═══ RIGHTS ACKNOWLEDGMENT ═══
+          else if (tmpl.id === "rights_ack") {
+            const { data: client } = await supabase.from("persons").select("first_name, last_name").eq("id", entityId).single();
+            const doc = new jsPDF();
+            let y = pdfHeader(doc, "Individual Rights Acknowledgment — Tab 7", `${client.first_name} ${client.last_name}`);
+            doc.setFontSize(10);
+            const rights = [
+              "Be treated with dignity and respect at all times",
+              "Be free from abuse, neglect, and exploitation",
+              "Privacy regarding personal information and records",
+              "Access to personal records upon request",
+              "Participate in planning and making decisions about services",
+              "Choose where to live, work, and spend time",
+              "Manage personal finances or choose a representative",
+              "Access medical care and treatment of choice",
+              "File a grievance without fear of retaliation",
+              "Communicate freely with family, friends, and advocates",
+              "Be free from unnecessary restraints or restrictions",
+              "Vote and participate in community activities",
+            ];
+            doc.setFont(undefined, "bold"); doc.text("As a person receiving services, you have the right to:", 20, y); y += 8;
+            doc.setFont(undefined, "normal");
+            rights.forEach((r, i) => { doc.text(`${i + 1}. ${r}`, 24, y); y += 6; });
+            y += 12; doc.text("I acknowledge that I have been informed of my rights and understand them.", 20, y);
+            y += 16; doc.line(20, y, 100, y); doc.text("Individual Signature", 20, y + 4);
+            doc.line(120, y, 190, y); doc.text("Date", 120, y + 4);
+            y += 16; doc.line(20, y, 100, y); doc.text("Staff Witness Signature", 20, y + 4);
+            doc.line(120, y, 190, y); doc.text("Date", 120, y + 4);
+            pdfFooter(doc); doc.save(`Rights_Acknowledgment_${client.last_name}.pdf`);
+          }
+
+          // ═══ BELONGINGS INVENTORY ═══
+          else if (tmpl.id === "belongings_inventory") {
+            const { data: client } = await supabase.from("persons").select("first_name, last_name").eq("id", entityId).single();
+            const doc = new jsPDF();
+            let y = pdfHeader(doc, "Personal Belongings Inventory — Tab 8", `${client.first_name} ${client.last_name}`);
+            doc.setFontSize(9); doc.text(`Date of Inventory: ${new Date().toLocaleDateString()}`, 20, y); y += 8;
+            doc.autoTable({
+              startY: y, head: [["#", "Item Description", "Condition", "Move-In", "Move-Out", "Notes"]],
+              body: Array.from({ length: 20 }, (_, i) => [i + 1, "", "", "", "", ""]),
+              styles: { fontSize: 8, minCellHeight: 10 }, headStyles: { fillColor: [10, 30, 51] },
+            });
+            y = doc.lastAutoTable.finalY + 12;
+            doc.line(20, y, 100, y); doc.text("Individual Signature", 20, y + 4);
+            doc.line(120, y, 190, y); doc.text("Date", 120, y + 4);
+            y += 16; doc.line(20, y, 100, y); doc.text("Staff Witness Signature", 20, y + 4);
+            doc.line(120, y, 190, y); doc.text("Date", 120, y + 4);
+            pdfFooter(doc); doc.save(`Belongings_Inventory_${client.last_name}.pdf`);
+          }
+
+          // ═══ ORG COMPLIANCE REPORT ═══
+          else if (tmpl.id === "org_compliance_report") {
+            const { data: staffAll } = await supabase.from("staff").select("id, first_name, last_name, role, is_active").eq("is_active", true);
+            const { data: clientAll } = await supabase.from("persons").select("id, first_name, last_name, is_active").eq("is_active", true);
+            const { data: trainAll } = await supabase.from("staff_trainings").select("staff_id, expires_at");
+            const { data: docAll } = await supabase.from("documents").select("staff_id, person_id, doc_type, expires_at").eq("is_archived", false);
+            const doc = new jsPDF();
+            let y = pdfHeader(doc, "Organization Compliance Report", `Hope Haven Services Inc. — ${new Date().toLocaleDateString()}`);
+            doc.setFontSize(10);
+            const now = new Date();
+            const expTrainings = (trainAll || []).filter(t => t.expires_at && new Date(t.expires_at) < now).length;
+            const expDocs = (docAll || []).filter(d => d.expires_at && new Date(d.expires_at) < now).length;
+            doc.text(`Active Staff: ${(staffAll||[]).length}  |  Active Clients: ${(clientAll||[]).length}`, 20, y); y += 6;
+            doc.text(`Expired Trainings: ${expTrainings}  |  Expired Documents: ${expDocs}`, 20, y); y += 10;
+            doc.autoTable({
+              startY: y, head: [["Staff Member", "Role", "Trainings", "Expired", "Req Docs", "On File"]],
+              body: (staffAll || []).map(s => {
+                const sTrains = (trainAll || []).filter(t => t.staff_id === s.id);
+                const sExpired = sTrains.filter(t => t.expires_at && new Date(t.expires_at) < now).length;
+                const reqDocs = STAFF_DOC_TYPES.filter(d => d.required).length;
+                const onFile = STAFF_DOC_TYPES.filter(d => d.required && (docAll || []).some(ud => ud.staff_id === s.id && ud.doc_type === d.value)).length;
+                return [`${s.first_name} ${s.last_name}`, s.role || "DSP", sTrains.length, sExpired, reqDocs, onFile];
+              }),
+              styles: { fontSize: 8 }, headStyles: { fillColor: [10, 30, 51] },
+            });
+            pdfFooter(doc); doc.save(`Org_Compliance_Report_${new Date().toISOString().split("T")[0]}.pdf`);
+          }
+
+          else {
+            addToast("Template not yet implemented", "error");
+            setGenerating(false); return;
+          }
+
+          addToast("PDF generated — check your downloads", "success");
+        } catch (e) {
+          addToast(`PDF generation failed: ${e.message}`, "error");
+        }
+        setGenerating(false);
+      };
+
+      const filteredTemplates = catFilter === "all" ? DOC_TEMPLATES : DOC_TEMPLATES.filter(t => t.category === catFilter);
+      const categories = [...new Set(DOC_TEMPLATES.map(t => t.category))];
+
+      const entitySelector = () => {
+        if (!selectedTemplate) return null;
+        const et = selectedTemplate.entity;
+        if (et === "staff") return (
+          <select value={entityId} onChange={e => setEntityId(e.target.value)} style={{ padding: "10px 16px", borderRadius: 10, border: `1px solid ${CB.border}`, fontSize: 14, fontFamily: "inherit", background: CB.white, minWidth: 240 }}>
+            <option value="">Select staff member...</option>
+            {staffList.map(s => <option key={s.id} value={s.id}>{s.last_name}, {s.first_name} — {s.role || "DSP"}</option>)}
+          </select>
+        );
+        if (et === "client") return (
+          <select value={entityId} onChange={e => setEntityId(e.target.value)} style={{ padding: "10px 16px", borderRadius: 10, border: `1px solid ${CB.border}`, fontSize: 14, fontFamily: "inherit", background: CB.white, minWidth: 240 }}>
+            <option value="">Select client...</option>
+            {clientList.map(c => <option key={c.id} value={c.id}>{c.last_name}, {c.first_name}</option>)}
+          </select>
+        );
+        if (et === "incident") return (
+          <select value={entityId} onChange={e => setEntityId(e.target.value)} style={{ padding: "10px 16px", borderRadius: 10, border: `1px solid ${CB.border}`, fontSize: 14, fontFamily: "inherit", background: CB.white, minWidth: 240 }}>
+            <option value="">Select incident...</option>
+            {incidents.map(i => <option key={i.id} value={i.id}>{new Date(i.occurred_at).toLocaleDateString()} — {i.incident_type?.replace(/_/g, " ")} [{i.severity}]</option>)}
+          </select>
+        );
+        return null; // org-level templates don't need entity selection
+      };
+
+      return (
+        <div>
+          <PageHeader title="Document Engine" subtitle="Generate PDF documents from Hope Haven templates" />
+          {/* Category Filter */}
+          <div style={{ display: "flex", gap: 4, marginBottom: 20, background: CB.white, borderRadius: 12, padding: 4, border: `1px solid ${CB.border}`, width: "fit-content", flexWrap: "wrap" }}>
+            <button onClick={() => setCatFilter("all")} style={{ padding: "9px 18px", borderRadius: 9, border: "none", fontSize: 13, fontWeight: 600, fontFamily: "inherit", cursor: "pointer", background: catFilter === "all" ? CB.navy : "transparent", color: catFilter === "all" ? CB.white : CB.textMid }}>All ({DOC_TEMPLATES.length})</button>
+            {categories.map(cat => <button key={cat} onClick={() => setCatFilter(cat)} style={{ padding: "9px 18px", borderRadius: 9, border: "none", fontSize: 13, fontWeight: 600, fontFamily: "inherit", cursor: "pointer", background: catFilter === cat ? CB.navy : "transparent", color: catFilter === cat ? CB.white : CB.textMid }}>{cat}</button>)}
+          </div>
+
+          {/* Template Grid */}
+          <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3, 1fr)", gap: 14, marginBottom: 24 }}>
+            {filteredTemplates.map((t, i) => {
+              const isSelected = selectedTemplate?.id === t.id;
+              const catColor = { Staff: CB.blue, Client: CB.teal, Operations: CB.amber, Finance: CB.green }[t.category] || CB.navy;
+              return (
+                <button key={t.id} onClick={() => { setSelectedTemplate(isSelected ? null : t); setEntityId(""); }} style={{
+                  background: isSelected ? `${catColor}08` : CB.white, borderRadius: 14, padding: 18,
+                  border: `1.5px solid ${isSelected ? catColor : CB.border}`, cursor: "pointer",
+                  textAlign: "left", fontFamily: "inherit", boxShadow: CB.cardShadow,
+                  animation: `fadeIn 0.3s ease ${i * 0.03}s both`, transition: "all 0.15s",
+                }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                    <Badge text={t.category} color={catColor} />
+                    {isSelected && <div style={{ width: 8, height: 8, borderRadius: "50%", background: catColor }} />}
+                  </div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>{t.name}</div>
+                  <div style={{ fontSize: 12, color: CB.textMid, lineHeight: 1.4 }}>{t.desc}</div>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Generate Panel */}
+          {selectedTemplate && (
+            <div style={{
+              background: CB.white, borderRadius: 16, padding: 24, border: `1px solid ${CB.border}`,
+              boxShadow: CB.cardShadow, animation: "fadeIn 0.3s ease",
+            }}>
+              <h3 style={{ fontSize: 16, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>{selectedTemplate.name}</h3>
+              <p style={{ fontSize: 13, color: CB.textMid, marginBottom: 16 }}>{selectedTemplate.desc}</p>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                {entitySelector()}
+                <button onClick={generatePDF} disabled={generating || (selectedTemplate.entity !== "org" && !entityId)} style={{
+                  padding: "10px 24px", borderRadius: 10, border: "none", background: CB.teal, color: CB.white,
+                  fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                  opacity: (generating || (selectedTemplate.entity !== "org" && !entityId)) ? 0.5 : 1,
+                  display: "flex", alignItems: "center", gap: 8,
+                }}>
+                  {generating ? <><Spinner size={14} color={CB.white} /> Generating...</> : <>{icons.fileText({ size: 16 })} Generate PDF</>}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // ORG UNITS — recursive tree builder (UPI-compatible structure)
     // ═══════════════════════════════════════════════════════════════
@@ -7755,6 +8263,7 @@
             <div style={{ display: "flex", gap: 4, background: CB.cream, padding: 4, borderRadius: 12 }}>
               <TabBtn value="inbox" label="Inbox" count={tab === "inbox" ? unreadCount : 0} />
               <TabBtn value="sent" label="Sent" />
+              <TabBtn value="secure" label="Secure Email" />
             </div>
             <div style={{ position: "relative" }}>
               {icons.search({ size: 16, color: CB.textLight, style: { position: "absolute", left: 12, top: 11 } })}
@@ -7763,7 +8272,97 @@
             </div>
           </div>
 
-          {/* Message list */}
+          {/* Secure Email Tab */}
+          {tab === "secure" && (() => {
+            const SecureEmail = () => {
+              const [secForm, setSecForm] = useState({ recipient_name: "", recipient_email: "", recipient_type: "sce", subject: "", body: "", include_phi: false });
+              const templates = {
+                sce: { label: "Support Coordinator", subject: "Service Update — [Client]", body: "Dear [SCE Name],\n\nI am writing to provide an update regarding services for [Client Name].\n\n[Details]\n\nPlease do not hesitate to contact us with questions.\n\nSincerely,\nHope Haven Services Inc." },
+                physician: { label: "Physician", subject: "Medical Update — [Client]", body: "Dear Dr. [Name],\n\nThis letter is regarding your patient, [Client Name], who receives residential and community support services through Hope Haven Services Inc.\n\n[Medical details]\n\nPlease contact us at your earliest convenience.\n\nSincerely,\nHope Haven Services Inc." },
+                family: { label: "Family / Guardian", subject: "Monthly Update — [Client]", body: "Dear [Family Member],\n\nWe hope this message finds you well. Below is an update on [Client Name]'s services and progress this month.\n\n[Update details]\n\nWarm regards,\nHope Haven Services Inc." },
+                dspd: { label: "DSPD / State", subject: "Provider Communication — DHHS91172", body: "To Whom It May Concern,\n\nHope Haven Services Inc. (DHHS Contract #DHHS91172) is writing regarding:\n\n[Details]\n\nPlease contact us at hopehaven@hopehavenservices.org for any questions.\n\nSincerely,\nHope Haven Services Inc." },
+              };
+              const loadTemplate = (type) => {
+                const t = templates[type];
+                setSecForm(f => ({ ...f, recipient_type: type, subject: t.subject, body: t.body }));
+              };
+              const generateSecurePDF = () => {
+                if (!secForm.subject || !secForm.body) return addToast("Subject and body required", "error");
+                const { jsPDF } = window.jspdf;
+                const doc = new jsPDF();
+                doc.setFontSize(18); doc.setFont(undefined, "bold"); doc.text("Hope Haven Services Inc.", 20, 20);
+                doc.setFontSize(10); doc.setFont(undefined, "normal"); doc.text("DHHS Contract: DHHS91172 | hopehaven@hopehavenservices.org", 20, 27);
+                doc.setFontSize(8); doc.text("CONFIDENTIAL — This communication may contain Protected Health Information (PHI)", 20, 33);
+                doc.setLineWidth(0.5); doc.line(20, 36, 190, 36);
+                let y = 44;
+                doc.setFontSize(10); doc.text(`Date: ${new Date().toLocaleDateString()}`, 20, y); y += 6;
+                doc.text(`To: ${secForm.recipient_name || "Recipient"}`, 20, y); y += 6;
+                if (secForm.recipient_email) { doc.text(`Email: ${secForm.recipient_email}`, 20, y); y += 6; }
+                doc.text(`Re: ${secForm.subject}`, 20, y); y += 10;
+                doc.setFontSize(10);
+                const lines = doc.splitTextToSize(secForm.body, 170);
+                lines.forEach(line => { if (y > 270) { doc.addPage(); y = 20; } doc.text(line, 20, y); y += 5; });
+                y += 16; doc.line(20, y, 90, y); doc.text("Authorized Signature", 20, y + 5);
+                doc.line(110, y, 190, y); doc.text("Date", 110, y + 5);
+                const pages = doc.internal.getNumberOfPages();
+                for (let i = 1; i <= pages; i++) { doc.setPage(i); doc.setFontSize(7); doc.setTextColor(150); doc.text(`Generated by Provly — HIPAA Secure Communication — Page ${i}/${pages}`, 20, 285); doc.setTextColor(0); }
+                doc.save(`Secure_Letter_${secForm.recipient_type}_${new Date().toISOString().split("T")[0]}.pdf`);
+                addToast("Secure PDF generated — check downloads", "success");
+                // Log the communication
+                if (myStaffId) {
+                  supabase.from("messages").insert({
+                    org_id: orgId, sender_staff_id: myStaffId, recipient_staff_id: myStaffId,
+                    subject: `[Secure Email] ${secForm.subject}`,
+                    body: `External secure communication sent to: ${secForm.recipient_name} (${secForm.recipient_email || "N/A"})\nType: ${templates[secForm.recipient_type]?.label || secForm.recipient_type}\n\n--- Message ---\n${secForm.body.substring(0, 500)}`,
+                    is_urgent: false,
+                  }).then(() => {});
+                }
+              };
+              const copyToClipboard = () => {
+                const text = `To: ${secForm.recipient_name} <${secForm.recipient_email}>\nSubject: ${secForm.subject}\n\n${secForm.body}\n\n---\nThis message was composed via Provly Secure Communications.\nHope Haven Services Inc. | DHHS91172`;
+                navigator.clipboard.writeText(text);
+                addToast("Copied to clipboard", "success");
+              };
+              const fs = { width: "100%", padding: "10px 14px", borderRadius: 10, border: `1px solid ${CB.border}`, fontSize: 14, fontFamily: "inherit", background: CB.cream };
+              return (
+                <div style={{ background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, padding: 24 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+                    {icons.lock({ size: 18, color: CB.teal })}
+                    <h3 style={{ fontSize: 16, fontWeight: 700, color: CB.navy, margin: 0 }}>Secure External Communication</h3>
+                  </div>
+                  <p style={{ fontSize: 13, color: CB.textMid, marginBottom: 16 }}>Compose secure letters to support coordinators, physicians, families, or DSPD. Generate as PDF for secure transmission.</p>
+                  <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+                    {Object.entries(templates).map(([key, t]) => (
+                      <button key={key} onClick={() => loadTemplate(key)} style={{
+                        padding: "8px 16px", borderRadius: 8, fontSize: 12, fontWeight: 600, fontFamily: "inherit",
+                        border: `1px solid ${secForm.recipient_type === key ? CB.teal : CB.border}`,
+                        background: secForm.recipient_type === key ? `${CB.teal}10` : CB.white,
+                        color: secForm.recipient_type === key ? CB.teal : CB.textMid, cursor: "pointer",
+                      }}>{t.label}</button>
+                    ))}
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 }}>
+                    <div><label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Recipient Name</label><input style={fs} value={secForm.recipient_name} onChange={e => setSecForm(f => ({ ...f, recipient_name: e.target.value }))} placeholder="Dr. Smith, Andrea Farnsworth, etc." /></div>
+                    <div><label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Recipient Email</label><input style={fs} type="email" value={secForm.recipient_email} onChange={e => setSecForm(f => ({ ...f, recipient_email: e.target.value }))} placeholder="email@example.com" /></div>
+                  </div>
+                  <div style={{ marginBottom: 14 }}><label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Subject</label><input style={fs} value={secForm.subject} onChange={e => setSecForm(f => ({ ...f, subject: e.target.value }))} /></div>
+                  <div style={{ marginBottom: 14 }}><label style={{ fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Message Body</label><textarea style={{ ...fs, minHeight: 180, resize: "vertical" }} value={secForm.body} onChange={e => setSecForm(f => ({ ...f, body: e.target.value }))} /></div>
+                  <div style={{ padding: "10px 16px", background: "#FFF8E1", borderRadius: 10, marginBottom: 16, display: "flex", alignItems: "center", gap: 10, fontSize: 12, color: "#92400E" }}>
+                    {icons.alertTriangle({ size: 14, color: "#92400E" })}
+                    <span><strong>PHI Warning:</strong> If this message contains Protected Health Information, transmit the PDF via encrypted email or hand-deliver. Do not send PHI over unencrypted channels.</span>
+                  </div>
+                  <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                    <button onClick={copyToClipboard} style={{ padding: "10px 20px", borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.white, color: CB.textMid, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>Copy to Clipboard</button>
+                    <button onClick={generateSecurePDF} style={{ padding: "10px 24px", borderRadius: 10, border: "none", background: CB.teal, color: CB.white, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 8 }}>{icons.lock({ size: 14 })} Generate Secure PDF</button>
+                  </div>
+                </div>
+              );
+            };
+            return <SecureEmail />;
+          })()}
+
+          {/* Message list — only show for inbox/sent tabs */}
+          {(tab === "inbox" || tab === "sent") && (
           <div style={{ background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, overflow: "hidden" }}>
             {loading ? (
               <div style={{ padding: 40, textAlign: "center" }}><Spinner /></div>
@@ -7821,6 +8420,7 @@
               })
             )}
           </div>
+          )}
 
           {/* Compose Modal */}
           <Modal open={showCompose} onClose={() => { setShowCompose(false); setReplyTo(null); }} title={replyTo ? "Reply" : "New Message"} subtitle="Messages are encrypted and audit-logged" width={600}>
@@ -8563,6 +9163,7 @@
           case "goals": return <PCSPGoalsPage />;
           case "billing": return <BillingPage />;
           case "finance": return <FinancePage />;
+          case "docs": return <DocEnginePage />;
           case "ai": return <AIPage />;
           case "messages": return <MessagingPage />;
           case "migration": return <MigrationPage />;
