@@ -2892,7 +2892,7 @@
       const [selectedCode, setSelectedCode] = useState(null);
       const [clientAuths, setClientAuths] = useState([]);
       const [form, setForm] = useState({
-        staff_id: "", person_id: "", service_code_id: "",
+        staff_id: "", co_staff_ids: [], person_id: "", service_code_id: "",
         service_date: new Date().toISOString().split("T")[0],
         start_time: "", end_time: "", note_text: "", goal_id: "",
       });
@@ -2910,7 +2910,7 @@
             setClients(c.data || []);
             setServiceCodes(sc.data || []);
           });
-          setForm({ staff_id: "", person_id: "", service_code_id: "", service_date: new Date().toISOString().split("T")[0], start_time: "", end_time: "", note_text: "", goal_id: "" });
+          setForm({ staff_id: "", co_staff_ids: [], person_id: "", service_code_id: "", service_date: new Date().toISOString().split("T")[0], start_time: "", end_time: "", note_text: "", goal_id: "" });
           setExtraFields({});
           setSelectedCode(null);
           setClientAuths([]);
@@ -2953,7 +2953,7 @@
 
       const handleSave = async () => {
         if (!form.staff_id || !form.person_id || !form.service_code_id || !form.service_date) {
-          return addToast("Staff, client, service code, and date are required", "error");
+          return addToast("Primary staff, client, service code, and date are required", "error");
         }
         setSaving(true);
         // Calculate duration
@@ -2979,9 +2979,13 @@
           fullNote = `[PCSP Goal: ${selectedGoal.domain}]\n${selectedGoal.goal_description.substring(0, 120)}\n\n${fullNote}`;
         }
 
+        // Build full staff_ids array: primary first, then co-staff, deduped
+        const allStaffIds = [form.staff_id, ...form.co_staff_ids.filter(id => id && id !== form.staff_id)];
+
         const insertPayload = {
           org_id: orgId,
-          staff_id: form.staff_id,
+          staff_id: form.staff_id, // legacy single-staff column still populated for back-compat
+          staff_ids: allStaffIds,  // new multi-staff array column
           person_id: form.person_id,
           service_code_id: form.service_code_id,
           service_date: form.service_date,
@@ -2992,13 +2996,23 @@
           summary_note: fullNote,
           status: "draft",
         };
-        // Try to include goal_id if column exists
         if (form.goal_id) insertPayload.goal_id = form.goal_id;
 
-        const { error } = await supabase.from("service_notes").insert(insertPayload);
+        let { error } = await supabase.from("service_notes").insert(insertPayload);
+
+        // Schema fallback: if staff_ids column doesn't exist, retry without it
+        if (error && /column .*staff_ids.* does not exist/i.test(error.message || "")) {
+          delete insertPayload.staff_ids;
+          const retry = await supabase.from("service_notes").insert(insertPayload);
+          error = retry.error;
+          if (!error && form.co_staff_ids.length > 0) {
+            addToast("Note saved — co-staff not recorded (run v18.9 migration)", "warning");
+          }
+        }
+
         setSaving(false);
         if (error) return addToast(error.message, "error");
-        addToast("Service note saved", "success");
+        addToast(form.co_staff_ids.length > 0 ? `Service note saved with ${allStaffIds.length} staff` : "Service note saved", "success");
         onSaved();
         onClose();
       };
@@ -3006,9 +3020,9 @@
       return (
         <Modal open={open} onClose={onClose} title="New Service Note" subtitle={selectedCode ? `Dynamic fields for ${selectedCode}` : "Select a service code to load specific fields"} width={760}>
           <FormRow>
-            <FormField label="Staff Member" required half>
+            <FormField label="Primary Staff" required half>
               <select style={fieldStyle} value={form.staff_id} onChange={e => set("staff_id", e.target.value)}>
-                <option value="">Select staff...</option>
+                <option value="">Select primary staff...</option>
                 {staffList.map(s => <option key={s.id} value={s.id}>{s.first_name} {s.last_name}</option>)}
               </select>
             </FormField>
@@ -3019,6 +3033,55 @@
               </select>
             </FormField>
           </FormRow>
+
+          {/* Co-Staff picker — for shifts with multiple DSPs (RHS, HHS, etc.) */}
+          {form.staff_id && (
+            <FormField label={form.co_staff_ids.length > 0 ? `Additional Staff on Shift (${form.co_staff_ids.length})` : "Additional Staff on Shift (optional)"}>
+              <div style={{ padding: "10px 12px", background: CB.cream, border: `1px solid ${CB.border}`, borderRadius: 10 }}>
+                {/* Selected co-staff as chips */}
+                {form.co_staff_ids.length > 0 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+                    {form.co_staff_ids.map(coId => {
+                      const s = staffList.find(x => x.id === coId);
+                      if (!s) return null;
+                      return (
+                        <div key={coId} style={{
+                          display: "flex", alignItems: "center", gap: 6, padding: "5px 4px 5px 10px",
+                          background: CB.white, border: `1px solid ${CB.teal}30`, borderRadius: 20,
+                          fontSize: 12, fontWeight: 600, color: CB.teal,
+                        }}>
+                          {s.first_name} {s.last_name}
+                          <button onClick={() => setForm(p => ({ ...p, co_staff_ids: p.co_staff_ids.filter(id => id !== coId) }))} style={{
+                            width: 18, height: 18, borderRadius: "50%", border: "none",
+                            background: `${CB.teal}15`, color: CB.teal, cursor: "pointer",
+                            display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12,
+                            fontFamily: "inherit", padding: 0, lineHeight: 1,
+                          }}>×</button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {/* Add co-staff dropdown */}
+                <select style={{ ...fieldStyle, padding: "8px 12px", fontSize: 13, background: CB.white }}
+                  value=""
+                  onChange={e => {
+                    if (!e.target.value) return;
+                    setForm(p => ({ ...p, co_staff_ids: [...p.co_staff_ids, e.target.value] }));
+                  }}>
+                  <option value="">+ Add co-staff...</option>
+                  {staffList
+                    .filter(s => s.id !== form.staff_id && !form.co_staff_ids.includes(s.id))
+                    .map(s => <option key={s.id} value={s.id}>{s.first_name} {s.last_name}</option>)}
+                </select>
+                {form.co_staff_ids.length === 0 && (
+                  <div style={{ marginTop: 6, fontSize: 11, color: CB.textLight, fontStyle: "italic" }}>
+                    For two-person shifts (e.g. RHS, HHS), add additional staff who worked the same shift.
+                  </div>
+                )}
+              </div>
+            </FormField>
+          )}
           <FormField label="Service Code" required>
             <select style={fieldStyle} value={form.service_code_id} onChange={e => handleCodeChange(e.target.value)}>
               <option value="">Select service code...</option>
@@ -3182,6 +3245,9 @@
       const [editForm, setEditForm] = useState({});
       const [saving, setSaving] = useState(false);
       const [serviceCodes, setServiceCodes] = useState([]);
+      const [viewMode, setViewMode] = useState("tree"); // "tree" | "flat"
+      const [filterClient, setFilterClient] = useState("");
+      const [filterCode, setFilterCode] = useState("");
       const { addToast } = useToast();
       const perms = usePermissions();
 
@@ -3193,10 +3259,43 @@
       const loadNotes = async () => {
         setLoading(true);
         const { data, error } = await supabase.from("service_notes")
-          .select("id, service_date, start_time, end_time, duration_minutes, billable_units, status, summary_note, service_code_id, staff!service_notes_staff_id_fkey(first_name, last_name), persons(first_name, last_name), service_code_definitions(code, name)")
+          .select("id, service_date, start_time, end_time, duration_minutes, billable_units, status, summary_note, service_code_id, staff_id, staff_ids, staff!service_notes_staff_id_fkey(first_name, last_name), persons(first_name, last_name), service_code_definitions(code, name)")
           .order("service_date", { ascending: false })
-          .limit(100);
-        if (!error) setNotes(data || []);
+          .limit(500);
+        if (error) { setLoading(false); return; }
+
+        const rows = data || [];
+
+        // Enrich with co-staff names: collect all staff_ids across rows, batch-fetch, map
+        const coStaffIds = new Set();
+        rows.forEach(r => {
+          if (Array.isArray(r.staff_ids)) {
+            r.staff_ids.forEach(id => {
+              if (id && id !== r.staff_id) coStaffIds.add(id);
+            });
+          }
+        });
+        if (coStaffIds.size > 0) {
+          const { data: coStaff } = await supabase.from("staff")
+            .select("id, first_name, last_name")
+            .in("id", [...coStaffIds]);
+          const staffMap = {};
+          (coStaff || []).forEach(s => { staffMap[s.id] = s; });
+          rows.forEach(r => {
+            if (Array.isArray(r.staff_ids) && r.staff_ids.length > 1) {
+              r.co_staff = r.staff_ids
+                .filter(id => id && id !== r.staff_id)
+                .map(id => staffMap[id])
+                .filter(Boolean);
+            } else {
+              r.co_staff = [];
+            }
+          });
+        } else {
+          rows.forEach(r => { r.co_staff = []; });
+        }
+
+        setNotes(rows);
         setLoading(false);
       };
 
@@ -3258,7 +3357,19 @@
 
       const columns = [
         { label: "Date", bold: true, render: (r) => r.service_date ? new Date(r.service_date + "T00:00:00").toLocaleDateString() : "—" },
-        { label: "Staff", render: (r) => r.staff ? `${r.staff.first_name} ${r.staff.last_name}` : "—" },
+        { label: "Staff", render: (r) => {
+          const primary = r.staff ? `${r.staff.first_name} ${r.staff.last_name}` : "—";
+          if (!r.co_staff || r.co_staff.length === 0) return primary;
+          return (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              {primary}
+              <span title={r.co_staff.map(s => `${s.first_name} ${s.last_name}`).join(", ")} style={{
+                fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 10,
+                background: `${CB.teal}12`, color: CB.teal, cursor: "help",
+              }}>+{r.co_staff.length}</span>
+            </span>
+          );
+        }},
         { label: "Client", render: (r) => r.persons ? `${r.persons.first_name} ${r.persons.last_name}` : "—" },
         { label: "Code", render: (r) => <Badge text={r.service_code_definitions?.code || "?"} color={CB.blue} /> },
         { label: "Time", render: (r) => r.start_time && r.end_time ? `${r.start_time.slice(0,5)} – ${r.end_time.slice(0,5)}` : "—" },
@@ -3303,12 +3414,160 @@
         )},
       ];
 
+      // Derive filter options + filtered list
+      const uniqueClients = useMemo(() => {
+        const seen = new Map();
+        notes.forEach(n => {
+          if (n.persons && !seen.has(n.persons.first_name + n.persons.last_name)) {
+            seen.set(n.persons.first_name + n.persons.last_name, `${n.persons.first_name} ${n.persons.last_name}`);
+          }
+        });
+        return [...seen.values()].sort();
+      }, [notes]);
+
+      const uniqueCodes = useMemo(() => {
+        const seen = new Set();
+        notes.forEach(n => { if (n.service_code_definitions?.code) seen.add(n.service_code_definitions.code); });
+        return [...seen].sort();
+      }, [notes]);
+
+      const filteredNotes = useMemo(() => {
+        return notes.filter(n => {
+          if (filterClient && n.persons && `${n.persons.first_name} ${n.persons.last_name}` !== filterClient) return false;
+          if (filterCode && n.service_code_definitions?.code !== filterCode) return false;
+          return true;
+        });
+      }, [notes, filterClient, filterCode]);
+
+      // Build year → month → day tree from filtered notes
+      const notesTree = useMemo(() => {
+        const byYear = {};
+        filteredNotes.forEach(n => {
+          if (!n.service_date) return;
+          const d = new Date(n.service_date + "T00:00:00");
+          const y = d.getFullYear();
+          const m = String(d.getMonth() + 1).padStart(2, "0");
+          const day = String(d.getDate()).padStart(2, "0");
+          const monthLabel = d.toLocaleString("en-US", { month: "long" });
+          const dayLabel = d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+          if (!byYear[y]) byYear[y] = { months: {}, total: 0 };
+          if (!byYear[y].months[m]) byYear[y].months[m] = { label: monthLabel, days: {}, total: 0 };
+          if (!byYear[y].months[m].days[day]) byYear[y].months[m].days[day] = { label: dayLabel, notes: [] };
+          byYear[y].months[m].days[day].notes.push(n);
+          byYear[y].months[m].total++;
+          byYear[y].total++;
+        });
+        return byYear;
+      }, [filteredNotes]);
+
       return (
         <div>
           <PageHeader title="Service Notes" subtitle="Dynamic documentation forms per service code — click any note to view or edit"
             action={<PrimaryButton onClick={() => setFormOpen(true)}>{icons.plus({ size: 16 })} New Service Note</PrimaryButton>}
           />
-          <DataTable columns={columns} data={notes} loading={loading} emptyMessage="No service notes yet — create your first one" onRowClick={openDetail} />
+
+          {/* Filter + view toggle toolbar */}
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+            marginBottom: 16, padding: "12px 16px", background: CB.white, borderRadius: 12,
+            border: `1px solid ${CB.border}`, flexWrap: "wrap",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.6 }}>Filter</span>
+              <select value={filterClient} onChange={e => setFilterClient(e.target.value)} style={{ ...fieldStyle, padding: "7px 12px", fontSize: 13, width: "auto", minWidth: 160 }}>
+                <option value="">All clients</option>
+                {uniqueClients.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+              <select value={filterCode} onChange={e => setFilterCode(e.target.value)} style={{ ...fieldStyle, padding: "7px 12px", fontSize: 13, width: "auto", minWidth: 120 }}>
+                <option value="">All codes</option>
+                {uniqueCodes.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+              {(filterClient || filterCode) && (
+                <button onClick={() => { setFilterClient(""); setFilterCode(""); }} style={{
+                  padding: "7px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
+                  color: CB.textMid, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+                }}>Clear</button>
+              )}
+              <span style={{ fontSize: 12, color: CB.textMid, marginLeft: 4 }}>
+                {filteredNotes.length} of {notes.length} {notes.length === 1 ? "note" : "notes"}
+              </span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 4, background: CB.cream, padding: 3, borderRadius: 9, border: `1px solid ${CB.border}` }}>
+              <button onClick={() => setViewMode("tree")} style={{
+                padding: "6px 14px", borderRadius: 7, border: "none", fontSize: 12, fontWeight: 700, fontFamily: "inherit",
+                cursor: "pointer", transition: "all 0.15s",
+                background: viewMode === "tree" ? CB.navy : "transparent",
+                color: viewMode === "tree" ? CB.white : CB.textMid,
+              }}>Tree</button>
+              <button onClick={() => setViewMode("flat")} style={{
+                padding: "6px 14px", borderRadius: 7, border: "none", fontSize: 12, fontWeight: 700, fontFamily: "inherit",
+                cursor: "pointer", transition: "all 0.15s",
+                background: viewMode === "flat" ? CB.navy : "transparent",
+                color: viewMode === "flat" ? CB.white : CB.textMid,
+              }}>Flat</button>
+            </div>
+          </div>
+
+          {/* Render: tree OR flat */}
+          {loading ? (
+            <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><Spinner size={28} /></div>
+          ) : filteredNotes.length === 0 ? (
+            <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>
+              {notes.length === 0 ? "No service notes yet — create your first one" : "No notes match the current filters"}
+            </div>
+          ) : viewMode === "flat" ? (
+            <DataTable columns={columns} data={filteredNotes} loading={false} emptyMessage="No notes" onRowClick={openDetail} />
+          ) : (() => {
+            const years = Object.keys(notesTree).sort().reverse();
+            return (
+              <div>
+                {years.map((y, yi) => (
+                  <CollapsibleTimeGroup key={y} label={y} count={notesTree[y].total} defaultOpen={yi === 0} accentColor={CB.navy}>
+                    {Object.keys(notesTree[y].months).sort().reverse().map((m, mi) => (
+                      <CollapsibleTimeGroup key={m} label={notesTree[y].months[m].label} count={notesTree[y].months[m].total} defaultOpen={yi === 0 && mi === 0} accentColor={CB.blue}>
+                        {Object.keys(notesTree[y].months[m].days).sort().reverse().map((day, di) => (
+                          <CollapsibleTimeGroup key={day} label={notesTree[y].months[m].days[day].label} count={notesTree[y].months[m].days[day].notes.length} defaultOpen={yi === 0 && mi === 0 && di < 3} accentColor={CB.teal}>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                              {notesTree[y].months[m].days[day].notes.map(n => (
+                                <div key={n.id} onClick={() => openDetail(n)} style={{
+                                  padding: "10px 14px", borderRadius: 10, background: CB.cream,
+                                  border: `1px solid ${CB.border}`, cursor: "pointer",
+                                  display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap",
+                                  transition: "all 0.15s",
+                                }}
+                                  onMouseEnter={e => { e.currentTarget.style.borderColor = `${CB.teal}60`; e.currentTarget.style.background = CB.white; }}
+                                  onMouseLeave={e => { e.currentTarget.style.borderColor = CB.border; e.currentTarget.style.background = CB.cream; }}
+                                >
+                                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                                    {n.service_code_definitions?.code && <Badge text={n.service_code_definitions.code} color={CB.blue} />}
+                                    <span style={{ fontSize: 13, fontWeight: 600, color: CB.text }}>
+                                      {n.persons ? `${n.persons.first_name} ${n.persons.last_name}` : "—"}
+                                    </span>
+                                    <span style={{ fontSize: 12, color: CB.textMid }}>
+                                      {n.staff ? `${n.staff.first_name} ${n.staff.last_name}` : "—"}
+                                      {n.co_staff && n.co_staff.length > 0 && (
+                                        <span style={{ marginLeft: 4, fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 8, background: `${CB.teal}12`, color: CB.teal }}>+{n.co_staff.length}</span>
+                                      )}
+                                    </span>
+                                    {n.start_time && n.end_time && (
+                                      <span style={{ fontSize: 11, color: CB.textLight }}>{n.start_time.slice(0,5)}–{n.end_time.slice(0,5)}</span>
+                                    )}
+                                    {n.duration_minutes && <span style={{ fontSize: 11, color: CB.textLight }}>{n.duration_minutes}min</span>}
+                                  </div>
+                                  <Badge text={n.status || "draft"} color={statusColors[n.status] || CB.textLight} />
+                                </div>
+                              ))}
+                            </div>
+                          </CollapsibleTimeGroup>
+                        ))}
+                      </CollapsibleTimeGroup>
+                    ))}
+                  </CollapsibleTimeGroup>
+                ))}
+              </div>
+            );
+          })()}
+
           <ServiceNoteForm open={formOpen} onClose={() => setFormOpen(false)} onSaved={loadNotes} />
 
           {/* Note Detail / Edit Modal */}
@@ -3328,7 +3587,12 @@
                       <Badge text={viewing.service_code_definitions?.code || "?"} color={CB.blue} />
                     )}
                     <Badge text={editForm.status || viewing.status || "draft"} color={statusColors[editForm.status || viewing.status] || CB.textLight} />
-                    <span style={{ fontSize: 13, color: CB.textMid }}>by {viewing.staff?.first_name} {viewing.staff?.last_name}</span>
+                    <span style={{ fontSize: 13, color: CB.textMid }}>
+                      by {viewing.staff?.first_name} {viewing.staff?.last_name}
+                      {viewing.co_staff && viewing.co_staff.length > 0 && (
+                        <> & {viewing.co_staff.map(s => `${s.first_name} ${s.last_name}`).join(", ")}</>
+                      )}
+                    </span>
                   </div>
                   <div style={{ display: "flex", gap: 6 }}>
                     {!editing && statusFlow[viewing.status] && perms.viewCompliance && (
@@ -9942,12 +10206,32 @@
 
       useEffect(() => {
         setLoading(true);
-        supabase.from("service_notes")
-          .select("id, service_date, start_time, end_time, duration_minutes, status, persons(first_name, last_name), service_code_definitions(code, name)")
-          .eq("staff_id", staffId)
-          .order("service_date", { ascending: false })
-          .limit(500)
-          .then(({ data }) => { setNotes(data || []); setLoading(false); });
+        (async () => {
+          // Try the OR query first: notes where this staff is primary OR in the co-staff array
+          let { data, error } = await supabase.from("service_notes")
+            .select("id, service_date, start_time, end_time, duration_minutes, status, staff_id, staff_ids, persons(first_name, last_name), service_code_definitions(code, name)")
+            .or(`staff_id.eq.${staffId},staff_ids.cs.{${staffId}}`)
+            .order("service_date", { ascending: false })
+            .limit(500);
+
+          // Fallback if staff_ids column doesn't exist yet — use plain staff_id filter
+          if (error && /column .*staff_ids.* does not exist/i.test(error.message || "")) {
+            const retry = await supabase.from("service_notes")
+              .select("id, service_date, start_time, end_time, duration_minutes, status, staff_id, persons(first_name, last_name), service_code_definitions(code, name)")
+              .eq("staff_id", staffId)
+              .order("service_date", { ascending: false })
+              .limit(500);
+            data = retry.data;
+          }
+
+          // Mark notes where this staff is a co-staff rather than primary
+          const rows = (data || []).map(n => ({
+            ...n,
+            is_co_staff: n.staff_id !== staffId && Array.isArray(n.staff_ids) && n.staff_ids.includes(staffId),
+          }));
+          setNotes(rows);
+          setLoading(false);
+        })();
       }, [staffId]);
 
       if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
