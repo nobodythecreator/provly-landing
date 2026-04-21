@@ -10110,29 +10110,69 @@
       const [incidents, setIncidents] = useState([]);
       const [loading, setLoading] = useState(true);
       const [error, setError] = useState(null);
+      const [debug, setDebug] = useState(null);
 
       useEffect(() => {
         setLoading(true);
         setError(null);
-        // Incidents table has TWO FKs to staff (reported_by and reviewed_by) — need explicit hint
-        supabase.from("incidents")
-          .select("id, occurred_at, incident_type, severity, location, description, status, reporter:staff!incidents_reported_by_fkey(first_name, last_name)")
-          .eq("person_id", clientId)
-          .order("occurred_at", { ascending: false })
-          .limit(500)
-          .then(({ data, error: err }) => {
-            if (err) {
-              console.error("Incidents load error:", err);
-              setError(err.message);
-            }
-            setIncidents(data || []);
+        setDebug(null);
+        (async () => {
+          // Step 1: SIMPLE query, no joins, SELECT *
+          const { data, error: err } = await supabase.from("incidents")
+            .select("*")
+            .eq("person_id", clientId)
+            .order("occurred_at", { ascending: false })
+            .limit(500);
+
+          if (err) {
+            console.error("[Incidents tab] Query error:", err);
+            setError(err.message);
             setLoading(false);
-          });
+            return;
+          }
+
+          const rows = data || [];
+          setDebug({ rowCount: rows.length, clientIdUsed: clientId, firstRow: rows[0] ? Object.keys(rows[0]) : null });
+
+          // Step 2: Enrich with reporter staff names client-side
+          if (rows.length > 0) {
+            const reporterIds = [...new Set(rows.map(r => r.reported_by).filter(Boolean))];
+            if (reporterIds.length > 0) {
+              const { data: staffData } = await supabase.from("staff")
+                .select("id, first_name, last_name")
+                .in("id", reporterIds);
+              const staffMap = {};
+              (staffData || []).forEach(s => { staffMap[s.id] = s; });
+              rows.forEach(r => {
+                if (r.reported_by && staffMap[r.reported_by]) r.reporter = staffMap[r.reported_by];
+              });
+            }
+          }
+
+          setIncidents(rows);
+          setLoading(false);
+        })();
       }, [clientId]);
 
       if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
-      if (error) return <div style={{ padding: 30, background: `${CB.red}10`, borderRadius: 12, border: `1px solid ${CB.red}30`, color: CB.red, fontSize: 13 }}>Error loading incidents: {error}</div>;
-      if (incidents.length === 0) return <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>No incidents recorded. That's a good thing.</div>;
+      if (error) return <div style={{ padding: 20, background: `${CB.red}10`, borderRadius: 12, border: `1px solid ${CB.red}30`, color: CB.red, fontSize: 13 }}>Error loading incidents: {error}</div>;
+
+      // Always show debug info at top so we can see what's happening
+      const debugPanel = debug && (
+        <div style={{ padding: "10px 14px", background: `${CB.blue}08`, border: `1px solid ${CB.blue}30`, borderRadius: 10, marginBottom: 16, fontSize: 12, color: CB.textMid, fontFamily: "monospace" }}>
+          Query returned <strong style={{ color: CB.navy }}>{debug.rowCount}</strong> row(s) for person_id=<code>{String(debug.clientIdUsed).slice(0, 8)}...</code>
+          {debug.firstRow && <div style={{ marginTop: 4, opacity: 0.7 }}>Columns: {debug.firstRow.join(", ")}</div>}
+        </div>
+      );
+
+      if (incidents.length === 0) return (
+        <div>
+          {debugPanel}
+          <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>
+            No incidents returned for this client. If you know there's data, check the browser console for errors or RLS issues.
+          </div>
+        </div>
+      );
 
       const severityColor = { low: CB.blue, moderate: CB.amber, high: "#E65100", critical: CB.red };
 
@@ -10150,6 +10190,7 @@
 
       return (
         <div>
+          {debugPanel}
           <div style={{ marginBottom: 14, fontSize: 13, color: CB.textMid }}>
             <strong style={{ color: CB.navy }}>{incidents.length}</strong> incident{incidents.length === 1 ? "" : "s"} on record across {keys.length} {keys.length === 1 ? "month" : "months"}
           </div>
@@ -10169,7 +10210,7 @@
                             {occurred ? occurred.toLocaleDateString() : "—"}
                             {occurred && <span style={{ marginLeft: 6, fontWeight: 500, color: CB.textMid }}>{occurred.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>}
                           </span>
-                          {inc.incident_type && <Badge text={inc.incident_type.replace(/_/g, " ")} color={CB.navy} />}
+                          {inc.incident_type && <Badge text={String(inc.incident_type).replace(/_/g, " ")} color={CB.navy} />}
                           {inc.severity && <Badge text={inc.severity} color={severityColor[inc.severity] || CB.textLight} />}
                           {inc.status && <Badge text={inc.status} color={CB.textMid} />}
                         </div>
