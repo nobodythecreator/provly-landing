@@ -102,9 +102,9 @@
 
     // Nav items each role can see
     const ROLE_NAV = {
-      owner:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "billing", "finance", "docs", "messages", "ai", "migration", "settings"],
-      admin:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "billing", "finance", "docs", "messages", "ai", "migration", "settings"],
-      compliance_director:  ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "billing", "finance", "docs", "messages", "ai"],
+      owner:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "finance", "docs", "messages", "ai", "migration", "settings"],
+      admin:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "finance", "docs", "messages", "ai", "migration", "settings"],
+      compliance_director:  ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "finance", "docs", "messages", "ai"],
       residential_director: ["dashboard", "clients", "training", "notes", "evv", "incidents", "alerts", "medications", "goals", "docs", "messages"],
       day_program_director: ["dashboard", "clients", "training", "notes", "evv", "incidents", "alerts", "medications", "goals", "docs", "messages"],
       house_manager:        ["dashboard", "clients", "notes", "evv", "incidents", "medications", "goals", "messages"],
@@ -281,7 +281,7 @@
     // ═══════════════════════════════════════════════════════════════
     // MODAL COMPONENT — reusable overlay
     // ═══════════════════════════════════════════════════════════════
-    function Modal({ open, onClose, title, subtitle, width = 520, children }) {
+    function Modal({ open, onClose, title, subtitle, width = 680, children }) {
       const { isMobile } = useMobile();
       if (!open) return null;
       return (
@@ -292,7 +292,7 @@
           padding: isMobile ? 0 : 24, animation: "overlayIn 0.2s ease",
         }}>
           <div onClick={e => e.stopPropagation()} style={{
-            width: "100%", maxWidth: isMobile ? "100%" : width, maxHeight: isMobile ? "92vh" : "90vh",
+            width: "100%", maxWidth: isMobile ? "100%" : width, maxHeight: isMobile ? "94vh" : "92vh",
             background: CB.white, borderRadius: isMobile ? "20px 20px 0 0" : 20, boxShadow: "0 24px 80px rgba(10,30,51,0.2)",
             animation: "modalIn 0.25s ease", display: "flex", flexDirection: "column",
           }}>
@@ -498,7 +498,6 @@
         { key: "alerts", label: "Alerts", icon: icons.bell },
         { key: "medications", label: "Medications", icon: icons.capsule },
         { key: "goals", label: "PCSP Goals", icon: icons.crosshair },
-        { key: "billing", label: "Billing", icon: icons.barChart },
         { key: "finance", label: "Finance", icon: icons.dollar },
         { key: "docs", label: "Doc Engine", icon: icons.fileText },
         { key: "ai", label: "AI Intelligence", icon: icons.zap },
@@ -602,13 +601,31 @@
     // ═══════════════════════════════════════════════════════════════
     // SHARED COMPONENTS — StatCard, DataTable, Badge, PageHeader
     // ═══════════════════════════════════════════════════════════════
-    function StatCard({ label, value, icon, color = CB.teal, trend, delay = 0 }) {
+    function StatCard({ label, value, icon, color = CB.teal, trend, delay = 0, onClick }) {
+      const clickable = typeof onClick === "function";
       return (
-        <div style={{
-          background: CB.white, borderRadius: 16, padding: "24px 22px",
-          border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
-          animation: `fadeIn 0.5s ease ${delay}s both`,
-        }}>
+        <div
+          onClick={onClick}
+          style={{
+            background: CB.white, borderRadius: 16, padding: "24px 22px",
+            border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
+            animation: `fadeIn 0.5s ease ${delay}s both`,
+            cursor: clickable ? "pointer" : "default",
+            transition: "transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease",
+          }}
+          onMouseEnter={e => {
+            if (!clickable) return;
+            e.currentTarget.style.transform = "translateY(-2px)";
+            e.currentTarget.style.boxShadow = "0 4px 6px rgba(10,30,51,0.08), 0 12px 40px rgba(10,30,51,0.10)";
+            e.currentTarget.style.borderColor = `${color}40`;
+          }}
+          onMouseLeave={e => {
+            if (!clickable) return;
+            e.currentTarget.style.transform = "translateY(0)";
+            e.currentTarget.style.boxShadow = CB.cardShadow;
+            e.currentTarget.style.borderColor = CB.border;
+          }}
+        >
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
             <div style={{ width: 40, height: 40, borderRadius: 12, background: `${color}12`, display: "flex", alignItems: "center", justifyContent: "center" }}>
               {icon({ size: 20, color })}
@@ -697,7 +714,7 @@
     // ═══════════════════════════════════════════════════════════════
     // DASHBOARD PAGE
     // ═══════════════════════════════════════════════════════════════
-    function DashboardPage() {
+    function DashboardPage({ onNavigate }) {
       const [stats, setStats] = useState({ staff: 0, clients: 0, trainings: 0, auths: 0 });
       const [upcomingAlerts, setUpcomingAlerts] = useState([]);
       const [loading, setLoading] = useState(true);
@@ -765,10 +782,10 @@
           ) : (
             <>
               <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(4, 1fr)", gap: isMobile ? 12 : 18, marginBottom: isMobile ? 20 : 28 }}>
-                <StatCard label="Active Staff" value={stats.staff} icon={icons.users} color={CB.blue} delay={0} />
-                <StatCard label="Active Clients" value={stats.clients} icon={icons.heart} color={CB.teal} delay={0.05} />
-                <StatCard label="Overdue Trainings" value={stats.trainings} icon={icons.alertTriangle} color={stats.trainings > 0 ? CB.red : CB.green} delay={0.1} />
-                <StatCard label="Authorizations" value={stats.auths} icon={icons.fileText} color={CB.navy} delay={0.15} />
+                <StatCard label="Active Staff" value={stats.staff} icon={icons.users} color={CB.blue} delay={0} onClick={onNavigate ? () => onNavigate("staff") : undefined} />
+                <StatCard label="Active Clients" value={stats.clients} icon={icons.heart} color={CB.teal} delay={0.05} onClick={onNavigate ? () => onNavigate("clients") : undefined} />
+                <StatCard label="Overdue Trainings" value={stats.trainings} icon={icons.alertTriangle} color={stats.trainings > 0 ? CB.red : CB.green} delay={0.1} onClick={onNavigate ? () => onNavigate("training") : undefined} />
+                <StatCard label="Authorizations" value={stats.auths} icon={icons.fileText} color={CB.navy} delay={0.15} onClick={onNavigate ? () => onNavigate("clients") : undefined} />
               </div>
               <div style={{
                 background: CB.white, borderRadius: 16, padding: 24,
@@ -778,12 +795,12 @@
                 <h3 style={{ fontSize: 16, fontWeight: 700, color: CB.navy, marginBottom: 16 }}>Quick Actions</h3>
                 <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(4, 1fr)", gap: 12 }}>
                   {[
-                    { label: "New Service Note", icon: icons.fileText, color: CB.teal },
-                    { label: "Clock In (EVV)", icon: icons.mapPin, color: CB.blue },
-                    { label: "Log Incident", icon: icons.alertTriangle, color: CB.amber },
-                    { label: "Run Compliance Check", icon: icons.shield, color: CB.navy },
+                    { label: "New Service Note", icon: icons.fileText, color: CB.teal, target: "notes" },
+                    { label: "Clock In (EVV)", icon: icons.mapPin, color: CB.blue, target: "evv" },
+                    { label: "Log Incident", icon: icons.alertTriangle, color: CB.amber, target: "incidents" },
+                    { label: "Run Compliance Check", icon: icons.shield, color: CB.navy, target: "compliance" },
                   ].map((action, i) => (
-                    <button key={i} style={{
+                    <button key={i} onClick={() => onNavigate && onNavigate(action.target)} style={{
                       display: "flex", alignItems: "center", gap: 10, padding: "14px 16px",
                       borderRadius: 12, border: `1px solid ${CB.border}`, background: CB.cream,
                       cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600,
@@ -893,20 +910,43 @@
         if (!form.hire_date) return addToast("Hire date is required", "error");
         if (!form.date_of_birth) return addToast("Date of birth is required", "error");
         setSaving(true);
-        const payload = { ...form };
-        if (!payload.email) delete payload.email;
-        if (!payload.phone) delete payload.phone;
 
         let result;
         if (editing) {
-          result = await supabase.from("staff").update(payload).eq("id", editing.id);
+          // Build diff payload — only send fields that actually changed.
+          // This avoids triggering RLS/CHECK constraints on unchanged columns
+          // (e.g. role enum mismatches when role wasn't even modified).
+          const diff = {};
+          const fields = ["first_name", "last_name", "email", "phone", "role", "hire_date", "date_of_birth", "is_active"];
+          fields.forEach(k => {
+            const before = editing[k] ?? (k === "is_active" ? true : "");
+            const after = form[k] ?? (k === "is_active" ? true : "");
+            if (before !== after) {
+              diff[k] = (after === "" && (k === "email" || k === "phone")) ? null : after;
+            }
+          });
+          if (Object.keys(diff).length === 0) {
+            setSaving(false);
+            addToast("No changes to save", "info");
+            onClose();
+            return;
+          }
+          result = await supabase.from("staff").update(diff).eq("id", editing.id);
         } else {
-          payload.org_id = orgId;
+          const payload = { ...form, org_id: orgId };
+          if (!payload.email) delete payload.email;
+          if (!payload.phone) delete payload.phone;
           result = await supabase.from("staff").insert(payload);
         }
         setSaving(false);
         if (result.error) {
-          addToast(result.error.message, "error");
+          // Surface DB constraint errors clearly
+          const msg = result.error.message || "Save failed";
+          if (msg.toLowerCase().includes("role") || msg.includes("check") || msg.includes("enum")) {
+            addToast(`Role update blocked by database: ${msg}. Verify the role value is allowed in the staff.role column constraint.`, "error");
+          } else {
+            addToast(msg, "error");
+          }
         } else {
           addToast(editing ? "Staff member updated" : "Staff member added", "success");
           onSaved();
@@ -915,7 +955,7 @@
       };
 
       return (
-        <Modal open={open} onClose={onClose} title={editing ? "Edit Staff Member" : "Add Staff Member"} subtitle="All fields marked * are required">
+        <Modal open={open} onClose={onClose} title={editing ? "Edit Staff Member" : "Add Staff Member"} subtitle="All fields marked * are required" width={720}>
           <FormRow>
             <FormField label="First Name" required half>
               <input style={fieldStyle} value={form.first_name} onChange={e => set("first_name", e.target.value)} placeholder="First name" />
@@ -978,11 +1018,88 @@
       );
     }
 
+    // ── Profile view helpers ──
+    function ProfileField({ label, value, full }) {
+      return (
+        <div style={{ gridColumn: full ? "1 / -1" : "auto" }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 4 }}>{label}</div>
+          <div style={{ fontSize: 14, fontWeight: 500, color: value ? CB.text : CB.textLight, fontStyle: value ? "normal" : "italic", wordBreak: "break-word" }}>
+            {value || "—"}
+          </div>
+        </div>
+      );
+    }
+
+    function ProfileSection({ title, children }) {
+      return (
+        <div style={{ marginBottom: 20 }}>
+          <h3 style={{ fontSize: 13, fontWeight: 700, color: CB.navy, marginBottom: 12, textTransform: "uppercase", letterSpacing: 0.8 }}>{title}</h3>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 14, padding: "16px 18px", background: CB.cream, borderRadius: 12, border: `1px solid ${CB.border}` }}>
+            {children}
+          </div>
+        </div>
+      );
+    }
+
+    function StaffProfileModal({ open, onClose, staff, onEdit }) {
+      if (!staff) return null;
+      const roleLabel = STAFF_ROLES.find(r => r.value === staff.role)?.label || staff.role?.replace(/_/g, " ") || "—";
+      const fmtDate = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString() : null;
+      const tenure = staff.hire_date ? (() => {
+        const days = Math.floor((new Date() - new Date(staff.hire_date + "T00:00:00")) / 86400000);
+        if (days < 30) return `${days} days`;
+        if (days < 365) return `${Math.floor(days / 30)} months`;
+        const years = (days / 365).toFixed(1);
+        return `${years} years`;
+      })() : null;
+
+      return (
+        <Modal open={open} onClose={onClose} title={`${staff.first_name} ${staff.last_name}`} subtitle={`${roleLabel} ${staff.is_active ? "• Active" : "• Inactive"}`} width={620}>
+          {/* Identity strip */}
+          <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 22, padding: "14px 16px", background: `linear-gradient(135deg, ${CB.navy}08, ${CB.teal}08)`, borderRadius: 14, border: `1px solid ${CB.border}` }}>
+            <div style={{ width: 56, height: 56, borderRadius: 14, background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, fontWeight: 800, color: CB.white, flexShrink: 0 }}>
+              {(staff.first_name?.[0] || "") + (staff.last_name?.[0] || "")}
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 4 }}>
+                <Badge text={roleLabel} color={CB.navy} />
+                <Badge text={staff.is_active ? "Active" : "Inactive"} color={staff.is_active ? CB.green : CB.textLight} />
+              </div>
+              {tenure && <div style={{ fontSize: 12, color: CB.textMid }}>{tenure} with Hope Haven</div>}
+            </div>
+          </div>
+
+          <ProfileSection title="Contact">
+            <ProfileField label="Email" value={staff.email} />
+            <ProfileField label="Phone" value={staff.phone} />
+          </ProfileSection>
+
+          <ProfileSection title="Employment">
+            <ProfileField label="Role" value={roleLabel} />
+            <ProfileField label="Status" value={staff.is_active ? "Active" : "Inactive"} />
+            <ProfileField label="Hire Date" value={fmtDate(staff.hire_date)} />
+            <ProfileField label="Tenure" value={tenure} />
+          </ProfileSection>
+
+          <ProfileSection title="Personal">
+            <ProfileField label="Date of Birth" value={fmtDate(staff.date_of_birth)} />
+            <ProfileField label="Staff ID" value={staff.id?.slice(0, 8)} />
+          </ProfileSection>
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 8 }}>
+            <SecondaryButton onClick={onClose}>Close</SecondaryButton>
+            <PrimaryButton onClick={() => { onClose(); onEdit(staff); }}>{icons.edit({ size: 15 })} Edit</PrimaryButton>
+          </div>
+        </Modal>
+      );
+    }
+
     function StaffPage() {
       const [staff, setStaff] = useState([]);
       const [loading, setLoading] = useState(true);
       const [formOpen, setFormOpen] = useState(false);
       const [editing, setEditing] = useState(null);
+      const [viewing, setViewing] = useState(null);
 
       useEffect(() => { loadStaff(); }, []);
 
@@ -995,9 +1112,19 @@
 
       const openEdit = (row) => { setEditing(row); setFormOpen(true); };
       const openAdd = () => { setEditing(null); setFormOpen(true); };
+      const openProfile = (row) => setViewing(row);
 
       const columns = [
-        { label: "Name", bold: true, render: (r) => `${r.first_name} ${r.last_name}` },
+        { label: "Name", bold: true, render: (r) => (
+          <button onClick={(e) => { e.stopPropagation(); openProfile(r); }} style={{
+            background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit",
+            fontSize: 14, fontWeight: 600, color: CB.navy, textAlign: "left",
+            transition: "color 0.15s",
+          }}
+            onMouseEnter={e => { e.currentTarget.style.color = CB.teal; }}
+            onMouseLeave={e => { e.currentTarget.style.color = CB.navy; }}
+          >{r.first_name} {r.last_name}</button>
+        )},
         { label: "Role", render: (r) => <Badge text={STAFF_ROLES.find(x => x.value === r.role)?.label || r.role?.replace(/_/g, " ") || "—"} color={CB.navy} /> },
         { label: "Hire Date", render: (r) => r.hire_date ? new Date(r.hire_date + "T00:00:00").toLocaleDateString() : "—" },
         { label: "Status", render: (r) => <Badge text={r.is_active ? "Active" : "Inactive"} color={r.is_active ? CB.green : CB.textLight} /> },
@@ -1023,6 +1150,7 @@
           />
           <DataTable columns={columns} data={staff} loading={loading} emptyMessage="No staff members found" />
           <StaffForm open={formOpen} onClose={() => setFormOpen(false)} onSaved={loadStaff} editing={editing} />
+          <StaffProfileModal open={!!viewing} onClose={() => setViewing(null)} staff={viewing} onEdit={openEdit} />
         </div>
       );
     }
@@ -1038,6 +1166,7 @@
       const [serviceCodes, setServiceCodes] = useState([]);
       const [form, setForm] = useState({
         first_name: "", last_name: "", date_of_birth: "", medicaid_number: "", is_active: true,
+        support_coordinator: "", support_coordinator_phone: "", support_coordinator_email: "", support_coordinator_agency: "",
       });
       const [auths, setAuths] = useState([]);
       const [newAuth, setNewAuth] = useState({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "" });
@@ -1052,10 +1181,17 @@
             first_name: editing.first_name || "", last_name: editing.last_name || "",
             date_of_birth: editing.date_of_birth || "", medicaid_number: editing.medicaid_number || "",
             is_active: editing.is_active !== false,
+            support_coordinator: editing.support_coordinator || "",
+            support_coordinator_phone: editing.support_coordinator_phone || "",
+            support_coordinator_email: editing.support_coordinator_email || "",
+            support_coordinator_agency: editing.support_coordinator_agency || "",
           });
           setAuths(editing.person_service_authorizations || []);
         } else {
-          setForm({ first_name: "", last_name: "", date_of_birth: "", medicaid_number: "", is_active: true });
+          setForm({
+            first_name: "", last_name: "", date_of_birth: "", medicaid_number: "", is_active: true,
+            support_coordinator: "", support_coordinator_phone: "", support_coordinator_email: "", support_coordinator_agency: "",
+          });
           setAuths([]);
         }
         setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "" });
@@ -1121,6 +1257,10 @@
         const payload = { ...form };
         if (!payload.date_of_birth) delete payload.date_of_birth;
         if (!payload.medicaid_number) delete payload.medicaid_number;
+        if (!payload.support_coordinator) delete payload.support_coordinator;
+        if (!payload.support_coordinator_phone) delete payload.support_coordinator_phone;
+        if (!payload.support_coordinator_email) delete payload.support_coordinator_email;
+        if (!payload.support_coordinator_agency) delete payload.support_coordinator_agency;
 
         let result;
         if (editing) {
@@ -1140,7 +1280,7 @@
       };
 
       return (
-        <Modal open={open} onClose={onClose} title={editing ? "Edit Client" : "Add Client"} subtitle="Person management and service authorizations" width={600}>
+        <Modal open={open} onClose={onClose} title={editing ? "Edit Client" : "Add Client"} subtitle="Person management and service authorizations" width={760}>
           <FormRow>
             <FormField label="First Name" required half>
               <input style={fieldStyle} value={form.first_name} onChange={e => set("first_name", e.target.value)} placeholder="First name" />
@@ -1174,6 +1314,28 @@
               </div>
             </FormField>
           )}
+
+          {/* Support Coordinator */}
+          <div style={{ marginTop: 8, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
+            <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Support Coordinator</h3>
+            <p style={{ fontSize: 12, color: CB.textLight, marginBottom: 14 }}>DSPD-assigned coordinator for this client. Used in face sheets, quarterly reports, and SC correspondence.</p>
+            <FormRow>
+              <FormField label="Coordinator Name" half>
+                <input style={fieldStyle} value={form.support_coordinator} onChange={e => set("support_coordinator", e.target.value)} placeholder="Coordinator's full name" />
+              </FormField>
+              <FormField label="Agency" half>
+                <input style={fieldStyle} value={form.support_coordinator_agency} onChange={e => set("support_coordinator_agency", e.target.value)} placeholder="e.g. Chrysalis, Kostopulos, Self" />
+              </FormField>
+            </FormRow>
+            <FormRow>
+              <FormField label="Phone" half>
+                <input style={fieldStyle} type="tel" value={form.support_coordinator_phone} onChange={e => set("support_coordinator_phone", e.target.value)} placeholder="(801) 555-0000" />
+              </FormField>
+              <FormField label="Email" half>
+                <input style={fieldStyle} type="email" value={form.support_coordinator_email} onChange={e => set("support_coordinator_email", e.target.value)} placeholder="coordinator@agency.org" />
+              </FormField>
+            </FormRow>
+          </div>
 
           {/* Authorizations Section */}
           {editing && (
@@ -1273,12 +1435,87 @@
       );
     }
 
+    function ClientProfileModal({ open, onClose, client, onEdit, scLookup }) {
+      if (!client) return null;
+      const fmtDate = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString() : null;
+      const age = client.date_of_birth ? Math.floor((new Date() - new Date(client.date_of_birth + "T00:00:00")) / (365.25 * 86400000)) : null;
+      const auths = client.person_service_authorizations || [];
+
+      return (
+        <Modal open={open} onClose={onClose} title={`${client.first_name} ${client.last_name}`} subtitle={client.is_active ? "Active client" : "Inactive client"} width={680}>
+          {/* Identity strip */}
+          <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 22, padding: "14px 16px", background: `linear-gradient(135deg, ${CB.teal}08, ${CB.blue}08)`, borderRadius: 14, border: `1px solid ${CB.border}` }}>
+            <div style={{ width: 56, height: 56, borderRadius: 14, background: `linear-gradient(135deg, ${CB.blue}, ${CB.teal})`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, fontWeight: 800, color: CB.white, flexShrink: 0 }}>
+              {(client.first_name?.[0] || "") + (client.last_name?.[0] || "")}
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 4 }}>
+                <Badge text={client.is_active ? "Active" : "Inactive"} color={client.is_active ? CB.green : CB.textLight} />
+                {client.medicaid_number && <Badge text={`MA: ${client.medicaid_number}`} color={CB.navy} />}
+                {age !== null && <Badge text={`${age} yrs`} color={CB.blue} />}
+              </div>
+              {client.support_coordinator && <div style={{ fontSize: 12, color: CB.textMid }}>SC: {client.support_coordinator}{client.support_coordinator_agency ? ` (${client.support_coordinator_agency})` : ""}</div>}
+            </div>
+          </div>
+
+          <ProfileSection title="Identity">
+            <ProfileField label="Full Name" value={`${client.first_name} ${client.last_name}`} />
+            <ProfileField label="Date of Birth" value={fmtDate(client.date_of_birth)} />
+            <ProfileField label="Medicaid #" value={client.medicaid_number} />
+            <ProfileField label="Status" value={client.is_active ? "Active" : "Inactive"} />
+          </ProfileSection>
+
+          <ProfileSection title="Support Coordinator">
+            <ProfileField label="Coordinator" value={client.support_coordinator} />
+            <ProfileField label="Agency" value={client.support_coordinator_agency} />
+            <ProfileField label="Phone" value={client.support_coordinator_phone} />
+            <ProfileField label="Email" value={client.support_coordinator_email} />
+          </ProfileSection>
+
+          {auths.length > 0 && (
+            <div style={{ marginBottom: 20 }}>
+              <h3 style={{ fontSize: 13, fontWeight: 700, color: CB.navy, marginBottom: 12, textTransform: "uppercase", letterSpacing: 0.8 }}>Service Authorizations ({auths.length})</h3>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {auths.map(a => {
+                  const code = a.service_code_definitions?.code || (scLookup && scLookup[a.service_code_id]) || "?";
+                  const pct = a.authorized_units > 0 ? Math.min(100, (a.used_units / a.authorized_units) * 100) : 0;
+                  const barColor = pct >= 90 ? CB.red : pct >= 75 ? CB.amber : CB.teal;
+                  return (
+                    <div key={a.id} style={{ padding: "12px 14px", borderRadius: 10, background: CB.cream, border: `1px solid ${CB.border}` }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 8, flexWrap: "wrap" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <Badge text={code} color={CB.blue} />
+                          <span style={{ fontSize: 13, fontWeight: 600, color: CB.text }}>{a.used_units || 0} / {a.authorized_units} units</span>
+                        </div>
+                        <span style={{ fontSize: 11, color: CB.textLight }}>
+                          {a.start_date ? fmtDate(a.start_date) : "—"} → {a.end_date ? fmtDate(a.end_date) : "—"}
+                        </span>
+                      </div>
+                      <div style={{ height: 6, borderRadius: 3, background: CB.border, overflow: "hidden" }}>
+                        <div style={{ width: `${pct}%`, height: "100%", background: barColor, transition: "width 0.4s ease" }} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 8 }}>
+            <SecondaryButton onClick={onClose}>Close</SecondaryButton>
+            <PrimaryButton onClick={() => { onClose(); onEdit(client); }}>{icons.edit({ size: 15 })} Edit</PrimaryButton>
+          </div>
+        </Modal>
+      );
+    }
+
     function ClientsPage() {
       const [clients, setClients] = useState([]);
       const [loading, setLoading] = useState(true);
       const [formOpen, setFormOpen] = useState(false);
       const [editing, setEditing] = useState(null);
       const [scLookup, setScLookup] = useState({});
+      const [viewing, setViewing] = useState(null);
 
       useEffect(() => { loadClients(); }, []);
 
@@ -1286,7 +1523,7 @@
         setLoading(true);
         const [clientRes, scRes] = await Promise.all([
           supabase.from("persons")
-            .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, person_service_authorizations(id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code))")
+            .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, support_coordinator, support_coordinator_phone, support_coordinator_email, support_coordinator_agency, person_service_authorizations(id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code))")
             .order("last_name"),
           supabase.from("service_code_definitions").select("id, code").order("code"),
         ]);
@@ -1304,9 +1541,19 @@
 
       const openEdit = (row) => { setEditing(row); setFormOpen(true); };
       const openAdd = () => { setEditing(null); setFormOpen(true); };
+      const openProfile = (row) => setViewing(row);
 
       const columns = [
-        { label: "Name", bold: true, render: (r) => `${r.first_name} ${r.last_name}` },
+        { label: "Name", bold: true, render: (r) => (
+          <button onClick={(e) => { e.stopPropagation(); openProfile(r); }} style={{
+            background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit",
+            fontSize: 14, fontWeight: 600, color: CB.navy, textAlign: "left",
+            transition: "color 0.15s",
+          }}
+            onMouseEnter={e => { e.currentTarget.style.color = CB.teal; }}
+            onMouseLeave={e => { e.currentTarget.style.color = CB.navy; }}
+          >{r.first_name} {r.last_name}</button>
+        )},
         { label: "Medicaid #", render: (r) => r.medicaid_number || "—" },
         { label: "DOB", render: (r) => r.date_of_birth ? new Date(r.date_of_birth + "T00:00:00").toLocaleDateString() : "—" },
         { label: "Status", render: (r) => <Badge text={r.is_active ? "Active" : "Inactive"} color={r.is_active ? CB.green : CB.textLight} /> },
@@ -1337,6 +1584,7 @@
           />
           <DataTable columns={columns} data={clients} loading={loading} emptyMessage="No clients found" />
           <ClientForm open={formOpen} onClose={() => { setFormOpen(false); loadClients(); }} onSaved={loadClients} editing={editing} />
+          <ClientProfileModal open={!!viewing} onClose={() => setViewing(null)} client={viewing} onEdit={openEdit} scLookup={scLookup} />
         </div>
       );
     }
@@ -2560,7 +2808,7 @@
       };
 
       return (
-        <Modal open={open} onClose={onClose} title="New Service Note" subtitle={selectedCode ? `Dynamic fields for ${selectedCode}` : "Select a service code to load specific fields"} width={640}>
+        <Modal open={open} onClose={onClose} title="New Service Note" subtitle={selectedCode ? `Dynamic fields for ${selectedCode}` : "Select a service code to load specific fields"} width={760}>
           <FormRow>
             <FormField label="Staff Member" required half>
               <select style={fieldStyle} value={form.staff_id} onChange={e => set("staff_id", e.target.value)}>
@@ -2868,7 +3116,7 @@
           <ServiceNoteForm open={formOpen} onClose={() => setFormOpen(false)} onSaved={loadNotes} />
 
           {/* Note Detail / Edit Modal */}
-          <Modal open={!!viewing} onClose={() => setViewing(null)} title={editing ? "Edit Service Note" : "Service Note Detail"} width={660}
+          <Modal open={!!viewing} onClose={() => setViewing(null)} title={editing ? "Edit Service Note" : "Service Note Detail"} width={760}
             subtitle={viewing ? `${viewing.persons?.first_name || ""} ${viewing.persons?.last_name || ""} — ${viewing.service_date || ""}` : ""}>
             {viewing && (
               <div>
@@ -3228,7 +3476,7 @@
           <DataTable columns={columns} data={sessions} loading={loading} emptyMessage="No EVV sessions recorded" onRowClick={openEVVDetail} />
 
           {/* EVV Detail Modal */}
-          <Modal open={!!viewing} onClose={() => setViewing(null)} title="EVV Session Detail" width={580}
+          <Modal open={!!viewing} onClose={() => setViewing(null)} title="EVV Session Detail" width={680}
             subtitle={viewing ? `${viewing.staff?.first_name || ""} ${viewing.staff?.last_name || ""} → ${viewing.persons?.first_name || ""} ${viewing.persons?.last_name || ""}` : ""}>
             {viewing && (
               <div>
@@ -3961,7 +4209,7 @@
           )}
 
           {/* Report Incident Modal */}
-          <Modal open={showForm} onClose={() => setShowForm(false)} title="Report Incident" subtitle="All fields are logged for DHHS compliance" width={640}>
+          <Modal open={showForm} onClose={() => setShowForm(false)} title="Report Incident" subtitle="All fields are logged for DHHS compliance" width={760}>
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
               {/* Type */}
               <FormField label="Incident Type" required>
@@ -5520,7 +5768,7 @@
     // ═══════════════════════════════════════════════════════════════
     // BILLING & CLAIMS — real claim engine from service notes
     // ═══════════════════════════════════════════════════════════════
-    function BillingPage() {
+    function BillingPage({ embedded = false }) {
       const [claims, setClaims] = useState([]);
       const [summary, setSummary] = useState(null);
       const [loading, setLoading] = useState(true);
@@ -5664,14 +5912,21 @@
 
       return (
         <div>
-          <PageHeader title="Billing & Claims" subtitle="Auto-calculated claims from service notes with DHHS91172 rate table rules"
-            action={
-              <div style={{ display: "flex", gap: 8 }}>
-                <SecondaryButton onClick={exportCSV}>{icons.barChart({ size: 15 })} Export CSV</SecondaryButton>
-                <PrimaryButton onClick={generateClaims}>{icons.refresh({ size: 16 })} Recalculate</PrimaryButton>
-              </div>
-            }
-          />
+          {!embedded ? (
+            <PageHeader title="Billing & Claims" subtitle="Auto-calculated claims from service notes with DHHS91172 rate table rules"
+              action={
+                <div style={{ display: "flex", gap: 8 }}>
+                  <SecondaryButton onClick={exportCSV}>{icons.barChart({ size: 15 })} Export CSV</SecondaryButton>
+                  <PrimaryButton onClick={generateClaims}>{icons.refresh({ size: 16 })} Recalculate</PrimaryButton>
+                </div>
+              }
+            />
+          ) : (
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 16 }}>
+              <SecondaryButton onClick={exportCSV}>{icons.barChart({ size: 15 })} Export CSV</SecondaryButton>
+              <PrimaryButton onClick={generateClaims}>{icons.refresh({ size: 16 })} Recalculate</PrimaryButton>
+            </div>
+          )}
 
           {/* Date range filter */}
           <div style={{
@@ -5930,15 +6185,15 @@
       };
 
       const statusColors = { pending: CB.amber, submitted: CB.blue, paid: CB.green, partial: "#7B1FA2", denied: CB.red, appealed: "#E65100", void: CB.textLight };
-      const tabs = [{ key:"overview",label:"Overview" },{ key:"claims",label:`Claims (${claims.length})` },{ key:"payments",label:`Payments (${payments.length})` },{ key:"aging",label:"Aging Report" },{ key:"contracts",label:`Contracts (${contracts.length})` }];
+      const tabs = [{ key:"overview",label:"Overview" },{ key:"billing",label:"Billing" },{ key:"claims",label:`Claims (${claims.length})` },{ key:"payments",label:`Payments (${payments.length})` },{ key:"aging",label:"Aging Report" },{ key:"contracts",label:`Contracts (${contracts.length})` }];
 
       return (
         <div>
-          <PageHeader title="Financial Management" subtitle="Payment tracking, UPI claims import, aging reports — multi-contract"
+          <PageHeader title="Finance" subtitle="Billing, claims, payments, aging, and contracts — unified financial operations"
             action={<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               {tab === "aging" && <button onClick={exportAgingCSV} style={{ display:"flex",alignItems:"center",gap:6,padding:"10px 16px",borderRadius:10,border:`1px solid ${CB.border}`,background:CB.white,color:CB.textMid,fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit" }}>{icons.barChart({size:14})} Export CSV</button>}
-              <button onClick={() => setShowImport(true)} style={{ display:"flex",alignItems:"center",gap:6,padding:"10px 16px",borderRadius:10,border:`1px solid ${CB.navy}`,background:`${CB.navy}08`,color:CB.navy,fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit" }}>{icons.upload({size:14})} Import UPI</button>
-              <button onClick={() => setShowPaymentForm(true)} style={{ display:"flex",alignItems:"center",gap:6,padding:"10px 16px",borderRadius:10,border:"none",background:CB.green,color:CB.white,fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit" }}>{icons.dollar({size:14})} Record Payment</button>
+              {tab !== "billing" && <button onClick={() => setShowImport(true)} style={{ display:"flex",alignItems:"center",gap:6,padding:"10px 16px",borderRadius:10,border:`1px solid ${CB.navy}`,background:`${CB.navy}08`,color:CB.navy,fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit" }}>{icons.upload({size:14})} Import UPI</button>}
+              {tab !== "billing" && <button onClick={() => setShowPaymentForm(true)} style={{ display:"flex",alignItems:"center",gap:6,padding:"10px 16px",borderRadius:10,border:"none",background:CB.green,color:CB.white,fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit" }}>{icons.dollar({size:14})} Record Payment</button>}
             </div>}
           />
           <div style={{ display:"flex",gap:4,marginBottom:20,background:CB.white,borderRadius:12,padding:4,border:`1px solid ${CB.border}`,width:"fit-content",flexWrap:"wrap" }}>
@@ -5974,6 +6229,9 @@
                 )}
               </div>
             </>)}
+
+            {/* ═══ BILLING (merged from standalone Billing page) ═══ */}
+            {tab === "billing" && <BillingPage embedded={true} />}
 
             {/* ═══ CLAIMS ═══ */}
             {tab === "claims" && (
@@ -7119,15 +7377,44 @@
       const handleSubmit = async () => {
         if (!form.first_name || !form.last_name) return addToast("Name is required", "error");
         setSaving(true);
-        // Step 1: Create person
+        // Step 1: Create person — persist all captured intake fields
         const personPayload = {
           org_id: orgId,
           first_name: form.first_name, last_name: form.last_name,
           date_of_birth: form.date_of_birth || null,
           medicaid_number: form.medicaid_number || null,
           is_active: true,
+          // Contact / demographics
+          address: form.address || null, city: form.city || null, state: form.state || null, zip: form.zip || null,
+          phone: form.phone || null, gender: form.gender || null, primary_language: form.primary_language || null,
+          // Guardian / emergency contacts
+          guardian_name: form.guardian_name || null, guardian_phone: form.guardian_phone || null, guardian_relation: form.guardian_relation || null,
+          emergency_contact_name: form.emergency_name || null, emergency_contact_phone: form.emergency_phone || null,
+          // Support coordinator (mapped from intake's sc_* keys to canonical column names)
+          support_coordinator: form.support_coordinator || null,
+          support_coordinator_phone: form.sc_phone || null,
+          support_coordinator_email: form.sc_email || null,
+          support_coordinator_agency: form.sc_agency || null,
+          // Clinical
+          primary_diagnosis: form.diagnoses || null,
+          admission_date: form.admission_date || null,
         };
-        const { data: personData, error: personErr } = await supabase.from("persons").insert(personPayload).select();
+        // Strip nulls so we never trigger NOT NULL on optional columns
+        Object.keys(personPayload).forEach(k => { if (personPayload[k] === null) delete personPayload[k]; });
+
+        let personData, personErr;
+        ({ data: personData, error: personErr } = await supabase.from("persons").insert(personPayload).select());
+        // If a column doesn't exist (older schema), retry with only core fields
+        if (personErr && /column .* does not exist/i.test(personErr.message || "")) {
+          const fallbackPayload = {
+            org_id: orgId, first_name: form.first_name, last_name: form.last_name,
+            date_of_birth: form.date_of_birth || null, medicaid_number: form.medicaid_number || null,
+            is_active: true,
+          };
+          Object.keys(fallbackPayload).forEach(k => { if (fallbackPayload[k] === null) delete fallbackPayload[k]; });
+          ({ data: personData, error: personErr } = await supabase.from("persons").insert(fallbackPayload).select());
+          if (!personErr) addToast("Client created (some intake fields skipped — schema missing columns)", "warning");
+        }
         if (personErr || !personData?.[0]) {
           addToast("Failed to create client: " + (personErr?.message || "unknown error"), "error");
           setSaving(false);
@@ -9149,7 +9436,7 @@
 
       const renderPage = () => {
         switch (page) {
-          case "dashboard": return <DashboardPage />;
+          case "dashboard": return <DashboardPage onNavigate={setPage} />;
           case "staff": return <StaffPage />;
           case "clients": return <ClientsPage />;
           case "intake": return <IntakePage />;
@@ -9161,7 +9448,7 @@
           case "alerts": return <AlertsPage />;
           case "medications": return <MedicationsPage />;
           case "goals": return <PCSPGoalsPage />;
-          case "billing": return <BillingPage />;
+          case "billing": return <FinancePage />; // merged into Finance in v18.7 — redirect old billing route
           case "finance": return <FinancePage />;
           case "docs": return <DocEnginePage />;
           case "ai": return <AIPage />;
