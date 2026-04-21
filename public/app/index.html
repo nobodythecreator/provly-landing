@@ -1168,6 +1168,10 @@
       const [form, setForm] = useState({
         first_name: "", last_name: "", date_of_birth: "", medicaid_number: "", is_active: true,
         support_coordinator: "", support_coordinator_phone: "", support_coordinator_email: "", support_coordinator_agency: "",
+        guardian_name: "", guardian_phone: "", guardian_relation: "",
+        emergency_contact_name: "", emergency_contact_phone: "",
+        physician_name: "", physician_phone: "",
+        address: "", city: "", state: "UT", zip: "", phone: "",
       });
       const [auths, setAuths] = useState([]);
       const [newAuth, setNewAuth] = useState({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "" });
@@ -1186,12 +1190,28 @@
             support_coordinator_phone: editing.support_coordinator_phone || "",
             support_coordinator_email: editing.support_coordinator_email || "",
             support_coordinator_agency: editing.support_coordinator_agency || "",
+            guardian_name: editing.guardian_name || "",
+            guardian_phone: editing.guardian_phone || "",
+            guardian_relation: editing.guardian_relation || "",
+            emergency_contact_name: editing.emergency_contact_name || "",
+            emergency_contact_phone: editing.emergency_contact_phone || "",
+            physician_name: editing.physician_name || "",
+            physician_phone: editing.physician_phone || "",
+            address: editing.address || "",
+            city: editing.city || "",
+            state: editing.state || "UT",
+            zip: editing.zip || "",
+            phone: editing.phone || "",
           });
           setAuths(editing.person_service_authorizations || []);
         } else {
           setForm({
             first_name: "", last_name: "", date_of_birth: "", medicaid_number: "", is_active: true,
             support_coordinator: "", support_coordinator_phone: "", support_coordinator_email: "", support_coordinator_agency: "",
+            guardian_name: "", guardian_phone: "", guardian_relation: "",
+            emergency_contact_name: "", emergency_contact_phone: "",
+            physician_name: "", physician_phone: "",
+            address: "", city: "", state: "UT", zip: "", phone: "",
           });
           setAuths([]);
         }
@@ -1256,12 +1276,16 @@
         if (!form.first_name || !form.last_name) return addToast("First and last name are required", "error");
         setSaving(true);
         const payload = { ...form };
-        if (!payload.date_of_birth) delete payload.date_of_birth;
-        if (!payload.medicaid_number) delete payload.medicaid_number;
-        if (!payload.support_coordinator) delete payload.support_coordinator;
-        if (!payload.support_coordinator_phone) delete payload.support_coordinator_phone;
-        if (!payload.support_coordinator_email) delete payload.support_coordinator_email;
-        if (!payload.support_coordinator_agency) delete payload.support_coordinator_agency;
+        // Strip all empty optional fields so we don't write empty strings into nullable columns
+        const optionalKeys = [
+          "date_of_birth", "medicaid_number",
+          "support_coordinator", "support_coordinator_phone", "support_coordinator_email", "support_coordinator_agency",
+          "guardian_name", "guardian_phone", "guardian_relation",
+          "emergency_contact_name", "emergency_contact_phone",
+          "physician_name", "physician_phone",
+          "address", "city", "zip", "phone",
+        ];
+        optionalKeys.forEach(k => { if (!payload[k]) delete payload[k]; });
 
         let result;
         if (editing) {
@@ -1270,6 +1294,25 @@
           payload.org_id = orgId;
           result = await supabase.from("persons").insert(payload);
         }
+
+        // Schema fallback: if any column doesn't exist yet, retry with core fields only
+        if (result.error && /column .* does not exist/i.test(result.error.message || "")) {
+          const core = {
+            first_name: form.first_name, last_name: form.last_name,
+            date_of_birth: form.date_of_birth || null,
+            medicaid_number: form.medicaid_number || null,
+            is_active: form.is_active,
+          };
+          Object.keys(core).forEach(k => { if (core[k] === null) delete core[k]; });
+          if (editing) {
+            result = await supabase.from("persons").update(core).eq("id", editing.id);
+          } else {
+            core.org_id = orgId;
+            result = await supabase.from("persons").insert(core);
+          }
+          if (!result.error) addToast("Saved with core fields only — some contact columns missing from schema", "warning");
+        }
+
         setSaving(false);
         if (result.error) {
           addToast(result.error.message, "error");
@@ -1334,6 +1377,78 @@
               </FormField>
               <FormField label="Email" half>
                 <input style={fieldStyle} type="email" value={form.support_coordinator_email} onChange={e => set("support_coordinator_email", e.target.value)} placeholder="coordinator@agency.org" />
+              </FormField>
+            </FormRow>
+          </div>
+
+          {/* Guardian */}
+          <div style={{ marginTop: 8, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
+            <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Guardian</h3>
+            <p style={{ fontSize: 12, color: CB.textLight, marginBottom: 14 }}>Legal guardian if applicable. Leave blank if client is self-guardian.</p>
+            <FormRow>
+              <FormField label="Guardian Name" half>
+                <input style={fieldStyle} value={form.guardian_name} onChange={e => set("guardian_name", e.target.value)} placeholder="Full name" />
+              </FormField>
+              <FormField label="Relationship" half>
+                <input style={fieldStyle} value={form.guardian_relation} onChange={e => set("guardian_relation", e.target.value)} placeholder="Mother, father, sibling, legal guardian, etc." />
+              </FormField>
+            </FormRow>
+            <FormRow>
+              <FormField label="Guardian Phone" half>
+                <input style={fieldStyle} type="tel" value={form.guardian_phone} onChange={e => set("guardian_phone", e.target.value)} placeholder="(801) 555-0000" />
+              </FormField>
+            </FormRow>
+          </div>
+
+          {/* Emergency Contact */}
+          <div style={{ marginTop: 8, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
+            <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Emergency Contact</h3>
+            <p style={{ fontSize: 12, color: CB.textLight, marginBottom: 14 }}>Primary person to contact in case of emergency. Can differ from guardian.</p>
+            <FormRow>
+              <FormField label="Contact Name" half>
+                <input style={fieldStyle} value={form.emergency_contact_name} onChange={e => set("emergency_contact_name", e.target.value)} placeholder="Full name" />
+              </FormField>
+              <FormField label="Phone" half>
+                <input style={fieldStyle} type="tel" value={form.emergency_contact_phone} onChange={e => set("emergency_contact_phone", e.target.value)} placeholder="(801) 555-0000" />
+              </FormField>
+            </FormRow>
+          </div>
+
+          {/* Medical */}
+          <div style={{ marginTop: 8, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
+            <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Medical</h3>
+            <p style={{ fontSize: 12, color: CB.textLight, marginBottom: 14 }}>Primary care physician on file.</p>
+            <FormRow>
+              <FormField label="Physician Name" half>
+                <input style={fieldStyle} value={form.physician_name} onChange={e => set("physician_name", e.target.value)} placeholder="Dr. Full Name" />
+              </FormField>
+              <FormField label="Physician Phone" half>
+                <input style={fieldStyle} type="tel" value={form.physician_phone} onChange={e => set("physician_phone", e.target.value)} placeholder="(801) 555-0000" />
+              </FormField>
+            </FormRow>
+          </div>
+
+          {/* Address */}
+          <div style={{ marginTop: 8, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
+            <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Address & Phone</h3>
+            <p style={{ fontSize: 12, color: CB.textLight, marginBottom: 14 }}>Residential address. For group-home clients, use the home address.</p>
+            <FormField label="Street Address">
+              <input style={fieldStyle} value={form.address} onChange={e => set("address", e.target.value)} placeholder="123 Main St" />
+            </FormField>
+            <FormRow>
+              <FormField label="City" half>
+                <input style={fieldStyle} value={form.city} onChange={e => set("city", e.target.value)} placeholder="West Jordan" />
+              </FormField>
+              <FormField label="State" half>
+                <input style={fieldStyle} value={form.state} onChange={e => set("state", e.target.value)} placeholder="UT" maxLength={2} />
+              </FormField>
+            </FormRow>
+            <FormRow>
+              <FormField label="ZIP" half>
+                <input style={fieldStyle} value={form.zip} onChange={e => set("zip", e.target.value)} placeholder="84088" />
+              </FormField>
+              <FormField label="Home Phone" half>
+                <input style={fieldStyle} type="tel" value={form.phone} onChange={e => set("phone", e.target.value)} placeholder="(801) 555-0000" />
               </FormField>
             </FormRow>
           </div>
@@ -1525,7 +1640,7 @@
         setLoading(true);
         const [clientRes, scRes] = await Promise.all([
           supabase.from("persons")
-            .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, support_coordinator, support_coordinator_phone, support_coordinator_email, support_coordinator_agency, person_service_authorizations(id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code))")
+            .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, support_coordinator, support_coordinator_phone, support_coordinator_email, support_coordinator_agency, guardian_name, guardian_phone, guardian_relation, emergency_contact_name, emergency_contact_phone, physician_name, physician_phone, address, city, state, zip, phone, person_service_authorizations(id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code))")
             .order("last_name"),
           supabase.from("service_code_definitions").select("id, code").order("code"),
         ]);
@@ -1675,6 +1790,32 @@
       );
     }
 
+    // Training category labels + display order — maps DB category values to human-friendly names.
+    // Current DB uses deadline/renewal-based categories (30_day, 90_day, etc.), which represents
+    // WHEN training is due relative to hire date. Content-based clusters (RHS / P&P / CPR) can
+    // be added later via a category column update — this map accepts both styles gracefully.
+    const TRAINING_CATEGORY_META = {
+      "30_day":            { label: "Due Within 30 Days of Hire",  color: "#E53935", order: 1, description: "Critical new-hire training — must complete in first month" },
+      "90_day":            { label: "Due Within 90 Days of Hire",  color: "#F57F17", order: 2, description: "Must complete in first three months" },
+      "180_day":           { label: "Due Within 180 Days of Hire", color: "#E65100", order: 3, description: "Must complete in first six months" },
+      "annual":            { label: "Annual Renewal",              color: "#1A73E8", order: 4, description: "Renew every year" },
+      "abi":               { label: "ABI-Specific",                color: "#00897B", order: 5, description: "Required for Acquired Brain Injury service codes" },
+      "ongoing":           { label: "Ongoing / As-Needed",         color: "#4A5568", order: 6, description: "No fixed renewal deadline" },
+      // Content-based clusters (for future migration)
+      "rhs":               { label: "RHS (Residential Habilitation)", color: "#00897B", order: 10 },
+      "policy_procedure":  { label: "Policy & Procedure",          color: "#1A73E8", order: 11 },
+      "cpr_first_aid":     { label: "CPR / First Aid",             color: "#E53935", order: 12 },
+      "organizational":    { label: "Organizational",              color: "#4A5568", order: 13 },
+      "service_specific":  { label: "Service-Specific",             color: "#F57F17", order: 14 },
+      "uncategorized":     { label: "Uncategorized",               color: "#94A3B8", order: 99 },
+    };
+
+    // Helper: pull display info for a category, falling back gracefully
+    const getCategoryMeta = (cat) => {
+      if (!cat) return TRAINING_CATEGORY_META.uncategorized;
+      return TRAINING_CATEGORY_META[cat] || { label: cat.replace(/_/g, " "), color: "#4A5568", order: 50 };
+    };
+
     function TrainingPage() {
       const [tab, setTab] = useState("bystaff");
       const [completions, setCompletions] = useState([]);
@@ -1785,7 +1926,7 @@
 
       return (
         <div>
-          <PageHeader title="Training Tracker" subtitle="27 SOW-required training topics — view by staff member, completion log, or topic definitions"
+          <PageHeader title="Training Tracker" subtitle={`${topics.length} training ${topics.length === 1 ? "topic" : "topics"} — view by staff member, completion log, or topic definitions`}
             action={<PrimaryButton onClick={() => setFormOpen(true)}>{icons.plus({ size: 16 })} Log Training</PrimaryButton>}
           />
           <div style={{ display: "flex", gap: 4, marginBottom: 20, background: CB.cream, padding: 4, borderRadius: 10, width: "fit-content" }}>
@@ -1879,7 +2020,60 @@
             <DataTable columns={compColumns} data={completions} loading={loading} emptyMessage="No training completions logged yet" />
           )}
           {tab === "topics" && (
-            <DataTable columns={topicColumns} data={topics} loading={loading} emptyMessage="No training topics found" />
+            <div style={{ animation: "fadeIn 0.3s ease" }}>
+              {loading ? (
+                <div style={{ display: "flex", justifyContent: "center", padding: 48 }}><Spinner size={24} /></div>
+              ) : topics.length === 0 ? (
+                <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>No training topics found</div>
+              ) : (() => {
+                // Group topics by category
+                const grouped = {};
+                topics.forEach(t => {
+                  const cat = t.category || "uncategorized";
+                  if (!grouped[cat]) grouped[cat] = [];
+                  grouped[cat].push(t);
+                });
+                // Sort categories by meta order
+                const sortedCats = Object.keys(grouped).sort((a, b) => {
+                  return (getCategoryMeta(a).order || 99) - (getCategoryMeta(b).order || 99);
+                });
+                return (
+                  <div>
+                    <div style={{ marginBottom: 14, fontSize: 13, color: CB.textMid }}>
+                      <strong style={{ color: CB.navy }}>{topics.length}</strong> total topics across <strong style={{ color: CB.navy }}>{sortedCats.length}</strong> {sortedCats.length === 1 ? "category" : "categories"}
+                    </div>
+                    {sortedCats.map((cat, i) => {
+                      const meta = getCategoryMeta(cat);
+                      const list = grouped[cat];
+                      return (
+                        <CollapsibleTimeGroup key={cat} label={meta.label} count={list.length} defaultOpen={i < 2} accentColor={meta.color}>
+                          {meta.description && <div style={{ fontSize: 12, color: CB.textLight, fontStyle: "italic", marginBottom: 10 }}>{meta.description}</div>}
+                          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            {list.map(t => (
+                              <div key={t.id} style={{
+                                display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+                                padding: "10px 14px", borderRadius: 10, background: CB.cream,
+                                border: `1px solid ${CB.border}`, flexWrap: "wrap",
+                              }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                                  <span style={{ fontSize: 14, fontWeight: 600, color: CB.navy }}>{t.topic_name}</span>
+                                  {t.requires_certification && <Badge text="Cert Required" color={CB.red} />}
+                                </div>
+                                <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12, color: CB.textMid }}>
+                                  {t.deadline_days && <span>Due within <strong>{t.deadline_days}d</strong></span>}
+                                  {t.renewal_months && <span>Renew every <strong>{t.renewal_months}mo</strong></span>}
+                                  {!t.deadline_days && !t.renewal_months && <span style={{ fontStyle: "italic" }}>One-time</span>}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </CollapsibleTimeGroup>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+            </div>
           )}
           <TrainingLogForm open={formOpen} onClose={() => setFormOpen(false)} onSaved={loadAll} />
         </div>
@@ -6894,7 +7088,7 @@
       const { orgId } = useAuth();
       const [units, setUnits] = useState([]);
       const [loading, setLoading] = useState(true);
-      const [addingTo, setAddingTo] = useState(null);
+      const [addingTo, setAddingTo] = useState(false); // false = modal closed; null = adding root; id = adding child
       const [newUnit, setNewUnit] = useState({ name: "", unit_type: "group", address: "", city: "" });
       const [editingUnit, setEditingUnit] = useState(null);
       const [saving, setSaving] = useState(false);
@@ -9670,46 +9864,74 @@
           </div>
 
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-            <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy }}>All Training Topics ({rows.length})</h3>
+            <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy }}>Training Status by Category</h3>
             <SecondaryButton onClick={load}>{icons.refresh({ size: 13 })} Refresh</SecondaryButton>
           </div>
 
-          <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, overflow: "hidden", boxShadow: CB.cardShadow }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr style={{ background: CB.cream }}>
-                  <th style={{ padding: "11px 16px", textAlign: "left", fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.6 }}>Topic</th>
-                  <th style={{ padding: "11px 16px", textAlign: "left", fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.6 }}>Category</th>
-                  <th style={{ padding: "11px 16px", textAlign: "left", fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.6 }}>Status</th>
-                  <th style={{ padding: "11px 16px", textAlign: "left", fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.6 }}>Last Completed</th>
-                  <th style={{ padding: "11px 16px", textAlign: "left", fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.6 }}>Expires</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r, i) => (
-                  <tr key={r.topic.id} style={{ borderBottom: i < rows.length - 1 ? `1px solid ${CB.border}` : "none" }}>
-                    <td style={{ padding: "12px 16px", fontSize: 13, fontWeight: 600, color: CB.text }}>
-                      {r.topic.topic_name}
-                      {r.topic.requires_certification && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: CB.amber, background: `${CB.amber}12`, padding: "1px 6px", borderRadius: 4 }}>CERT</span>}
-                    </td>
-                    <td style={{ padding: "12px 16px", fontSize: 12, color: CB.textMid }}>{r.topic.category ? r.topic.category.replace(/_/g, " ") : "—"}</td>
-                    <td style={{ padding: "12px 16px" }}><Badge text={statusLabel[r.status]} color={statusColor[r.status]} /></td>
-                    <td style={{ padding: "12px 16px", fontSize: 13, color: CB.textMid }}>
-                      {r.latest?.completed_at ? new Date(r.latest.completed_at).toLocaleDateString() : <span style={{ color: CB.textLight, fontStyle: "italic" }}>—</span>}
-                    </td>
-                    <td style={{ padding: "12px 16px", fontSize: 13, color: r.status === "expired" ? CB.red : r.status === "expiring" ? CB.amber : CB.textMid, fontWeight: r.status === "expired" || r.status === "expiring" ? 600 : 400 }}>
-                      {r.latest?.expires_at ? new Date(r.latest.expires_at).toLocaleDateString() : <span style={{ color: CB.textLight, fontStyle: "italic" }}>—</span>}
-                      {r.daysToExpiry !== null && r.status === "expired" && <span style={{ marginLeft: 6, fontSize: 11 }}>({Math.abs(r.daysToExpiry)}d overdue)</span>}
-                      {r.daysToExpiry !== null && r.status === "expiring" && <span style={{ marginLeft: 6, fontSize: 11 }}>({r.daysToExpiry}d)</span>}
-                    </td>
-                  </tr>
-                ))}
-                {rows.length === 0 && (
-                  <tr><td colSpan={5} style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 13 }}>No training topics defined yet. Set them up in the Training module.</td></tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+          {rows.length === 0 ? (
+            <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 13, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>
+              No training topics defined yet. Set them up in the Training module.
+            </div>
+          ) : (() => {
+            // Group rows by category using the global meta map
+            const grouped = {};
+            rows.forEach(r => {
+              const cat = r.topic.category || "uncategorized";
+              if (!grouped[cat]) grouped[cat] = [];
+              grouped[cat].push(r);
+            });
+            const sortedCats = Object.keys(grouped).sort((a, b) => (getCategoryMeta(a).order || 99) - (getCategoryMeta(b).order || 99));
+
+            return sortedCats.map((cat, i) => {
+              const meta = getCategoryMeta(cat);
+              const list = grouped[cat];
+              const catCounts = { current: 0, expiring: 0, expired: 0, missing: 0 };
+              list.forEach(r => catCounts[r.status]++);
+              const catIssues = catCounts.expired + catCounts.missing;
+              // Label includes inline status breakdown
+              const catLabel = (
+                <span>
+                  {meta.label}
+                  {catIssues > 0 && <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 700, color: CB.red, background: `${CB.red}14`, padding: "2px 8px", borderRadius: 8 }}>{catIssues} {catIssues === 1 ? "issue" : "issues"}</span>}
+                </span>
+              );
+              return (
+                <CollapsibleTimeGroup key={cat} label={catLabel} count={list.length} defaultOpen={catIssues > 0 || i < 2} accentColor={meta.color}>
+                  <div style={{ background: CB.white, borderRadius: 10, overflow: "hidden" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                      <thead>
+                        <tr style={{ background: CB.cream }}>
+                          <th style={{ padding: "9px 14px", textAlign: "left", fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.6 }}>Topic</th>
+                          <th style={{ padding: "9px 14px", textAlign: "left", fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.6 }}>Status</th>
+                          <th style={{ padding: "9px 14px", textAlign: "left", fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.6 }}>Last Completed</th>
+                          <th style={{ padding: "9px 14px", textAlign: "left", fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.6 }}>Expires</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {list.map((r, ri) => (
+                          <tr key={r.topic.id} style={{ borderBottom: ri < list.length - 1 ? `1px solid ${CB.border}` : "none" }}>
+                            <td style={{ padding: "10px 14px", fontSize: 13, fontWeight: 600, color: CB.text }}>
+                              {r.topic.topic_name}
+                              {r.topic.requires_certification && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: CB.amber, background: `${CB.amber}12`, padding: "1px 6px", borderRadius: 4 }}>CERT</span>}
+                            </td>
+                            <td style={{ padding: "10px 14px" }}><Badge text={statusLabel[r.status]} color={statusColor[r.status]} /></td>
+                            <td style={{ padding: "10px 14px", fontSize: 12, color: CB.textMid }}>
+                              {r.latest?.completed_at ? new Date(r.latest.completed_at).toLocaleDateString() : <span style={{ color: CB.textLight, fontStyle: "italic" }}>—</span>}
+                            </td>
+                            <td style={{ padding: "10px 14px", fontSize: 12, color: r.status === "expired" ? CB.red : r.status === "expiring" ? CB.amber : CB.textMid, fontWeight: r.status === "expired" || r.status === "expiring" ? 600 : 400 }}>
+                              {r.latest?.expires_at ? new Date(r.latest.expires_at).toLocaleDateString() : <span style={{ color: CB.textLight, fontStyle: "italic" }}>—</span>}
+                              {r.daysToExpiry !== null && r.status === "expired" && <span style={{ marginLeft: 6, fontSize: 11 }}>({Math.abs(r.daysToExpiry)}d overdue)</span>}
+                              {r.daysToExpiry !== null && r.status === "expiring" && <span style={{ marginLeft: 6, fontSize: 11 }}>({r.daysToExpiry}d)</span>}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </CollapsibleTimeGroup>
+              );
+            });
+          })()}
         </div>
       );
     }
@@ -9837,6 +10059,43 @@
       const fmtDate = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString() : null;
       const age = client.date_of_birth ? Math.floor((new Date() - new Date(client.date_of_birth + "T00:00:00")) / (365.25 * 86400000)) : null;
       const auths = client.person_service_authorizations || [];
+      const [activity, setActivity] = useState([]);
+      const [activityLoading, setActivityLoading] = useState(true);
+
+      useEffect(() => {
+        let alive = true;
+        setActivityLoading(true);
+        // Pull last 10 events from each relevant table, merge, sort, take top 15
+        Promise.all([
+          supabase.from("service_notes").select("id, service_date, service_code_definitions(code)").eq("person_id", client.id).order("service_date", { ascending: false }).limit(10),
+          supabase.from("incidents").select("id, occurred_at, incident_type, severity").eq("person_id", client.id).order("occurred_at", { ascending: false }).limit(10),
+          supabase.from("medication_logs").select("id, scheduled_date, scheduled_time, status, medications(medication_name)").eq("person_id", client.id).order("scheduled_date", { ascending: false }).limit(10),
+        ]).then(([nRes, iRes, mRes]) => {
+          if (!alive) return;
+          const events = [];
+          (nRes.data || []).forEach(n => events.push({
+            kind: "note", date: n.service_date + "T00:00:00",
+            label: `Service Note — ${n.service_code_definitions?.code || "?"}`,
+            color: CB.blue, icon: icons.fileText,
+          }));
+          (iRes.data || []).forEach(i => events.push({
+            kind: "incident", date: i.occurred_at,
+            label: `Incident — ${String(i.incident_type || "").replace(/_/g, " ")}${i.severity ? ` (${i.severity})` : ""}`,
+            color: i.severity === "critical" || i.severity === "high" ? CB.red : CB.amber,
+            icon: icons.alertTriangle,
+          }));
+          (mRes.data || []).forEach(m => events.push({
+            kind: "med", date: (m.scheduled_date + "T" + (m.scheduled_time || "00:00:00")),
+            label: `Med Pass — ${m.medications?.medication_name || "?"} (${m.status || "?"})`,
+            color: m.status === "missed" ? CB.red : m.status === "refused" ? CB.amber : CB.green,
+            icon: icons.capsule,
+          }));
+          events.sort((a, b) => new Date(b.date) - new Date(a.date));
+          setActivity(events.slice(0, 15));
+          setActivityLoading(false);
+        });
+        return () => { alive = false; };
+      }, [client.id]);
 
       return (
         <div>
@@ -9889,6 +10148,35 @@
               <ProfileField label="Allergies" full value={client.allergies} />
             </ProfileSection>
           )}
+
+          {/* Recent Activity feed */}
+          <div style={{ marginBottom: 20 }}>
+            <h3 style={{ fontSize: 13, fontWeight: 700, color: CB.navy, marginBottom: 12, textTransform: "uppercase", letterSpacing: 0.8 }}>Recent Activity</h3>
+            {activityLoading ? (
+              <div style={{ padding: 30, textAlign: "center", background: CB.white, borderRadius: 12, border: `1px solid ${CB.border}` }}><Spinner size={18} /></div>
+            ) : activity.length === 0 ? (
+              <div style={{ padding: 20, textAlign: "center", color: CB.textLight, fontSize: 13, background: CB.white, borderRadius: 12, border: `1px solid ${CB.border}` }}>No recent activity recorded.</div>
+            ) : (
+              <div style={{ background: CB.white, borderRadius: 12, border: `1px solid ${CB.border}`, overflow: "hidden" }}>
+                {activity.map((a, i) => (
+                  <div key={i} style={{
+                    display: "flex", alignItems: "center", gap: 12, padding: "10px 14px",
+                    borderBottom: i < activity.length - 1 ? `1px solid ${CB.border}` : "none",
+                  }}>
+                    <div style={{ width: 28, height: 28, borderRadius: 8, background: `${a.color}12`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      {a.icon({ size: 14, color: a.color })}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: CB.text }}>{a.label}</div>
+                    </div>
+                    <span style={{ fontSize: 12, color: CB.textLight, whiteSpace: "nowrap" }}>
+                      {new Date(a.date).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "2-digit" })}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       );
     }
@@ -10110,14 +10398,11 @@
       const [incidents, setIncidents] = useState([]);
       const [loading, setLoading] = useState(true);
       const [error, setError] = useState(null);
-      const [debug, setDebug] = useState(null);
 
       useEffect(() => {
         setLoading(true);
         setError(null);
-        setDebug(null);
         (async () => {
-          // Step 1: SIMPLE query, no joins, SELECT *
           const { data, error: err } = await supabase.from("incidents")
             .select("*")
             .eq("person_id", clientId)
@@ -10132,9 +10417,8 @@
           }
 
           const rows = data || [];
-          setDebug({ rowCount: rows.length, clientIdUsed: clientId, firstRow: rows[0] ? Object.keys(rows[0]) : null });
 
-          // Step 2: Enrich with reporter staff names client-side
+          // Enrich with reporter staff names client-side
           if (rows.length > 0) {
             const reporterIds = [...new Set(rows.map(r => r.reported_by).filter(Boolean))];
             if (reporterIds.length > 0) {
@@ -10156,23 +10440,7 @@
 
       if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
       if (error) return <div style={{ padding: 20, background: `${CB.red}10`, borderRadius: 12, border: `1px solid ${CB.red}30`, color: CB.red, fontSize: 13 }}>Error loading incidents: {error}</div>;
-
-      // Always show debug info at top so we can see what's happening
-      const debugPanel = debug && (
-        <div style={{ padding: "10px 14px", background: `${CB.blue}08`, border: `1px solid ${CB.blue}30`, borderRadius: 10, marginBottom: 16, fontSize: 12, color: CB.textMid, fontFamily: "monospace" }}>
-          Query returned <strong style={{ color: CB.navy }}>{debug.rowCount}</strong> row(s) for person_id=<code>{String(debug.clientIdUsed).slice(0, 8)}...</code>
-          {debug.firstRow && <div style={{ marginTop: 4, opacity: 0.7 }}>Columns: {debug.firstRow.join(", ")}</div>}
-        </div>
-      );
-
-      if (incidents.length === 0) return (
-        <div>
-          {debugPanel}
-          <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>
-            No incidents returned for this client. If you know there's data, check the browser console for errors or RLS issues.
-          </div>
-        </div>
-      );
+      if (incidents.length === 0) return <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>No incidents recorded. That's a good thing.</div>;
 
       const severityColor = { low: CB.blue, moderate: CB.amber, high: "#E65100", critical: CB.red };
 
@@ -10190,7 +10458,6 @@
 
       return (
         <div>
-          {debugPanel}
           <div style={{ marginBottom: 14, fontSize: 13, color: CB.textMid }}>
             <strong style={{ color: CB.navy }}>{incidents.length}</strong> incident{incidents.length === 1 ? "" : "s"} on record across {keys.length} {keys.length === 1 ? "month" : "months"}
           </div>
