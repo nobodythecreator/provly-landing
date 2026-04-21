@@ -1041,7 +1041,7 @@
       );
     }
 
-    function StaffProfileModal({ open, onClose, staff, onEdit }) {
+    function StaffProfileModal({ open, onClose, staff, onEdit, onViewFull }) {
       if (!staff) return null;
       const roleLabel = STAFF_ROLES.find(r => r.value === staff.role)?.label || staff.role?.replace(/_/g, " ") || "—";
       const fmtDate = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString() : null;
@@ -1086,15 +1086,16 @@
             <ProfileField label="Staff ID" value={staff.id?.slice(0, 8)} />
           </ProfileSection>
 
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 8 }}>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 8, flexWrap: "wrap" }}>
             <SecondaryButton onClick={onClose}>Close</SecondaryButton>
+            {onViewFull && <SecondaryButton onClick={() => { onClose(); onViewFull(staff.id); }}>{icons.externalLink ? icons.externalLink({ size: 14 }) : "↗"} View Full Profile</SecondaryButton>}
             <PrimaryButton onClick={() => { onClose(); onEdit(staff); }}>{icons.edit({ size: 15 })} Edit</PrimaryButton>
           </div>
         </Modal>
       );
     }
 
-    function StaffPage() {
+    function StaffPage({ onNavigate }) {
       const [staff, setStaff] = useState([]);
       const [loading, setLoading] = useState(true);
       const [formOpen, setFormOpen] = useState(false);
@@ -1150,7 +1151,7 @@
           />
           <DataTable columns={columns} data={staff} loading={loading} emptyMessage="No staff members found" />
           <StaffForm open={formOpen} onClose={() => setFormOpen(false)} onSaved={loadStaff} editing={editing} />
-          <StaffProfileModal open={!!viewing} onClose={() => setViewing(null)} staff={viewing} onEdit={openEdit} />
+          <StaffProfileModal open={!!viewing} onClose={() => setViewing(null)} staff={viewing} onEdit={openEdit} onViewFull={onNavigate ? (id) => onNavigate("staff-profile", { type: "staff", id }) : undefined} />
         </div>
       );
     }
@@ -1435,7 +1436,7 @@
       );
     }
 
-    function ClientProfileModal({ open, onClose, client, onEdit, scLookup }) {
+    function ClientProfileModal({ open, onClose, client, onEdit, scLookup, onViewFull }) {
       if (!client) return null;
       const fmtDate = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString() : null;
       const age = client.date_of_birth ? Math.floor((new Date() - new Date(client.date_of_birth + "T00:00:00")) / (365.25 * 86400000)) : null;
@@ -1501,15 +1502,16 @@
             </div>
           )}
 
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 8 }}>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 8, flexWrap: "wrap" }}>
             <SecondaryButton onClick={onClose}>Close</SecondaryButton>
+            {onViewFull && <SecondaryButton onClick={() => { onClose(); onViewFull(client.id); }}>{icons.externalLink ? icons.externalLink({ size: 14 }) : "↗"} View Full Profile</SecondaryButton>}
             <PrimaryButton onClick={() => { onClose(); onEdit(client); }}>{icons.edit({ size: 15 })} Edit</PrimaryButton>
           </div>
         </Modal>
       );
     }
 
-    function ClientsPage() {
+    function ClientsPage({ onNavigate }) {
       const [clients, setClients] = useState([]);
       const [loading, setLoading] = useState(true);
       const [formOpen, setFormOpen] = useState(false);
@@ -1584,7 +1586,7 @@
           />
           <DataTable columns={columns} data={clients} loading={loading} emptyMessage="No clients found" />
           <ClientForm open={formOpen} onClose={() => { setFormOpen(false); loadClients(); }} onSaved={loadClients} editing={editing} />
-          <ClientProfileModal open={!!viewing} onClose={() => setViewing(null)} client={viewing} onEdit={openEdit} scLookup={scLookup} />
+          <ClientProfileModal open={!!viewing} onClose={() => setViewing(null)} client={viewing} onEdit={openEdit} scLookup={scLookup} onViewFull={onNavigate ? (id) => onNavigate("client-profile", { type: "client", id }) : undefined} />
         </div>
       );
     }
@@ -9427,18 +9429,858 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // PROFILE PAGES — v18.8 living record
+    // ═══════════════════════════════════════════════════════════════
+
+    // Reusable collapsible group for time-based content (year/month/day trees)
+    function CollapsibleTimeGroup({ label, count, defaultOpen = false, children, accentColor }) {
+      const [open, setOpen] = useState(defaultOpen);
+      const color = accentColor || CB.navy;
+      return (
+        <div style={{ marginBottom: 8, border: `1px solid ${CB.border}`, borderRadius: 12, overflow: "hidden", background: CB.white }}>
+          <button onClick={() => setOpen(!open)} style={{
+            width: "100%", padding: "12px 16px", background: CB.cream, border: "none",
+            cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between",
+            fontSize: 14, fontWeight: 600, color: CB.navy, fontFamily: "inherit", transition: "background 0.15s",
+          }}
+            onMouseEnter={e => e.currentTarget.style.background = "#EEF2F7"}
+            onMouseLeave={e => e.currentTarget.style.background = CB.cream}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ display: "inline-block", transform: open ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s", fontSize: 10, color: CB.textMid }}>▶</span>
+              <span>{label}</span>
+            </div>
+            {count !== undefined && count !== null && (
+              <span style={{ fontSize: 12, fontWeight: 700, padding: "2px 10px", borderRadius: 10, background: `${color}14`, color }}>
+                {count}
+              </span>
+            )}
+          </button>
+          {open && <div style={{ padding: "12px 16px" }}>{children}</div>}
+        </div>
+      );
+    }
+
+    // Reusable profile page shell — identity strip + tab nav + content
+    function ProfilePageShell({ entity, entityType, tabs, activeTab, onTabChange, onBack, onEdit, actions }) {
+      const { isMobile } = useMobile();
+      if (!entity) return <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><Spinner size={28} /></div>;
+
+      const initials = (entity.first_name?.[0] || "") + (entity.last_name?.[0] || "");
+      const isStaff = entityType === "staff";
+      const gradient = isStaff ? `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})` : `linear-gradient(135deg, ${CB.blue}, ${CB.teal})`;
+
+      // Subtitle line: for staff it's role + status; for client it's SC + status
+      let subtitle = "";
+      if (isStaff) {
+        const role = STAFF_ROLES.find(r => r.value === entity.role)?.label || entity.role?.replace(/_/g, " ") || "";
+        subtitle = [role, entity.is_active ? "Active" : "Inactive"].filter(Boolean).join(" • ");
+      } else {
+        const parts = [];
+        if (entity.is_active === false) parts.push("Inactive");
+        else parts.push("Active");
+        if (entity.medicaid_number) parts.push(`MA: ${entity.medicaid_number}`);
+        if (entity.support_coordinator) parts.push(`SC: ${entity.support_coordinator}`);
+        subtitle = parts.join(" • ");
+      }
+
+      return (
+        <div>
+          {/* Back bar */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, flexWrap: "wrap", gap: 12 }}>
+            <button onClick={onBack} style={{
+              display: "flex", alignItems: "center", gap: 8, padding: "8px 14px",
+              borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.white,
+              color: CB.textMid, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s",
+            }}
+              onMouseEnter={e => { e.currentTarget.style.borderColor = CB.navy; e.currentTarget.style.color = CB.navy; }}
+              onMouseLeave={e => { e.currentTarget.style.borderColor = CB.border; e.currentTarget.style.color = CB.textMid; }}
+            >{icons.chevronRight ? icons.chevronRight({ size: 14, style: { transform: "rotate(180deg)" } }) : <span>←</span>} Back to {isStaff ? "Staff" : "Clients"}</button>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {actions}
+              {onEdit && <SecondaryButton onClick={() => onEdit(entity)}>{icons.edit({ size: 14 })} Edit</SecondaryButton>}
+            </div>
+          </div>
+
+          {/* Identity strip */}
+          <div style={{
+            display: "flex", alignItems: "center", gap: 18, marginBottom: 22,
+            padding: isMobile ? "18px 16px" : "22px 24px",
+            background: `linear-gradient(135deg, ${isStaff ? CB.navy : CB.teal}06, ${isStaff ? CB.teal : CB.blue}06)`,
+            borderRadius: 16, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
+            flexWrap: isMobile ? "wrap" : "nowrap",
+          }}>
+            <div style={{
+              width: isMobile ? 64 : 72, height: isMobile ? 64 : 72, borderRadius: 18,
+              background: gradient, display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: isMobile ? 26 : 30, fontWeight: 800, color: CB.white, flexShrink: 0,
+              boxShadow: "0 4px 14px rgba(10,30,51,0.15)",
+            }}>{initials}</div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <h1 style={{ fontSize: isMobile ? 22 : 28, fontWeight: 800, color: CB.navy, letterSpacing: -0.8, lineHeight: 1.15, marginBottom: 6 }}>
+                {entity.first_name} {entity.last_name}
+              </h1>
+              <div style={{ fontSize: 13, color: CB.textMid, fontWeight: 500 }}>{subtitle}</div>
+            </div>
+          </div>
+
+          {/* Tab nav */}
+          <div style={{
+            display: "flex", gap: 4, marginBottom: 20, background: CB.white,
+            borderRadius: 12, padding: 4, border: `1px solid ${CB.border}`,
+            boxShadow: "0 1px 3px rgba(10,30,51,0.04)",
+            overflowX: "auto", WebkitOverflowScrolling: "touch",
+          }}>
+            {tabs.map(t => (
+              <button key={t.key} onClick={() => onTabChange(t.key)} style={{
+                padding: isMobile ? "8px 14px" : "10px 20px", borderRadius: 9, border: "none",
+                fontSize: 13, fontWeight: 600, fontFamily: "inherit", cursor: "pointer",
+                transition: "all 0.15s", whiteSpace: "nowrap", flexShrink: 0,
+                background: activeTab === t.key ? CB.navy : "transparent",
+                color: activeTab === t.key ? CB.white : CB.textMid,
+                display: "flex", alignItems: "center", gap: 8,
+              }}>
+                {t.icon && t.icon({ size: 14, color: activeTab === t.key ? CB.white : CB.textMid })}
+                {t.label}
+                {t.count !== undefined && t.count !== null && (
+                  <span style={{
+                    fontSize: 11, fontWeight: 700, padding: "1px 7px", borderRadius: 8,
+                    background: activeTab === t.key ? "rgba(255,255,255,0.2)" : `${CB.navy}10`,
+                    color: activeTab === t.key ? CB.white : CB.navy,
+                  }}>{t.count}</span>
+                )}
+              </button>
+            ))}
+          </div>
+
+          {/* Active tab content — rendered by caller */}
+          <div style={{ animation: "fadeIn 0.3s ease" }}>
+            {tabs.find(t => t.key === activeTab)?.content}
+          </div>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // STAFF PROFILE PAGE
+    // ═══════════════════════════════════════════════════════════════
+
+    function StaffOverviewTab({ staff }) {
+      const fmtDate = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString() : null;
+      const roleLabel = STAFF_ROLES.find(r => r.value === staff.role)?.label || staff.role?.replace(/_/g, " ") || "—";
+      const tenure = staff.hire_date ? (() => {
+        const days = Math.floor((new Date() - new Date(staff.hire_date + "T00:00:00")) / 86400000);
+        if (days < 30) return `${days} days`;
+        if (days < 365) return `${Math.floor(days / 30)} months`;
+        return `${(days / 365).toFixed(1)} years`;
+      })() : null;
+
+      return (
+        <div>
+          <ProfileSection title="Contact">
+            <ProfileField label="Email" value={staff.email} />
+            <ProfileField label="Phone" value={staff.phone} />
+          </ProfileSection>
+          <ProfileSection title="Employment">
+            <ProfileField label="Role" value={roleLabel} />
+            <ProfileField label="Status" value={staff.is_active ? "Active" : "Inactive"} />
+            <ProfileField label="Hire Date" value={fmtDate(staff.hire_date)} />
+            <ProfileField label="Tenure" value={tenure} />
+          </ProfileSection>
+          <ProfileSection title="Personal">
+            <ProfileField label="Date of Birth" value={fmtDate(staff.date_of_birth)} />
+            <ProfileField label="Staff ID" value={staff.id?.slice(0, 8)} />
+          </ProfileSection>
+        </div>
+      );
+    }
+
+    function StaffTrainingTab({ staffId, orgId }) {
+      const [trainings, setTrainings] = useState([]);
+      const [topics, setTopics] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [showLog, setShowLog] = useState(false);
+
+      const load = async () => {
+        setLoading(true);
+        const [tRes, topRes] = await Promise.all([
+          supabase.from("staff_trainings")
+            .select("id, completed_date, expires_at, certificate_number, training_topic_definitions(id, topic_name, validity_months, is_required)")
+            .eq("staff_id", staffId)
+            .order("completed_date", { ascending: false }),
+          supabase.from("training_topic_definitions").select("id, topic_name, validity_months, is_required").order("topic_name"),
+        ]);
+        setTrainings(tRes.data || []);
+        setTopics(topRes.data || []);
+        setLoading(false);
+      };
+
+      useEffect(() => { load(); }, [staffId]);
+
+      if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
+
+      // Build a map: for each topic, find the most recent completion for this staff
+      const latestByTopic = {};
+      trainings.forEach(t => {
+        const topicId = t.training_topic_definitions?.id;
+        if (!topicId) return;
+        if (!latestByTopic[topicId] || new Date(t.completed_date) > new Date(latestByTopic[topicId].completed_date)) {
+          latestByTopic[topicId] = t;
+        }
+      });
+
+      const now = new Date();
+      const rows = topics.map(topic => {
+        const latest = latestByTopic[topic.id];
+        const expires = latest?.expires_at ? new Date(latest.expires_at) : null;
+        const daysToExpiry = expires ? Math.ceil((expires - now) / 86400000) : null;
+        let status = "missing";
+        if (latest) {
+          if (!expires) status = "current";
+          else if (daysToExpiry < 0) status = "expired";
+          else if (daysToExpiry <= 30) status = "expiring";
+          else status = "current";
+        }
+        return { topic, latest, daysToExpiry, status };
+      });
+
+      const counts = { current: 0, expiring: 0, expired: 0, missing: 0 };
+      rows.forEach(r => counts[r.status]++);
+
+      const statusColor = { current: CB.green, expiring: CB.amber, expired: CB.red, missing: CB.textLight };
+      const statusLabel = { current: "Current", expiring: "Expiring Soon", expired: "Expired", missing: "Not Completed" };
+
+      return (
+        <div>
+          {/* Summary strip */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 20 }}>
+            {["current", "expiring", "expired", "missing"].map(s => (
+              <div key={s} style={{
+                padding: "14px 16px", borderRadius: 12, background: CB.white,
+                border: `1px solid ${CB.border}`, textAlign: "center",
+              }}>
+                <div style={{ fontSize: 22, fontWeight: 800, color: statusColor[s] }}>{counts[s]}</div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: CB.textMid, textTransform: "uppercase", letterSpacing: 0.5 }}>{statusLabel[s]}</div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+            <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy }}>All Training Topics ({rows.length})</h3>
+            <SecondaryButton onClick={load}>{icons.refresh({ size: 13 })} Refresh</SecondaryButton>
+          </div>
+
+          <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, overflow: "hidden", boxShadow: CB.cardShadow }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ background: CB.cream }}>
+                  <th style={{ padding: "11px 16px", textAlign: "left", fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.6 }}>Topic</th>
+                  <th style={{ padding: "11px 16px", textAlign: "left", fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.6 }}>Status</th>
+                  <th style={{ padding: "11px 16px", textAlign: "left", fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.6 }}>Last Completed</th>
+                  <th style={{ padding: "11px 16px", textAlign: "left", fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.6 }}>Expires</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={r.topic.id} style={{ borderBottom: i < rows.length - 1 ? `1px solid ${CB.border}` : "none" }}>
+                    <td style={{ padding: "12px 16px", fontSize: 13, fontWeight: 600, color: CB.text }}>
+                      {r.topic.topic_name}
+                      {r.topic.is_required && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: CB.red, background: `${CB.red}12`, padding: "1px 6px", borderRadius: 4 }}>REQ</span>}
+                    </td>
+                    <td style={{ padding: "12px 16px" }}><Badge text={statusLabel[r.status]} color={statusColor[r.status]} /></td>
+                    <td style={{ padding: "12px 16px", fontSize: 13, color: CB.textMid }}>
+                      {r.latest?.completed_date ? new Date(r.latest.completed_date + "T00:00:00").toLocaleDateString() : <span style={{ color: CB.textLight, fontStyle: "italic" }}>—</span>}
+                    </td>
+                    <td style={{ padding: "12px 16px", fontSize: 13, color: r.status === "expired" ? CB.red : r.status === "expiring" ? CB.amber : CB.textMid, fontWeight: r.status === "expired" || r.status === "expiring" ? 600 : 400 }}>
+                      {r.latest?.expires_at ? new Date(r.latest.expires_at).toLocaleDateString() : <span style={{ color: CB.textLight, fontStyle: "italic" }}>—</span>}
+                      {r.daysToExpiry !== null && r.status === "expired" && <span style={{ marginLeft: 6, fontSize: 11 }}>({Math.abs(r.daysToExpiry)}d overdue)</span>}
+                      {r.daysToExpiry !== null && r.status === "expiring" && <span style={{ marginLeft: 6, fontSize: 11 }}>({r.daysToExpiry}d)</span>}
+                    </td>
+                  </tr>
+                ))}
+                {rows.length === 0 && (
+                  <tr><td colSpan={4} style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 13 }}>No training topics defined yet. Set them up in the Training module.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+
+    function StaffNotesTab({ staffId }) {
+      const [notes, setNotes] = useState([]);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        setLoading(true);
+        supabase.from("service_notes")
+          .select("id, service_date, start_time, end_time, duration_minutes, status, persons(first_name, last_name), service_code_definitions(code, name)")
+          .eq("staff_id", staffId)
+          .order("service_date", { ascending: false })
+          .limit(500)
+          .then(({ data }) => { setNotes(data || []); setLoading(false); });
+      }, [staffId]);
+
+      if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
+      if (notes.length === 0) return <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>No service notes found for this staff member.</div>;
+
+      // Group by year-month
+      const grouped = {};
+      notes.forEach(n => {
+        if (!n.service_date) return;
+        const d = new Date(n.service_date + "T00:00:00");
+        const yearMonth = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+        const label = d.toLocaleString("en-US", { month: "long", year: "numeric" });
+        if (!grouped[yearMonth]) grouped[yearMonth] = { label, notes: [] };
+        grouped[yearMonth].notes.push(n);
+      });
+      const sortedKeys = Object.keys(grouped).sort().reverse();
+
+      return (
+        <div>
+          <div style={{ marginBottom: 14, fontSize: 13, color: CB.textMid }}>
+            <strong style={{ color: CB.navy }}>{notes.length}</strong> service notes total across {sortedKeys.length} months
+          </div>
+          {sortedKeys.map((key, idx) => (
+            <CollapsibleTimeGroup key={key} label={grouped[key].label} count={grouped[key].notes.length} defaultOpen={idx === 0} accentColor={CB.teal}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {grouped[key].notes.map(n => (
+                  <div key={n.id} style={{
+                    padding: "10px 14px", borderRadius: 10, background: CB.cream,
+                    border: `1px solid ${CB.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap",
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: CB.navy, minWidth: 80 }}>
+                        {new Date(n.service_date + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                      </span>
+                      {n.service_code_definitions?.code && <Badge text={n.service_code_definitions.code} color={CB.blue} />}
+                      <span style={{ fontSize: 13, color: CB.text }}>{n.persons ? `${n.persons.first_name} ${n.persons.last_name}` : "—"}</span>
+                      {n.duration_minutes && <span style={{ fontSize: 12, color: CB.textLight }}>{n.duration_minutes}min</span>}
+                    </div>
+                    <Badge text={n.status || "draft"} color={n.status === "approved" ? CB.green : n.status === "submitted" ? CB.blue : CB.amber} />
+                  </div>
+                ))}
+              </div>
+            </CollapsibleTimeGroup>
+          ))}
+        </div>
+      );
+    }
+
+    function StaffProfilePage({ staffId, onNavigate, onBack }) {
+      const [staff, setStaff] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [activeTab, setActiveTab] = useState("overview");
+      const [editOpen, setEditOpen] = useState(false);
+      const [noteCount, setNoteCount] = useState(null);
+      const [trainingCount, setTrainingCount] = useState(null);
+      const { orgId } = useAuth();
+
+      const loadStaff = async () => {
+        setLoading(true);
+        const { data } = await supabase.from("staff").select("*").eq("id", staffId).single();
+        setStaff(data);
+        setLoading(false);
+        // Prefetch counts for tab badges
+        const [nRes, tRes] = await Promise.all([
+          supabase.from("service_notes").select("id", { count: "exact", head: true }).eq("staff_id", staffId),
+          supabase.from("staff_trainings").select("id", { count: "exact", head: true }).eq("staff_id", staffId),
+        ]);
+        setNoteCount(nRes.count || 0);
+        setTrainingCount(tRes.count || 0);
+      };
+
+      useEffect(() => { loadStaff(); }, [staffId]);
+
+      if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><Spinner size={28} /></div>;
+      if (!staff) return <div style={{ padding: 40, textAlign: "center", color: CB.textLight }}>Staff member not found. <button onClick={onBack} style={{ color: CB.teal, background: "none", border: "none", textDecoration: "underline", cursor: "pointer" }}>Back to Staff</button></div>;
+
+      const tabs = [
+        { key: "overview", label: "Overview", icon: icons.users, content: <StaffOverviewTab staff={staff} /> },
+        { key: "training", label: "Training", icon: icons.book, count: trainingCount, content: <StaffTrainingTab staffId={staffId} orgId={orgId} /> },
+        { key: "notes", label: "Service Notes", icon: icons.fileText, count: noteCount, content: <StaffNotesTab staffId={staffId} /> },
+        { key: "documents", label: "Documents", icon: icons.folder || icons.fileText, content: (
+          <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, padding: 20 }}>
+            <DocumentsSection entityType="staff" entityId={staffId} orgId={orgId} entityData={staff} />
+          </div>
+        )},
+      ];
+
+      return (
+        <>
+          <ProfilePageShell
+            entity={staff}
+            entityType="staff"
+            tabs={tabs}
+            activeTab={activeTab}
+            onTabChange={setActiveTab}
+            onBack={onBack}
+            onEdit={() => setEditOpen(true)}
+          />
+          <StaffForm open={editOpen} onClose={() => setEditOpen(false)} onSaved={loadStaff} editing={staff} />
+        </>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // CLIENT PROFILE PAGE
+    // ═══════════════════════════════════════════════════════════════
+
+    function ClientOverviewTab({ client }) {
+      const fmtDate = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString() : null;
+      const age = client.date_of_birth ? Math.floor((new Date() - new Date(client.date_of_birth + "T00:00:00")) / (365.25 * 86400000)) : null;
+      const auths = client.person_service_authorizations || [];
+
+      return (
+        <div>
+          <ProfileSection title="Identity">
+            <ProfileField label="Full Name" value={`${client.first_name} ${client.last_name}`} />
+            <ProfileField label="Date of Birth" value={fmtDate(client.date_of_birth)} />
+            <ProfileField label="Age" value={age !== null ? `${age} years` : null} />
+            <ProfileField label="Medicaid #" value={client.medicaid_number} />
+            <ProfileField label="Primary Language" value={client.primary_language} />
+            <ProfileField label="Gender" value={client.gender} />
+          </ProfileSection>
+
+          {auths.length > 0 && (
+            <div style={{ marginBottom: 20 }}>
+              <h3 style={{ fontSize: 13, fontWeight: 700, color: CB.navy, marginBottom: 12, textTransform: "uppercase", letterSpacing: 0.8 }}>Active Authorizations ({auths.length})</h3>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {auths.map(a => {
+                  const code = a.service_code_definitions?.code || "?";
+                  const pct = a.authorized_units > 0 ? Math.min(100, (a.used_units / a.authorized_units) * 100) : 0;
+                  const barColor = pct >= 90 ? CB.red : pct >= 75 ? CB.amber : CB.teal;
+                  return (
+                    <div key={a.id} style={{ padding: "12px 14px", borderRadius: 10, background: CB.cream, border: `1px solid ${CB.border}` }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 8, flexWrap: "wrap" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <Badge text={code} color={CB.blue} />
+                          <span style={{ fontSize: 13, fontWeight: 600, color: CB.text }}>{a.used_units || 0} / {a.authorized_units} units</span>
+                        </div>
+                        <span style={{ fontSize: 11, color: CB.textLight }}>
+                          {a.start_date ? fmtDate(a.start_date) : "—"} → {a.end_date ? fmtDate(a.end_date) : "—"}
+                        </span>
+                      </div>
+                      <div style={{ height: 6, borderRadius: 3, background: CB.border, overflow: "hidden" }}>
+                        <div style={{ width: `${pct}%`, height: "100%", background: barColor, transition: "width 0.4s ease" }} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          <ProfileSection title="Admission">
+            <ProfileField label="Admission Date" value={fmtDate(client.admission_date)} />
+            <ProfileField label="Status" value={client.is_active ? "Active" : "Inactive"} />
+          </ProfileSection>
+
+          {client.primary_diagnosis && (
+            <ProfileSection title="Clinical">
+              <ProfileField label="Primary Diagnosis" full value={client.primary_diagnosis} />
+              <ProfileField label="Allergies" full value={client.allergies} />
+            </ProfileSection>
+          )}
+        </div>
+      );
+    }
+
+    function ClientContactsTab({ client }) {
+      return (
+        <div>
+          <ProfileSection title="Support Coordinator">
+            <ProfileField label="Coordinator" value={client.support_coordinator} />
+            <ProfileField label="Agency" value={client.support_coordinator_agency} />
+            <ProfileField label="Phone" value={client.support_coordinator_phone} />
+            <ProfileField label="Email" value={client.support_coordinator_email} />
+          </ProfileSection>
+          <ProfileSection title="Guardian">
+            <ProfileField label="Name" value={client.guardian_name} />
+            <ProfileField label="Relationship" value={client.guardian_relation} />
+            <ProfileField label="Phone" value={client.guardian_phone} />
+          </ProfileSection>
+          <ProfileSection title="Emergency Contact">
+            <ProfileField label="Name" value={client.emergency_contact_name} />
+            <ProfileField label="Phone" value={client.emergency_contact_phone} />
+          </ProfileSection>
+          <ProfileSection title="Medical">
+            <ProfileField label="Physician" value={client.physician_name} />
+            <ProfileField label="Physician Phone" value={client.physician_phone} />
+          </ProfileSection>
+          <ProfileSection title="Address">
+            <ProfileField label="Street" value={client.address} full />
+            <ProfileField label="City" value={client.city} />
+            <ProfileField label="State" value={client.state} />
+            <ProfileField label="ZIP" value={client.zip} />
+            <ProfileField label="Phone" value={client.phone} />
+          </ProfileSection>
+        </div>
+      );
+    }
+
+    function ClientNotesTab({ clientId }) {
+      const [notes, setNotes] = useState([]);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        setLoading(true);
+        supabase.from("service_notes")
+          .select("id, service_date, duration_minutes, status, staff!service_notes_staff_id_fkey(first_name, last_name), service_code_definitions(code, name)")
+          .eq("person_id", clientId)
+          .order("service_date", { ascending: false })
+          .limit(1000)
+          .then(({ data }) => { setNotes(data || []); setLoading(false); });
+      }, [clientId]);
+
+      if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
+      if (notes.length === 0) return <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>No service notes found for this client.</div>;
+
+      // Year → Month → notes
+      const byYear = {};
+      notes.forEach(n => {
+        if (!n.service_date) return;
+        const d = new Date(n.service_date + "T00:00:00");
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, "0");
+        const monthLabel = d.toLocaleString("en-US", { month: "long" });
+        if (!byYear[y]) byYear[y] = { months: {}, total: 0 };
+        if (!byYear[y].months[m]) byYear[y].months[m] = { label: monthLabel, notes: [] };
+        byYear[y].months[m].notes.push(n);
+        byYear[y].total++;
+      });
+      const years = Object.keys(byYear).sort().reverse();
+
+      return (
+        <div>
+          <div style={{ marginBottom: 14, fontSize: 13, color: CB.textMid }}>
+            <strong style={{ color: CB.navy }}>{notes.length}</strong> total service notes across {years.length} {years.length === 1 ? "year" : "years"}
+          </div>
+          {years.map((y, yi) => (
+            <CollapsibleTimeGroup key={y} label={y} count={byYear[y].total} defaultOpen={yi === 0} accentColor={CB.blue}>
+              {Object.keys(byYear[y].months).sort().reverse().map((m, mi) => (
+                <CollapsibleTimeGroup key={m} label={byYear[y].months[m].label} count={byYear[y].months[m].notes.length} defaultOpen={yi === 0 && mi === 0} accentColor={CB.teal}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {byYear[y].months[m].notes.map(n => (
+                      <div key={n.id} style={{
+                        padding: "10px 14px", borderRadius: 10, background: CB.cream,
+                        border: `1px solid ${CB.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap",
+                      }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                          <span style={{ fontSize: 12, fontWeight: 700, color: CB.navy, minWidth: 50 }}>
+                            {new Date(n.service_date + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                          </span>
+                          {n.service_code_definitions?.code && <Badge text={n.service_code_definitions.code} color={CB.blue} />}
+                          <span style={{ fontSize: 12, color: CB.textMid }}>{n.staff ? `${n.staff.first_name} ${n.staff.last_name}` : "—"}</span>
+                          {n.duration_minutes && <span style={{ fontSize: 11, color: CB.textLight }}>{n.duration_minutes}min</span>}
+                        </div>
+                        <Badge text={n.status || "draft"} color={n.status === "approved" ? CB.green : n.status === "submitted" ? CB.blue : CB.amber} />
+                      </div>
+                    ))}
+                  </div>
+                </CollapsibleTimeGroup>
+              ))}
+            </CollapsibleTimeGroup>
+          ))}
+        </div>
+      );
+    }
+
+    function ClientMedicationsTab({ clientId }) {
+      const [meds, setMeds] = useState([]);
+      const [passLogs, setPassLogs] = useState([]);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        setLoading(true);
+        Promise.all([
+          supabase.from("medications").select("*").eq("person_id", clientId).order("medication_name"),
+          supabase.from("med_pass_log").select("id, passed_at, status, staff(first_name, last_name), medications(medication_name, dosage)").eq("person_id", clientId).order("passed_at", { ascending: false }).limit(200),
+        ]).then(([mRes, lRes]) => {
+          setMeds(mRes.data || []);
+          setPassLogs(lRes.data || []);
+          setLoading(false);
+        });
+      }, [clientId]);
+
+      if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
+
+      const activeMeds = meds.filter(m => m.is_active !== false);
+
+      return (
+        <div>
+          <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 12 }}>Current Medications ({activeMeds.length})</h3>
+          {activeMeds.length === 0 ? (
+            <div style={{ padding: 30, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, marginBottom: 24 }}>
+              No active medications on file.
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 24 }}>
+              {activeMeds.map(m => (
+                <div key={m.id} style={{
+                  padding: "14px 16px", borderRadius: 12, background: CB.white,
+                  border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
+                }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
+                    <div>
+                      <div style={{ fontSize: 15, fontWeight: 700, color: CB.navy }}>{m.medication_name}</div>
+                      <div style={{ fontSize: 13, color: CB.textMid, marginTop: 2 }}>
+                        {m.dosage} {m.route && `• ${m.route}`} {m.frequency && `• ${m.frequency}`}
+                      </div>
+                    </div>
+                    {m.prn && <Badge text="PRN" color={CB.amber} />}
+                  </div>
+                  {m.indication && <div style={{ fontSize: 12, color: CB.textLight, marginTop: 6 }}>For: {m.indication}</div>}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 12 }}>Recent Med Pass Log ({passLogs.length})</h3>
+          {passLogs.length === 0 ? (
+            <div style={{ padding: 30, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>
+              No medication passes logged yet.
+            </div>
+          ) : (() => {
+            // Group by year-month
+            const grouped = {};
+            passLogs.forEach(p => {
+              if (!p.passed_at) return;
+              const d = new Date(p.passed_at);
+              const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+              const label = d.toLocaleString("en-US", { month: "long", year: "numeric" });
+              if (!grouped[key]) grouped[key] = { label, logs: [] };
+              grouped[key].logs.push(p);
+            });
+            const keys = Object.keys(grouped).sort().reverse();
+            return keys.map((k, i) => (
+              <CollapsibleTimeGroup key={k} label={grouped[k].label} count={grouped[k].logs.length} defaultOpen={i === 0} accentColor={CB.teal}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {grouped[k].logs.map(p => (
+                    <div key={p.id} style={{
+                      padding: "10px 14px", borderRadius: 10, background: CB.cream,
+                      border: `1px solid ${CB.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap",
+                    }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                        <span style={{ fontSize: 12, fontWeight: 700, color: CB.navy }}>
+                          {new Date(p.passed_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                        </span>
+                        <span style={{ fontSize: 13, color: CB.text }}>{p.medications?.medication_name} {p.medications?.dosage}</span>
+                        <span style={{ fontSize: 12, color: CB.textMid }}>{p.staff ? `by ${p.staff.first_name} ${p.staff.last_name}` : ""}</span>
+                      </div>
+                      <Badge text={p.status || "given"} color={p.status === "missed" ? CB.red : p.status === "refused" ? CB.amber : CB.green} />
+                    </div>
+                  ))}
+                </div>
+              </CollapsibleTimeGroup>
+            ));
+          })()}
+        </div>
+      );
+    }
+
+    function ClientIncidentsTab({ clientId }) {
+      const [incidents, setIncidents] = useState([]);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        setLoading(true);
+        supabase.from("incidents")
+          .select("id, incident_date, incident_time, incident_type, severity, location, description, staff(first_name, last_name)")
+          .eq("person_id", clientId)
+          .order("incident_date", { ascending: false })
+          .limit(500)
+          .then(({ data }) => { setIncidents(data || []); setLoading(false); });
+      }, [clientId]);
+
+      if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
+      if (incidents.length === 0) return <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>No incidents recorded. That's a good thing.</div>;
+
+      const severityColor = { low: CB.blue, moderate: CB.amber, high: "#E65100", critical: CB.red };
+
+      // Group by year-month
+      const grouped = {};
+      incidents.forEach(inc => {
+        if (!inc.incident_date) return;
+        const d = new Date(inc.incident_date + "T00:00:00");
+        const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+        const label = d.toLocaleString("en-US", { month: "long", year: "numeric" });
+        if (!grouped[key]) grouped[key] = { label, items: [] };
+        grouped[key].items.push(inc);
+      });
+      const keys = Object.keys(grouped).sort().reverse();
+
+      return (
+        <div>
+          <div style={{ marginBottom: 14, fontSize: 13, color: CB.textMid }}>
+            <strong style={{ color: CB.navy }}>{incidents.length}</strong> incident{incidents.length === 1 ? "" : "s"} on record across {keys.length} {keys.length === 1 ? "month" : "months"}
+          </div>
+          {keys.map((k, i) => (
+            <CollapsibleTimeGroup key={k} label={grouped[k].label} count={grouped[k].items.length} defaultOpen={i === 0} accentColor={CB.amber}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {grouped[k].items.map(inc => (
+                  <div key={inc.id} style={{
+                    padding: "12px 14px", borderRadius: 10, background: CB.cream,
+                    border: `1px solid ${CB.border}`, borderLeft: `4px solid ${severityColor[inc.severity] || CB.textLight}`,
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 6, flexWrap: "wrap" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                        <span style={{ fontSize: 13, fontWeight: 700, color: CB.navy }}>
+                          {new Date(inc.incident_date + "T00:00:00").toLocaleDateString()}
+                          {inc.incident_time && ` ${inc.incident_time}`}
+                        </span>
+                        {inc.incident_type && <Badge text={inc.incident_type} color={CB.navy} />}
+                        {inc.severity && <Badge text={inc.severity} color={severityColor[inc.severity] || CB.textLight} />}
+                      </div>
+                      {inc.staff && <span style={{ fontSize: 12, color: CB.textMid }}>Reported by {inc.staff.first_name} {inc.staff.last_name}</span>}
+                    </div>
+                    {inc.location && <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 4 }}>{icons.mapPin({ size: 11, color: CB.textLight })} {inc.location}</div>}
+                    {inc.description && <div style={{ fontSize: 13, color: CB.text, lineHeight: 1.5 }}>{inc.description}</div>}
+                  </div>
+                ))}
+              </div>
+            </CollapsibleTimeGroup>
+          ))}
+        </div>
+      );
+    }
+
+    function ClientGoalsTab({ clientId }) {
+      const [goals, setGoals] = useState([]);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        setLoading(true);
+        supabase.from("pcsp_goals")
+          .select("*")
+          .eq("person_id", clientId)
+          .order("created_at", { ascending: false })
+          .then(({ data }) => { setGoals(data || []); setLoading(false); });
+      }, [clientId]);
+
+      if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
+      if (goals.length === 0) return <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>No PCSP goals on file. Add goals in the PCSP Goals module.</div>;
+
+      const active = goals.filter(g => g.status === "active" || !g.status);
+      const done = goals.filter(g => g.status === "achieved" || g.status === "discontinued");
+
+      return (
+        <div>
+          <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 12 }}>Active Goals ({active.length})</h3>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 24 }}>
+            {active.map(g => (
+              <div key={g.id} style={{ padding: "14px 16px", borderRadius: 12, background: CB.white, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6, flexWrap: "wrap" }}>
+                  {g.domain && <Badge text={g.domain} color={CB.teal} />}
+                  {g.status && <Badge text={g.status} color={CB.blue} />}
+                </div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: CB.navy, marginBottom: 4 }}>{g.goal_description || g.title}</div>
+                {g.target_date && <div style={{ fontSize: 12, color: CB.textLight }}>Target: {new Date(g.target_date + "T00:00:00").toLocaleDateString()}</div>}
+              </div>
+            ))}
+          </div>
+          {done.length > 0 && (
+            <>
+              <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 12 }}>Completed / Archived ({done.length})</h3>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {done.map(g => (
+                  <div key={g.id} style={{ padding: "12px 14px", borderRadius: 10, background: CB.cream, border: `1px solid ${CB.border}`, opacity: 0.8 }}>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
+                      {g.domain && <Badge text={g.domain} color={CB.textLight} />}
+                      <Badge text={g.status} color={g.status === "achieved" ? CB.green : CB.textLight} />
+                    </div>
+                    <div style={{ fontSize: 13, color: CB.textMid }}>{g.goal_description || g.title}</div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      );
+    }
+
+    function ClientProfilePage({ clientId, onNavigate, onBack }) {
+      const [client, setClient] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [activeTab, setActiveTab] = useState("overview");
+      const [editOpen, setEditOpen] = useState(false);
+      const [counts, setCounts] = useState({ notes: null, incidents: null, goals: null, meds: null });
+      const { orgId } = useAuth();
+
+      const loadClient = async () => {
+        setLoading(true);
+        const { data } = await supabase.from("persons")
+          .select("*, person_service_authorizations(id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code))")
+          .eq("id", clientId).single();
+        setClient(data);
+        setLoading(false);
+        // Prefetch counts
+        const [n, inc, g, m] = await Promise.all([
+          supabase.from("service_notes").select("id", { count: "exact", head: true }).eq("person_id", clientId),
+          supabase.from("incidents").select("id", { count: "exact", head: true }).eq("person_id", clientId),
+          supabase.from("pcsp_goals").select("id", { count: "exact", head: true }).eq("person_id", clientId),
+          supabase.from("medications").select("id", { count: "exact", head: true }).eq("person_id", clientId).eq("is_active", true),
+        ]);
+        setCounts({ notes: n.count || 0, incidents: inc.count || 0, goals: g.count || 0, meds: m.count || 0 });
+      };
+
+      useEffect(() => { loadClient(); }, [clientId]);
+
+      if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><Spinner size={28} /></div>;
+      if (!client) return <div style={{ padding: 40, textAlign: "center", color: CB.textLight }}>Client not found. <button onClick={onBack} style={{ color: CB.teal, background: "none", border: "none", textDecoration: "underline", cursor: "pointer" }}>Back to Clients</button></div>;
+
+      const tabs = [
+        { key: "overview", label: "Overview", icon: icons.users, content: <ClientOverviewTab client={client} /> },
+        { key: "goals", label: "PCSP Goals", icon: icons.crosshair, count: counts.goals, content: <ClientGoalsTab clientId={clientId} /> },
+        { key: "medications", label: "Medications", icon: icons.capsule, count: counts.meds, content: <ClientMedicationsTab clientId={clientId} /> },
+        { key: "notes", label: "Service Notes", icon: icons.fileText, count: counts.notes, content: <ClientNotesTab clientId={clientId} /> },
+        { key: "incidents", label: "Incidents", icon: icons.alertTriangle, count: counts.incidents, content: <ClientIncidentsTab clientId={clientId} /> },
+        { key: "contacts", label: "Contacts", icon: icons.heart, content: <ClientContactsTab client={client} /> },
+        { key: "documents", label: "Documents", icon: icons.fileText, content: (
+          <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, padding: 20 }}>
+            <DocumentsSection entityType="client" entityId={clientId} orgId={orgId} entityData={client} />
+          </div>
+        )},
+      ];
+
+      return (
+        <>
+          <ProfilePageShell
+            entity={client}
+            entityType="client"
+            tabs={tabs}
+            activeTab={activeTab}
+            onTabChange={setActiveTab}
+            onBack={onBack}
+            onEdit={() => setEditOpen(true)}
+          />
+          <ClientForm open={editOpen} onClose={() => { setEditOpen(false); loadClient(); }} onSaved={loadClient} editing={client} />
+        </>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // APP SHELL
     // ═══════════════════════════════════════════════════════════════
     function AppShell() {
       const [page, setPage] = useState("dashboard");
+      const [pageContext, setPageContext] = useState(null);
       const { isMobile } = useMobile();
       const [sidebarOpen, setSidebarOpen] = useState(false);
 
+      // Navigation helper — accepts optional context (e.g. { type: "staff", id } for profile pages)
+      const navigate = (target, context = null) => {
+        setPage(target);
+        setPageContext(context);
+        if (isMobile) setSidebarOpen(false);
+      };
+
       const renderPage = () => {
         switch (page) {
-          case "dashboard": return <DashboardPage onNavigate={setPage} />;
-          case "staff": return <StaffPage />;
-          case "clients": return <ClientsPage />;
+          case "dashboard": return <DashboardPage onNavigate={navigate} />;
+          case "staff": return <StaffPage onNavigate={navigate} />;
+          case "clients": return <ClientsPage onNavigate={navigate} />;
           case "intake": return <IntakePage />;
           case "training": return <TrainingPage />;
           case "notes": return <ServiceNotesPage />;
@@ -9455,13 +10297,21 @@
           case "messages": return <MessagingPage />;
           case "migration": return <MigrationPage />;
           case "settings": return <OrgUnitsPage />;
-          default: return <DashboardPage />;
+          case "staff-profile":
+            return pageContext?.id
+              ? <StaffProfilePage staffId={pageContext.id} onNavigate={navigate} onBack={() => navigate("staff")} />
+              : <StaffPage onNavigate={navigate} />;
+          case "client-profile":
+            return pageContext?.id
+              ? <ClientProfilePage clientId={pageContext.id} onNavigate={navigate} onBack={() => navigate("clients")} />
+              : <ClientsPage onNavigate={navigate} />;
+          default: return <DashboardPage onNavigate={navigate} />;
         }
       };
 
       return (
         <div style={{ display: "flex", minHeight: "100vh", background: CB.cream }}>
-          <Sidebar active={page} onNavigate={setPage} isMobile={isMobile} isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+          <Sidebar active={page} onNavigate={(p) => navigate(p)} isMobile={isMobile} isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
           {/* Mobile top bar */}
           {isMobile && (
             <div style={{
