@@ -102,11 +102,11 @@
 
     // Nav items each role can see
     const ROLE_NAV = {
-      owner:                ["dashboard", "staff", "clients", "intake", "schedule", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "finance", "docs", "messages", "ai", "migration", "settings"],
-      admin:                ["dashboard", "staff", "clients", "intake", "schedule", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "finance", "docs", "messages", "ai", "migration", "settings"],
-      compliance_director:  ["dashboard", "staff", "clients", "intake", "schedule", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "finance", "docs", "messages", "ai"],
-      residential_director: ["dashboard", "clients", "schedule", "training", "notes", "evv", "incidents", "alerts", "medications", "goals", "docs", "messages"],
-      day_program_director: ["dashboard", "clients", "schedule", "training", "notes", "evv", "incidents", "alerts", "medications", "goals", "docs", "messages"],
+      owner:                ["dashboard", "staff", "clients", "intake", "schedule", "contexts", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "finance", "docs", "messages", "ai", "migration", "settings"],
+      admin:                ["dashboard", "staff", "clients", "intake", "schedule", "contexts", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "finance", "docs", "messages", "ai", "migration", "settings"],
+      compliance_director:  ["dashboard", "staff", "clients", "intake", "schedule", "contexts", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "finance", "docs", "messages", "ai"],
+      residential_director: ["dashboard", "clients", "schedule", "contexts", "training", "notes", "evv", "incidents", "alerts", "medications", "goals", "docs", "messages"],
+      day_program_director: ["dashboard", "clients", "schedule", "contexts", "training", "notes", "evv", "incidents", "alerts", "medications", "goals", "docs", "messages"],
       house_manager:        ["dashboard", "clients", "schedule", "notes", "evv", "incidents", "medications", "goals", "messages"],
       bcba:                 ["dashboard", "clients", "notes", "compliance", "incidents", "goals", "messages"],
       rn:                   ["dashboard", "clients", "schedule", "notes", "incidents", "medications", "goals", "messages"],
@@ -491,6 +491,7 @@
         { key: "clients", label: "Clients", icon: icons.heart },
         { key: "intake", label: "Intake", icon: icons.plus },
         { key: "schedule", label: "Schedule", icon: icons.calendar },
+        { key: "contexts", label: "Service Contexts", icon: icons.dashboard },
         { key: "training", label: "Training", icon: icons.book },
         { key: "notes", label: "Service Notes", icon: icons.fileText },
         { key: "evv", label: "EVV", icon: icons.mapPin },
@@ -3686,6 +3687,560 @@
               </div>
             )}
           </Modal>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // MODULE — SERVICE DELIVERY CONTEXTS (v19.1)
+    // "How services are actually delivered" — groups of clients receiving
+    // a service at a location. A context is the scheduling unit that a
+    // shift covers. Three types:
+    //   residential — clients who LIVE at a location (RHS, HHS, PPS)
+    //   day         — clients who attend a group program (DSG, SLN)
+    //   individual  — single-client services (PBA, PM2, BC1-3, TFB, etc.)
+    // ═══════════════════════════════════════════════════════════════
+
+    // Map service codes → delivery type default (used when auto-detecting
+    // on context creation). User can override.
+    const SERVICE_CODE_DELIVERY_TYPE = {
+      RHS: "residential", HHS: "residential", PPS: "residential",
+      DSG: "day", DSP: "day", DSI: "individual", SLN: "day", EPR: "day",
+      MTP: "day", PAC: "day", COM: "day", ELS: "day",
+      PBA: "individual", PM1: "individual", PM2: "individual",
+      PN1: "individual", PN2: "individual",
+      BC1: "individual", BC2: "individual", BC3: "individual",
+      TFB: "individual", HSQ: "individual",
+      RP2: "individual", RP3: "individual", RP4: "individual",
+    };
+
+    const DELIVERY_TYPE_META = {
+      residential: { label: "Residential",   color: "#00897B", description: "Clients live here. RHS, HHS, PPS." },
+      day:         { label: "Day / Group",   color: "#1A73E8", description: "Multiple clients receive service together. DSG, SLN, etc." },
+      individual:  { label: "Individual",    color: "#F57F17", description: "Single-client service. PBA, PM2, BC, etc." },
+    };
+
+    function ServiceContextForm({ open, onClose, onSaved, editing }) {
+      const { addToast } = useToast();
+      const { orgId } = useAuth();
+      const [saving, setSaving] = useState(false);
+      const [deleting, setDeleting] = useState(false);
+      const [serviceCodes, setServiceCodes] = useState([]);
+      const [orgUnits, setOrgUnits] = useState([]);
+      const [form, setForm] = useState({
+        name: "", service_code_id: "", org_unit_id: "",
+        delivery_type: "residential", is_active: true,
+      });
+
+      useEffect(() => {
+        if (!open) return;
+        Promise.all([
+          supabase.from("service_code_definitions").select("id, code, name").order("code"),
+          supabase.from("org_units").select("id, name, unit_type").order("name"),
+        ]).then(([sc, ou]) => {
+          setServiceCodes(sc.data || []);
+          setOrgUnits(ou.data || []);
+        });
+        if (editing) {
+          setForm({
+            name: editing.name || "",
+            service_code_id: editing.service_code_id || "",
+            org_unit_id: editing.org_unit_id || "",
+            delivery_type: editing.delivery_type || "residential",
+            is_active: editing.is_active !== false,
+          });
+        } else {
+          setForm({ name: "", service_code_id: "", org_unit_id: "", delivery_type: "residential", is_active: true });
+        }
+      }, [open, editing]);
+
+      // When service code changes, auto-suggest delivery type + help name the context
+      const handleCodeChange = (scId) => {
+        const sc = serviceCodes.find(x => x.id === scId);
+        const suggestedType = sc && SERVICE_CODE_DELIVERY_TYPE[sc.code] ? SERVICE_CODE_DELIVERY_TYPE[sc.code] : form.delivery_type;
+        setForm(p => ({ ...p, service_code_id: scId, delivery_type: suggestedType }));
+        // If name is blank, try to suggest one
+        if (!form.name && sc) {
+          const unit = orgUnits.find(u => u.id === form.org_unit_id);
+          const suggested = unit ? `${unit.name} — ${sc.name}` : sc.name;
+          setForm(p => ({ ...p, service_code_id: scId, delivery_type: suggestedType, name: suggested }));
+        }
+      };
+
+      const handleUnitChange = (unitId) => {
+        const unit = orgUnits.find(u => u.id === unitId);
+        const sc = serviceCodes.find(x => x.id === form.service_code_id);
+        setForm(p => ({ ...p, org_unit_id: unitId }));
+        if (!form.name && unit && sc) {
+          setForm(p => ({ ...p, org_unit_id: unitId, name: `${unit.name} — ${sc.name}` }));
+        }
+      };
+
+      const handleSave = async () => {
+        if (!form.name.trim()) return addToast("Name is required", "error");
+        if (!form.service_code_id) return addToast("Service code is required", "error");
+        setSaving(true);
+        const payload = {
+          org_id: orgId,
+          name: form.name.trim(),
+          service_code_id: form.service_code_id,
+          org_unit_id: form.org_unit_id || null,
+          delivery_type: form.delivery_type,
+          is_active: form.is_active,
+        };
+        Object.keys(payload).forEach(k => { if (payload[k] === null) delete payload[k]; });
+
+        let result;
+        if (editing) {
+          result = await supabase.from("service_delivery_contexts").update(payload).eq("id", editing.id);
+        } else {
+          result = await supabase.from("service_delivery_contexts").insert(payload);
+        }
+        setSaving(false);
+        if (result.error) {
+          if (/relation .*service_delivery_contexts.* does not exist/i.test(result.error.message || "")) {
+            addToast("Contexts table not found — run v19.1 migration SQL first", "error");
+          } else {
+            addToast(result.error.message, "error");
+          }
+          return;
+        }
+        addToast(editing ? "Context updated" : "Context created", "success");
+        onSaved();
+        onClose();
+      };
+
+      const handleDelete = async () => {
+        if (!editing) return;
+        if (!window.confirm("Delete this context? Members will be unlinked. This cannot be undone.")) return;
+        setDeleting(true);
+        const { error } = await supabase.from("service_delivery_contexts").delete().eq("id", editing.id);
+        setDeleting(false);
+        if (error) return addToast(error.message, "error");
+        addToast("Context deleted", "success");
+        onSaved();
+        onClose();
+      };
+
+      return (
+        <Modal open={open} onClose={onClose} title={editing ? "Edit Service Context" : "New Service Context"} subtitle="Define a scheduling unit — a service being delivered to one or more clients" width={640}>
+          <FormField label="Name" required>
+            <input style={fieldStyle} value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} placeholder="e.g. West Jordan — Residential Habilitation Supports" />
+          </FormField>
+
+          <FormRow>
+            <FormField label="Service Code" required half>
+              <select style={fieldStyle} value={form.service_code_id} onChange={e => handleCodeChange(e.target.value)}>
+                <option value="">Select service...</option>
+                {serviceCodes.map(sc => <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}</option>)}
+              </select>
+            </FormField>
+            <FormField label="Delivery Type" half>
+              <select style={fieldStyle} value={form.delivery_type} onChange={e => setForm(p => ({ ...p, delivery_type: e.target.value }))}>
+                {Object.entries(DELIVERY_TYPE_META).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+              </select>
+              <div style={{ marginTop: 4, fontSize: 11, color: CB.textLight }}>{DELIVERY_TYPE_META[form.delivery_type]?.description}</div>
+            </FormField>
+          </FormRow>
+
+          <FormField label="Location (Org Unit)">
+            <select style={fieldStyle} value={form.org_unit_id} onChange={e => handleUnitChange(e.target.value)}>
+              <option value="">No fixed location (community-based)</option>
+              {orgUnits.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
+            <div style={{ marginTop: 4, fontSize: 11, color: CB.textLight }}>
+              Required for residential. Optional for day programs. Usually blank for individual services delivered in the community.
+            </div>
+          </FormField>
+
+          {editing && (
+            <FormField label="Status">
+              <div style={{ display: "flex", gap: 12 }}>
+                {[true, false].map(val => (
+                  <label key={String(val)} style={{
+                    display: "flex", alignItems: "center", gap: 8, padding: "10px 16px",
+                    borderRadius: 10, border: `1px solid ${form.is_active === val ? (val ? CB.green : CB.textLight) : CB.border}`,
+                    background: form.is_active === val ? (val ? "rgba(46,125,50,0.06)" : "rgba(148,163,184,0.08)") : CB.white,
+                    cursor: "pointer", fontSize: 14, fontWeight: 600, color: form.is_active === val ? (val ? CB.green : CB.textLight) : CB.textMid,
+                  }}>
+                    <input type="radio" name="ctx_status" checked={form.is_active === val} onChange={() => setForm(p => ({ ...p, is_active: val }))} style={{ display: "none" }} />
+                    {val ? "Active" : "Archived"}
+                  </label>
+                ))}
+              </div>
+            </FormField>
+          )}
+
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginTop: 8, flexWrap: "wrap" }}>
+            {editing ? (
+              <button onClick={handleDelete} disabled={deleting} style={{
+                padding: "10px 18px", borderRadius: 10, border: `1px solid ${CB.red}30`, background: `${CB.red}08`,
+                color: CB.red, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", opacity: deleting ? 0.6 : 1,
+              }}>{icons.trash({ size: 14 })} Delete</button>
+            ) : <span />}
+            <div style={{ display: "flex", gap: 12 }}>
+              <SecondaryButton onClick={onClose}>Cancel</SecondaryButton>
+              <PrimaryButton onClick={handleSave} loading={saving}>{icons.save({ size: 16 })} {editing ? "Update" : "Create"}</PrimaryButton>
+            </div>
+          </div>
+        </Modal>
+      );
+    }
+
+    function MembersModal({ open, onClose, context, onSaved }) {
+      const { addToast } = useToast();
+      const { orgId } = useAuth();
+      const [members, setMembers] = useState([]);
+      const [allClients, setAllClients] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [saving, setSaving] = useState(false);
+      const [addClient, setAddClient] = useState("");
+      const [addStartDate, setAddStartDate] = useState(fmtISODate(new Date()));
+
+      const load = async () => {
+        if (!context) return;
+        setLoading(true);
+        const [memRes, cliRes] = await Promise.all([
+          supabase.from("service_delivery_context_members")
+            .select("id, person_id, start_date, end_date, is_active, persons(first_name, last_name, date_of_birth)")
+            .eq("context_id", context.id)
+            .order("start_date", { ascending: false }),
+          supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
+        ]);
+        setMembers(memRes.data || []);
+        setAllClients(cliRes.data || []);
+        setLoading(false);
+      };
+
+      useEffect(() => { if (open) load(); }, [open, context]);
+
+      const currentMemberIds = new Set(members.filter(m => m.is_active !== false && !m.end_date).map(m => m.person_id));
+      const addable = allClients.filter(c => !currentMemberIds.has(c.id));
+
+      const handleAdd = async () => {
+        if (!addClient) return addToast("Select a client to add", "error");
+        setSaving(true);
+        const { error } = await supabase.from("service_delivery_context_members").insert({
+          org_id: orgId,
+          context_id: context.id,
+          person_id: addClient,
+          start_date: addStartDate,
+          is_active: true,
+        });
+        setSaving(false);
+        if (error) return addToast(error.message, "error");
+        addToast("Client added to context", "success");
+        setAddClient("");
+        load();
+        onSaved && onSaved();
+      };
+
+      const handleEndMembership = async (memberId) => {
+        const end = window.prompt("End date (YYYY-MM-DD):", fmtISODate(new Date()));
+        if (!end) return;
+        const { error } = await supabase.from("service_delivery_context_members")
+          .update({ end_date: end, is_active: false }).eq("id", memberId);
+        if (error) return addToast(error.message, "error");
+        addToast("Membership ended", "success");
+        load();
+        onSaved && onSaved();
+      };
+
+      const handleRemove = async (memberId) => {
+        if (!window.confirm("Permanently remove this membership record? Use 'End Membership' instead if you want to keep the history.")) return;
+        const { error } = await supabase.from("service_delivery_context_members").delete().eq("id", memberId);
+        if (error) return addToast(error.message, "error");
+        addToast("Membership removed", "success");
+        load();
+        onSaved && onSaved();
+      };
+
+      if (!context) return null;
+      const activeMembers = members.filter(m => m.is_active !== false && !m.end_date);
+      const historical = members.filter(m => m.is_active === false || m.end_date);
+
+      return (
+        <Modal open={open} onClose={onClose} title={context.name} subtitle={`Members · ${DELIVERY_TYPE_META[context.delivery_type]?.label || context.delivery_type}`} width={680}>
+          {loading ? (
+            <div style={{ display: "flex", justifyContent: "center", padding: 40 }}><Spinner size={24} /></div>
+          ) : (
+            <>
+              {/* Add member */}
+              <div style={{ padding: "14px 16px", background: CB.cream, border: `1px solid ${CB.border}`, borderRadius: 12, marginBottom: 20 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 10 }}>Add Client to Context</div>
+                <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+                  <div style={{ flex: "2 1 200px" }}>
+                    <label style={{ fontSize: 11, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Client</label>
+                    <select style={{ ...fieldStyle, padding: "8px 12px", fontSize: 13 }} value={addClient} onChange={e => setAddClient(e.target.value)}>
+                      <option value="">Select client...</option>
+                      {addable.map(c => <option key={c.id} value={c.id}>{c.first_name} {c.last_name}</option>)}
+                    </select>
+                  </div>
+                  <div style={{ flex: "1 1 140px" }}>
+                    <label style={{ fontSize: 11, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 }}>Start Date</label>
+                    <input type="date" style={{ ...fieldStyle, padding: "8px 12px", fontSize: 13 }} value={addStartDate} onChange={e => setAddStartDate(e.target.value)} />
+                  </div>
+                  <PrimaryButton onClick={handleAdd} loading={saving}>{icons.plus({ size: 14 })} Add</PrimaryButton>
+                </div>
+                {addable.length === 0 && <div style={{ marginTop: 8, fontSize: 12, color: CB.textLight, fontStyle: "italic" }}>All active clients are already members.</div>}
+              </div>
+
+              {/* Active members */}
+              <h3 style={{ fontSize: 14, fontWeight: 700, color: CB.navy, marginBottom: 10 }}>Current Members ({activeMembers.length})</h3>
+              {activeMembers.length === 0 ? (
+                <div style={{ padding: 20, textAlign: "center", color: CB.textLight, fontSize: 13, background: CB.white, borderRadius: 10, border: `1px solid ${CB.border}`, marginBottom: 20 }}>
+                  No active members yet. Add clients above.
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 20 }}>
+                  {activeMembers.map(m => (
+                    <div key={m.id} style={{
+                      display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
+                      padding: "10px 14px", borderRadius: 10, background: CB.white, border: `1px solid ${CB.border}`,
+                    }}>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: CB.navy }}>
+                          {m.persons ? `${m.persons.first_name} ${m.persons.last_name}` : "(Unknown)"}
+                        </div>
+                        <div style={{ fontSize: 11, color: CB.textLight, marginTop: 2 }}>
+                          Since {m.start_date ? new Date(m.start_date + "T00:00:00").toLocaleDateString() : "—"}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button onClick={() => handleEndMembership(m.id)} title="End membership (keeps history)" style={{
+                          padding: "5px 10px", borderRadius: 6, border: `1px solid ${CB.amber}40`, background: `${CB.amber}08`,
+                          color: CB.amber, fontSize: 11, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+                        }}>End</button>
+                        <button onClick={() => handleRemove(m.id)} title="Permanently delete record" style={{
+                          padding: "5px 8px", borderRadius: 6, border: `1px solid ${CB.border}`, background: CB.white,
+                          color: CB.red, fontSize: 11, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+                        }}>{icons.trash({ size: 12 })}</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Historical */}
+              {historical.length > 0 && (
+                <>
+                  <h3 style={{ fontSize: 14, fontWeight: 700, color: CB.textMid, marginBottom: 10 }}>Past Members ({historical.length})</h3>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {historical.map(m => (
+                      <div key={m.id} style={{
+                        display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
+                        padding: "10px 14px", borderRadius: 10, background: CB.cream, border: `1px solid ${CB.border}`, opacity: 0.75,
+                      }}>
+                        <div>
+                          <div style={{ fontSize: 13, fontWeight: 600, color: CB.textMid }}>
+                            {m.persons ? `${m.persons.first_name} ${m.persons.last_name}` : "(Unknown)"}
+                          </div>
+                          <div style={{ fontSize: 11, color: CB.textLight, marginTop: 2 }}>
+                            {m.start_date ? new Date(m.start_date + "T00:00:00").toLocaleDateString() : "?"} → {m.end_date ? new Date(m.end_date + "T00:00:00").toLocaleDateString() : "Archived"}
+                          </div>
+                        </div>
+                        <button onClick={() => handleRemove(m.id)} style={{
+                          padding: "5px 8px", borderRadius: 6, border: `1px solid ${CB.border}`, background: CB.white,
+                          color: CB.red, fontSize: 11, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+                        }}>{icons.trash({ size: 12 })}</button>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </>
+          )}
+
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 18 }}>
+            <SecondaryButton onClick={onClose}>Done</SecondaryButton>
+          </div>
+        </Modal>
+      );
+    }
+
+    function ServiceContextsPage({ onNavigate }) {
+      const { addToast } = useToast();
+      const { orgId } = useAuth();
+      const { isMobile } = useMobile();
+      const [contexts, setContexts] = useState([]);
+      const [memberCounts, setMemberCounts] = useState({});
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState(null);
+      const [showForm, setShowForm] = useState(false);
+      const [editing, setEditing] = useState(null);
+      const [managingMembers, setManagingMembers] = useState(null);
+      const [filterType, setFilterType] = useState("");
+      const [showArchived, setShowArchived] = useState(false);
+
+      const load = async () => {
+        setLoading(true);
+        setError(null);
+        const { data, error: err } = await supabase.from("service_delivery_contexts")
+          .select("*, service_code_definitions(code, name), org_units(name)")
+          .order("name");
+        if (err) {
+          if (/relation .*service_delivery_contexts.* does not exist/i.test(err.message || "")) {
+            setError("The Service Contexts tables don't exist yet. Run the v19.1 migration SQL in your Supabase SQL editor first.");
+          } else {
+            setError(err.message);
+          }
+          setLoading(false);
+          return;
+        }
+        setContexts(data || []);
+
+        // Batch-load active member counts per context
+        if ((data || []).length > 0) {
+          const ids = data.map(c => c.id);
+          const { data: memData } = await supabase.from("service_delivery_context_members")
+            .select("context_id, is_active, end_date").in("context_id", ids);
+          const counts = {};
+          (memData || []).forEach(m => {
+            if (m.is_active !== false && !m.end_date) {
+              counts[m.context_id] = (counts[m.context_id] || 0) + 1;
+            }
+          });
+          setMemberCounts(counts);
+        } else {
+          setMemberCounts({});
+        }
+        setLoading(false);
+      };
+
+      useEffect(() => { load(); }, []);
+
+      const openNew = () => { setEditing(null); setShowForm(true); };
+      const openEdit = (ctx) => { setEditing(ctx); setShowForm(true); };
+
+      // Apply filters
+      const visible = contexts.filter(c => {
+        if (!showArchived && c.is_active === false) return false;
+        if (filterType && c.delivery_type !== filterType) return false;
+        return true;
+      });
+
+      // Group by delivery type for display
+      const byType = { residential: [], day: [], individual: [], other: [] };
+      visible.forEach(c => {
+        const t = c.delivery_type || "other";
+        (byType[t] || byType.other).push(c);
+      });
+
+      const typeOrder = ["residential", "day", "individual", "other"];
+
+      const typeIcon = (t) => {
+        if (t === "residential") return icons.heart;
+        if (t === "day") return icons.users;
+        return icons.crosshair;
+      };
+
+      return (
+        <div>
+          <PageHeader title="Service Contexts" subtitle="How services are actually delivered — residential houses, day programs, individual services"
+            action={<PrimaryButton onClick={openNew}>{icons.plus({ size: 16 })} New Context</PrimaryButton>}
+          />
+
+          {/* Toolbar */}
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+            marginBottom: 16, padding: "12px 16px", background: CB.white, borderRadius: 12,
+            border: `1px solid ${CB.border}`, flexWrap: "wrap",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.6 }}>Filter</span>
+              <select value={filterType} onChange={e => setFilterType(e.target.value)} style={{ ...fieldStyle, padding: "7px 12px", fontSize: 13, width: "auto", minWidth: 160 }}>
+                <option value="">All types</option>
+                {Object.entries(DELIVERY_TYPE_META).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+              </select>
+              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: CB.textMid, cursor: "pointer" }}>
+                <input type="checkbox" checked={showArchived} onChange={e => setShowArchived(e.target.checked)} />
+                Show archived
+              </label>
+              <span style={{ fontSize: 12, color: CB.textMid, marginLeft: 4 }}>
+                {visible.length} of {contexts.length} {contexts.length === 1 ? "context" : "contexts"}
+              </span>
+            </div>
+          </div>
+
+          {loading ? (
+            <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><Spinner size={28} /></div>
+          ) : error ? (
+            <div style={{ padding: 30, background: `${CB.amber}10`, borderRadius: 12, border: `1px solid ${CB.amber}40`, color: CB.amber, fontSize: 13 }}>
+              {error}
+            </div>
+          ) : contexts.length === 0 ? (
+            <div style={{ padding: 60, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>
+              <div style={{ marginBottom: 14 }}>{icons.dashboard({ size: 40, color: CB.textLight })}</div>
+              <p style={{ fontSize: 15, fontWeight: 600, color: CB.navy, marginBottom: 8 }}>No service contexts defined yet.</p>
+              <p style={{ fontSize: 13, color: CB.textMid, marginBottom: 14 }}>
+                Contexts represent how you actually deliver services — a house, a day program, or an individual client's care plan.
+              </p>
+              <PrimaryButton onClick={openNew}>{icons.plus({ size: 14 })} Create First Context</PrimaryButton>
+            </div>
+          ) : (
+            <div>
+              {typeOrder.map(type => {
+                const list = byType[type];
+                if (!list || list.length === 0) return null;
+                const meta = DELIVERY_TYPE_META[type] || { label: "Other", color: CB.textLight, description: "" };
+                return (
+                  <CollapsibleTimeGroup key={type} label={meta.label} count={list.length} defaultOpen={true} accentColor={meta.color}>
+                    {meta.description && <div style={{ fontSize: 12, color: CB.textLight, fontStyle: "italic", marginBottom: 10 }}>{meta.description}</div>}
+                    <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(auto-fill, minmax(280px, 1fr))", gap: 10 }}>
+                      {list.map(ctx => {
+                        const count = memberCounts[ctx.id] || 0;
+                        const isArchived = ctx.is_active === false;
+                        return (
+                          <div key={ctx.id} style={{
+                            padding: "14px 16px", borderRadius: 12,
+                            background: CB.white, border: `1px solid ${CB.border}`,
+                            borderLeft: `4px solid ${meta.color}`,
+                            opacity: isArchived ? 0.6 : 1,
+                            transition: "all 0.15s", cursor: "default",
+                          }}
+                            onMouseEnter={e => { e.currentTarget.style.boxShadow = CB.cardShadow; e.currentTarget.style.transform = "translateY(-1px)"; }}
+                            onMouseLeave={e => { e.currentTarget.style.boxShadow = "none"; e.currentTarget.style.transform = "translateY(0)"; }}
+                          >
+                            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8, marginBottom: 8 }}>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: 14, fontWeight: 700, color: CB.navy, marginBottom: 2 }}>{ctx.name}</div>
+                                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                                  {ctx.service_code_definitions?.code && <Badge text={ctx.service_code_definitions.code} color={CB.blue} />}
+                                  {isArchived && <Badge text="Archived" color={CB.textLight} />}
+                                </div>
+                                {ctx.org_units?.name && (
+                                  <div style={{ fontSize: 11, color: CB.textLight, marginTop: 6, display: "flex", alignItems: "center", gap: 4 }}>
+                                    {icons.mapPin({ size: 10, color: CB.textLight })} {ctx.org_units.name}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 12, paddingTop: 10, borderTop: `1px solid ${CB.border}` }}>
+                              <button onClick={() => setManagingMembers(ctx)} style={{
+                                padding: "6px 12px", borderRadius: 8, border: `1px solid ${meta.color}30`, background: `${meta.color}08`,
+                                color: meta.color, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                                display: "flex", alignItems: "center", gap: 6,
+                              }}>
+                                {icons.users({ size: 12 })}
+                                {count} {count === 1 ? "member" : "members"}
+                              </button>
+                              <button onClick={() => openEdit(ctx)} style={{
+                                padding: "5px 10px", borderRadius: 6, border: `1px solid ${CB.border}`, background: CB.white,
+                                color: CB.textMid, fontSize: 11, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+                              }}>{icons.edit({ size: 11 })} Edit</button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </CollapsibleTimeGroup>
+                );
+              })}
+            </div>
+          )}
+
+          <ServiceContextForm open={showForm} onClose={() => setShowForm(false)} onSaved={load} editing={editing} />
+          <MembersModal open={!!managingMembers} onClose={() => setManagingMembers(null)} context={managingMembers} onSaved={load} />
         </div>
       );
     }
@@ -11161,6 +11716,96 @@
       );
     }
 
+    function ClientContextsTab({ clientId }) {
+      const [memberships, setMemberships] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState(null);
+
+      useEffect(() => {
+        setLoading(true);
+        setError(null);
+        supabase.from("service_delivery_context_members")
+          .select("id, start_date, end_date, is_active, service_delivery_contexts(id, name, delivery_type, service_code_definitions(code, name), org_units(name))")
+          .eq("person_id", clientId)
+          .order("start_date", { ascending: false })
+          .then(({ data, error: err }) => {
+            if (err) {
+              if (/relation .*service_delivery_context.* does not exist/i.test(err.message || "")) {
+                setError("Service Contexts not configured yet. Run the v19.1 migration SQL, then define contexts in the Service Contexts page.");
+              } else {
+                setError(err.message);
+              }
+            }
+            setMemberships(data || []);
+            setLoading(false);
+          });
+      }, [clientId]);
+
+      if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
+      if (error) return <div style={{ padding: 20, background: `${CB.amber}10`, borderRadius: 12, border: `1px solid ${CB.amber}40`, color: CB.amber, fontSize: 13 }}>{error}</div>;
+      if (memberships.length === 0) {
+        return (
+          <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>
+            <p style={{ fontSize: 14, marginBottom: 6 }}>Not a member of any service contexts yet.</p>
+            <p style={{ fontSize: 12, color: CB.textMid }}>Add them to a context from the Service Contexts page — one for each service they receive (e.g. their RHS house, their DSG group, their individual PBA plan).</p>
+          </div>
+        );
+      }
+
+      const active = memberships.filter(m => m.is_active !== false && !m.end_date);
+      const past = memberships.filter(m => m.is_active === false || m.end_date);
+
+      const renderMembership = (m, dim) => {
+        const ctx = m.service_delivery_contexts;
+        const meta = DELIVERY_TYPE_META[ctx?.delivery_type] || { label: "Other", color: CB.textLight };
+        return (
+          <div key={m.id} style={{
+            padding: "12px 14px", borderRadius: 10, background: dim ? CB.cream : CB.white,
+            border: `1px solid ${CB.border}`, borderLeft: `4px solid ${meta.color}`,
+            opacity: dim ? 0.7 : 1,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 6, flexWrap: "wrap" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 13, fontWeight: 700, color: CB.navy }}>{ctx?.name || "(Deleted context)"}</span>
+                <Badge text={meta.label} color={meta.color} />
+                {ctx?.service_code_definitions?.code && <Badge text={ctx.service_code_definitions.code} color={CB.blue} />}
+              </div>
+              <span style={{ fontSize: 11, color: CB.textLight }}>
+                {m.start_date ? new Date(m.start_date + "T00:00:00").toLocaleDateString() : "?"}
+                {m.end_date ? ` → ${new Date(m.end_date + "T00:00:00").toLocaleDateString()}` : " → current"}
+              </span>
+            </div>
+            {ctx?.org_units?.name && (
+              <div style={{ fontSize: 11, color: CB.textLight, display: "flex", alignItems: "center", gap: 4 }}>
+                {icons.mapPin({ size: 10, color: CB.textLight })} {ctx.org_units.name}
+              </div>
+            )}
+          </div>
+        );
+      };
+
+      return (
+        <div>
+          {active.length > 0 && (
+            <>
+              <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 10 }}>Active Memberships ({active.length})</h3>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
+                {active.map(m => renderMembership(m, false))}
+              </div>
+            </>
+          )}
+          {past.length > 0 && (
+            <>
+              <h3 style={{ fontSize: 14, fontWeight: 700, color: CB.textMid, marginBottom: 10 }}>Past Memberships ({past.length})</h3>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {past.map(m => renderMembership(m, true))}
+              </div>
+            </>
+          )}
+        </div>
+      );
+    }
+
     function ClientNotesTab({ clientId }) {
       const [notes, setNotes] = useState([]);
       const [loading, setLoading] = useState(true);
@@ -11546,6 +12191,7 @@
         { key: "notes", label: "Service Notes", icon: icons.fileText, count: counts.notes, content: <ClientNotesTab clientId={clientId} /> },
         { key: "incidents", label: "Incidents", icon: icons.alertTriangle, count: counts.incidents, content: <ClientIncidentsTab clientId={clientId} /> },
         { key: "contacts", label: "Contacts", icon: icons.heart, content: <ClientContactsTab client={client} /> },
+        { key: "services", label: "Services", icon: icons.dashboard, content: <ClientContextsTab clientId={clientId} /> },
         { key: "documents", label: "Documents", icon: icons.fileText, content: (
           <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, padding: 20 }}>
             <DocumentsSection entityType="client" entityId={clientId} orgId={orgId} entityData={client} />
@@ -11592,6 +12238,7 @@
           case "clients": return <ClientsPage onNavigate={navigate} />;
           case "intake": return <IntakePage />;
           case "schedule": return <SchedulePage onNavigate={navigate} />;
+          case "contexts": return <ServiceContextsPage onNavigate={navigate} />;
           case "training": return <TrainingPage />;
           case "notes": return <ServiceNotesPage />;
           case "evv": return <EVVPage />;
