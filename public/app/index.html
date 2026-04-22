@@ -102,15 +102,15 @@
 
     // Nav items each role can see
     const ROLE_NAV = {
-      owner:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "finance", "docs", "messages", "ai", "migration", "settings"],
-      admin:                ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "finance", "docs", "messages", "ai", "migration", "settings"],
-      compliance_director:  ["dashboard", "staff", "clients", "intake", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "finance", "docs", "messages", "ai"],
-      residential_director: ["dashboard", "clients", "training", "notes", "evv", "incidents", "alerts", "medications", "goals", "docs", "messages"],
-      day_program_director: ["dashboard", "clients", "training", "notes", "evv", "incidents", "alerts", "medications", "goals", "docs", "messages"],
-      house_manager:        ["dashboard", "clients", "notes", "evv", "incidents", "medications", "goals", "messages"],
+      owner:                ["dashboard", "staff", "clients", "intake", "schedule", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "finance", "docs", "messages", "ai", "migration", "settings"],
+      admin:                ["dashboard", "staff", "clients", "intake", "schedule", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "finance", "docs", "messages", "ai", "migration", "settings"],
+      compliance_director:  ["dashboard", "staff", "clients", "intake", "schedule", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "finance", "docs", "messages", "ai"],
+      residential_director: ["dashboard", "clients", "schedule", "training", "notes", "evv", "incidents", "alerts", "medications", "goals", "docs", "messages"],
+      day_program_director: ["dashboard", "clients", "schedule", "training", "notes", "evv", "incidents", "alerts", "medications", "goals", "docs", "messages"],
+      house_manager:        ["dashboard", "clients", "schedule", "notes", "evv", "incidents", "medications", "goals", "messages"],
       bcba:                 ["dashboard", "clients", "notes", "compliance", "incidents", "goals", "messages"],
-      rn:                   ["dashboard", "clients", "notes", "incidents", "medications", "goals", "messages"],
-      dsp:                  ["notes", "evv", "incidents", "medications", "goals", "messages"],
+      rn:                   ["dashboard", "clients", "schedule", "notes", "incidents", "medications", "goals", "messages"],
+      dsp:                  ["dashboard", "schedule", "notes", "evv", "incidents", "medications", "goals", "messages"],
     };
 
     function AuthProvider({ children }) {
@@ -490,6 +490,7 @@
         { key: "staff", label: "Staff", icon: icons.users },
         { key: "clients", label: "Clients", icon: icons.heart },
         { key: "intake", label: "Intake", icon: icons.plus },
+        { key: "schedule", label: "Schedule", icon: icons.calendar },
         { key: "training", label: "Training", icon: icons.book },
         { key: "notes", label: "Service Notes", icon: icons.fileText },
         { key: "evv", label: "EVV", icon: icons.mapPin },
@@ -795,10 +796,10 @@
                 <h3 style={{ fontSize: 16, fontWeight: 700, color: CB.navy, marginBottom: 16 }}>Quick Actions</h3>
                 <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(4, 1fr)", gap: 12 }}>
                   {[
+                    { label: "View Schedule", icon: icons.calendar, color: CB.navy, target: "schedule" },
                     { label: "New Service Note", icon: icons.fileText, color: CB.teal, target: "notes" },
                     { label: "Clock In (EVV)", icon: icons.mapPin, color: CB.blue, target: "evv" },
                     { label: "Log Incident", icon: icons.alertTriangle, color: CB.amber, target: "incidents" },
-                    { label: "Run Compliance Check", icon: icons.shield, color: CB.navy, target: "compliance" },
                   ].map((action, i) => (
                     <button key={i} onClick={() => onNavigate && onNavigate(action.target)} style={{
                       display: "flex", alignItems: "center", gap: 10, padding: "14px 16px",
@@ -3690,6 +3691,613 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // MODULE — SHIFT MANAGEMENT (v19.0)
+    // Scheduling, weekly grid, gap detection, EVV/note linking
+    // ═══════════════════════════════════════════════════════════════
+
+    // Returns a Date for the Sunday (start) of the week containing `d`
+    const weekStart = (d) => {
+      const copy = new Date(d);
+      copy.setHours(0, 0, 0, 0);
+      copy.setDate(copy.getDate() - copy.getDay());
+      return copy;
+    };
+
+    const fmtISODate = (d) => {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${y}-${m}-${day}`;
+    };
+
+    // Shift status → visual treatment
+    const SHIFT_STATUS_STYLE = {
+      scheduled:   { bg: "#1A73E810", border: "#1A73E8", text: "#1A73E8", label: "Scheduled" },
+      in_progress: { bg: "#00897B18", border: "#00897B", text: "#00695C", label: "In Progress" },
+      completed:   { bg: "#2E7D3218", border: "#2E7D32", text: "#1B5E20", label: "Completed" },
+      missed:      { bg: "#E5393518", border: "#E53935", text: "#B71C1C", label: "No-Show" },
+      cancelled:   { bg: "#94A3B818", border: "#94A3B8", text: "#475569", label: "Cancelled" },
+    };
+
+    function ShiftForm({ open, onClose, onSaved, editing, prefillDate, prefillStaffId }) {
+      const { addToast } = useToast();
+      const { orgId } = useAuth();
+      const [saving, setSaving] = useState(false);
+      const [deleting, setDeleting] = useState(false);
+      const [staffList, setStaffList] = useState([]);
+      const [clients, setClients] = useState([]);
+      const [serviceCodes, setServiceCodes] = useState([]);
+      const [form, setForm] = useState({
+        staff_id: "", person_id: "", service_code_id: "",
+        scheduled_date: fmtISODate(new Date()),
+        scheduled_start: "08:00", scheduled_end: "16:00",
+        location: "", notes: "", status: "scheduled",
+      });
+
+      useEffect(() => {
+        if (!open) return;
+        Promise.all([
+          supabase.from("staff").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
+          supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
+          supabase.from("service_code_definitions").select("id, code, name").order("code"),
+        ]).then(([s, c, sc]) => {
+          setStaffList(s.data || []);
+          setClients(c.data || []);
+          setServiceCodes(sc.data || []);
+        });
+        if (editing) {
+          setForm({
+            staff_id: editing.staff_id || "",
+            person_id: editing.person_id || "",
+            service_code_id: editing.service_code_id || "",
+            scheduled_date: editing.scheduled_date || fmtISODate(new Date()),
+            scheduled_start: (editing.scheduled_start || "08:00").slice(0, 5),
+            scheduled_end: (editing.scheduled_end || "16:00").slice(0, 5),
+            location: editing.location || "",
+            notes: editing.notes || "",
+            status: editing.status || "scheduled",
+          });
+        } else {
+          setForm({
+            staff_id: prefillStaffId || "",
+            person_id: "", service_code_id: "",
+            scheduled_date: prefillDate || fmtISODate(new Date()),
+            scheduled_start: "08:00", scheduled_end: "16:00",
+            location: "", notes: "", status: "scheduled",
+          });
+        }
+      }, [open, editing, prefillDate, prefillStaffId]);
+
+      const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
+
+      const handleSave = async () => {
+        if (!form.staff_id || !form.person_id || !form.scheduled_date || !form.scheduled_start || !form.scheduled_end) {
+          return addToast("Staff, client, date, start, and end times are all required", "error");
+        }
+        setSaving(true);
+        const payload = {
+          org_id: orgId,
+          staff_id: form.staff_id,
+          person_id: form.person_id,
+          service_code_id: form.service_code_id || null,
+          scheduled_date: form.scheduled_date,
+          scheduled_start: form.scheduled_start,
+          scheduled_end: form.scheduled_end,
+          location: form.location || null,
+          notes: form.notes || null,
+          status: form.status,
+        };
+        // Strip null optional keys
+        Object.keys(payload).forEach(k => { if (payload[k] === null) delete payload[k]; });
+
+        let result;
+        if (editing) {
+          result = await supabase.from("shifts").update(payload).eq("id", editing.id);
+        } else {
+          result = await supabase.from("shifts").insert(payload);
+        }
+        setSaving(false);
+        if (result.error) {
+          // Most likely: table doesn't exist yet
+          if (/relation .*shifts.* does not exist/i.test(result.error.message || "")) {
+            addToast("Shifts table not found — run v19.0 migration SQL first", "error");
+          } else {
+            addToast(result.error.message, "error");
+          }
+          return;
+        }
+        addToast(editing ? "Shift updated" : "Shift scheduled", "success");
+        onSaved();
+        onClose();
+      };
+
+      const handleDelete = async () => {
+        if (!editing) return;
+        if (!window.confirm("Delete this shift? This cannot be undone.")) return;
+        setDeleting(true);
+        const { error } = await supabase.from("shifts").delete().eq("id", editing.id);
+        setDeleting(false);
+        if (error) return addToast(error.message, "error");
+        addToast("Shift deleted", "success");
+        onSaved();
+        onClose();
+      };
+
+      return (
+        <Modal open={open} onClose={onClose} title={editing ? "Edit Shift" : "Schedule Shift"} subtitle="Assign a staff member to cover a client at a specific time" width={640}>
+          <FormRow>
+            <FormField label="Staff" required half>
+              <select style={fieldStyle} value={form.staff_id} onChange={e => set("staff_id", e.target.value)}>
+                <option value="">Select staff...</option>
+                {staffList.map(s => <option key={s.id} value={s.id}>{s.first_name} {s.last_name}</option>)}
+              </select>
+            </FormField>
+            <FormField label="Client" required half>
+              <select style={fieldStyle} value={form.person_id} onChange={e => set("person_id", e.target.value)}>
+                <option value="">Select client...</option>
+                {clients.map(c => <option key={c.id} value={c.id}>{c.first_name} {c.last_name}</option>)}
+              </select>
+            </FormField>
+          </FormRow>
+          <FormRow>
+            <FormField label="Service Code" half>
+              <select style={fieldStyle} value={form.service_code_id} onChange={e => set("service_code_id", e.target.value)}>
+                <option value="">(optional — any code)</option>
+                {serviceCodes.map(sc => <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}</option>)}
+              </select>
+            </FormField>
+            <FormField label="Location" half>
+              <input style={fieldStyle} value={form.location} onChange={e => set("location", e.target.value)} placeholder="West Jordan, Home, etc." />
+            </FormField>
+          </FormRow>
+          <FormRow>
+            <FormField label="Date" required half>
+              <input style={fieldStyle} type="date" value={form.scheduled_date} onChange={e => set("scheduled_date", e.target.value)} />
+            </FormField>
+            <FormField label="Status" half>
+              <select style={fieldStyle} value={form.status} onChange={e => set("status", e.target.value)}>
+                <option value="scheduled">Scheduled</option>
+                <option value="in_progress">In Progress</option>
+                <option value="completed">Completed</option>
+                <option value="missed">No-Show</option>
+                <option value="cancelled">Cancelled</option>
+              </select>
+            </FormField>
+          </FormRow>
+          <FormRow>
+            <FormField label="Start Time" required half>
+              <input style={fieldStyle} type="time" value={form.scheduled_start} onChange={e => set("scheduled_start", e.target.value)} />
+            </FormField>
+            <FormField label="End Time" required half>
+              <input style={fieldStyle} type="time" value={form.scheduled_end} onChange={e => set("scheduled_end", e.target.value)} />
+            </FormField>
+          </FormRow>
+          <FormField label="Notes">
+            <textarea style={{ ...fieldStyle, minHeight: 64, resize: "vertical" }} value={form.notes} onChange={e => set("notes", e.target.value)} placeholder="Any handoff notes, special instructions, etc." />
+          </FormField>
+
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginTop: 8, flexWrap: "wrap" }}>
+            {editing ? (
+              <button onClick={handleDelete} disabled={deleting} style={{
+                padding: "10px 18px", borderRadius: 10, border: `1px solid ${CB.red}30`, background: `${CB.red}08`,
+                color: CB.red, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", opacity: deleting ? 0.6 : 1,
+              }}>{icons.trash({ size: 14 })} Delete Shift</button>
+            ) : <span />}
+            <div style={{ display: "flex", gap: 12 }}>
+              <SecondaryButton onClick={onClose}>Cancel</SecondaryButton>
+              <PrimaryButton onClick={handleSave} loading={saving}>{icons.save({ size: 16 })} {editing ? "Update" : "Schedule"}</PrimaryButton>
+            </div>
+          </div>
+        </Modal>
+      );
+    }
+
+    function SchedulePage({ onNavigate }) {
+      const { orgId } = useAuth();
+      const { addToast } = useToast();
+      const { isMobile } = useMobile();
+      const [anchorDate, setAnchorDate] = useState(() => weekStart(new Date()));
+      const [shifts, setShifts] = useState([]);
+      const [evvSessions, setEvvSessions] = useState([]);
+      const [staff, setStaff] = useState([]);
+      const [clients, setClients] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [showForm, setShowForm] = useState(false);
+      const [editing, setEditing] = useState(null);
+      const [prefillDate, setPrefillDate] = useState(null);
+      const [prefillStaffId, setPrefillStaffId] = useState(null);
+      const [filterStaff, setFilterStaff] = useState("");
+      const [viewMode, setViewMode] = useState(isMobile ? "list" : "grid");
+
+      // Week boundaries
+      const weekEndDate = useMemo(() => {
+        const e = new Date(anchorDate);
+        e.setDate(e.getDate() + 6);
+        return e;
+      }, [anchorDate]);
+
+      const weekDays = useMemo(() => {
+        return Array.from({ length: 7 }, (_, i) => {
+          const d = new Date(anchorDate);
+          d.setDate(d.getDate() + i);
+          return d;
+        });
+      }, [anchorDate]);
+
+      const loadWeek = async () => {
+        setLoading(true);
+        const startISO = fmtISODate(anchorDate);
+        const endISO = fmtISODate(weekEndDate);
+
+        // Shifts for this week
+        const shiftRes = await supabase.from("shifts")
+          .select("id, staff_id, person_id, service_code_id, scheduled_date, scheduled_start, scheduled_end, location, notes, status, staff(first_name, last_name), persons(first_name, last_name), service_code_definitions(code)")
+          .gte("scheduled_date", startISO)
+          .lte("scheduled_date", endISO)
+          .order("scheduled_start");
+
+        if (shiftRes.error) {
+          if (/relation .*shifts.* does not exist/i.test(shiftRes.error.message || "")) {
+            setShifts([]);
+            setStaff([]);
+            setClients([]);
+            setEvvSessions([]);
+            setLoading(false);
+            return; // empty state UI will prompt migration
+          }
+          addToast("Failed to load shifts: " + shiftRes.error.message, "error");
+          setLoading(false);
+          return;
+        }
+
+        // EVV sessions that might correspond to shifts this week (for auto-match display)
+        const weekStartUTC = new Date(startISO + "T00:00:00").toISOString();
+        const weekEndUTC = new Date(endISO + "T23:59:59").toISOString();
+        const evvRes = await supabase.from("evv_sessions")
+          .select("id, staff_id, person_id, clock_in_at, clock_out_at")
+          .gte("clock_in_at", weekStartUTC)
+          .lte("clock_in_at", weekEndUTC);
+
+        // Apply gap detection: any "scheduled" shift whose start has passed with no EVV clock-in for same staff+client within ±60min → mark missed in the local render
+        const now = new Date();
+        const evvByKey = {};
+        (evvRes.data || []).forEach(s => {
+          const key = `${s.staff_id}__${s.person_id}`;
+          if (!evvByKey[key]) evvByKey[key] = [];
+          evvByKey[key].push(s);
+        });
+
+        const enriched = (shiftRes.data || []).map(sh => {
+          const start = new Date(`${sh.scheduled_date}T${sh.scheduled_start}`);
+          const end = new Date(`${sh.scheduled_date}T${sh.scheduled_end}`);
+          const key = `${sh.staff_id}__${sh.person_id}`;
+          const matchingEvv = (evvByKey[key] || []).find(e => {
+            const clockIn = new Date(e.clock_in_at);
+            return Math.abs(clockIn - start) <= 60 * 60 * 1000; // within 1 hour
+          });
+
+          let derivedStatus = sh.status;
+          // Auto-derivations (display-only; don't mutate DB here)
+          if (sh.status === "scheduled") {
+            if (matchingEvv && !matchingEvv.clock_out_at) derivedStatus = "in_progress";
+            else if (matchingEvv && matchingEvv.clock_out_at) derivedStatus = "completed";
+            else if (now > end) derivedStatus = "missed"; // end passed, no EVV → no-show
+          }
+
+          return { ...sh, derived_status: derivedStatus, evv_match: matchingEvv || null };
+        });
+
+        // Unique staff + clients from shifts for the grid axis
+        const staffMap = new Map();
+        const clientMap = new Map();
+        enriched.forEach(sh => {
+          if (sh.staff) staffMap.set(sh.staff_id, { id: sh.staff_id, ...sh.staff });
+          if (sh.persons) clientMap.set(sh.person_id, { id: sh.person_id, ...sh.persons });
+        });
+
+        // Also pull full staff list (so the grid shows staff even with no shifts this week)
+        const allStaffRes = await supabase.from("staff").select("id, first_name, last_name").eq("is_active", true).order("last_name");
+        (allStaffRes.data || []).forEach(s => {
+          if (!staffMap.has(s.id)) staffMap.set(s.id, s);
+        });
+
+        setShifts(enriched);
+        setEvvSessions(evvRes.data || []);
+        setStaff([...staffMap.values()]);
+        setClients([...clientMap.values()]);
+        setLoading(false);
+      };
+
+      useEffect(() => { loadWeek(); }, [anchorDate]);
+
+      const goPrevWeek = () => { const d = new Date(anchorDate); d.setDate(d.getDate() - 7); setAnchorDate(d); };
+      const goNextWeek = () => { const d = new Date(anchorDate); d.setDate(d.getDate() + 7); setAnchorDate(d); };
+      const goToday = () => setAnchorDate(weekStart(new Date()));
+
+      const openNew = (date, staffId) => {
+        setEditing(null);
+        setPrefillDate(date || fmtISODate(new Date()));
+        setPrefillStaffId(staffId || null);
+        setShowForm(true);
+      };
+
+      const openEdit = (shift) => {
+        setEditing(shift);
+        setPrefillDate(null);
+        setPrefillStaffId(null);
+        setShowForm(true);
+      };
+
+      // Filtered shifts based on staff filter
+      const visibleShifts = useMemo(() => {
+        if (!filterStaff) return shifts;
+        return shifts.filter(s => s.staff_id === filterStaff);
+      }, [shifts, filterStaff]);
+
+      // Group visible shifts by staff × date for grid
+      const shiftsByStaffDate = useMemo(() => {
+        const m = {};
+        visibleShifts.forEach(s => {
+          const k = `${s.staff_id}__${s.scheduled_date}`;
+          if (!m[k]) m[k] = [];
+          m[k].push(s);
+        });
+        return m;
+      }, [visibleShifts]);
+
+      // Weekly summary counts
+      const summary = useMemo(() => {
+        const s = { total: shifts.length, scheduled: 0, in_progress: 0, completed: 0, missed: 0, cancelled: 0 };
+        shifts.forEach(sh => { s[sh.derived_status] = (s[sh.derived_status] || 0) + 1; });
+        return s;
+      }, [shifts]);
+
+      const weekLabel = `${anchorDate.toLocaleDateString("en-US", { month: "short", day: "numeric" })} – ${weekEndDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`;
+      const isCurrentWeek = fmtISODate(anchorDate) === fmtISODate(weekStart(new Date()));
+
+      // Filter staff shown in grid: those with shifts this week, OR all if filter not applied & grid has no shifts
+      const staffInGrid = useMemo(() => {
+        if (filterStaff) return staff.filter(s => s.id === filterStaff);
+        const withShifts = new Set(shifts.map(s => s.staff_id));
+        if (withShifts.size === 0) return staff; // show all if empty week
+        return staff.filter(s => withShifts.has(s.id));
+      }, [staff, shifts, filterStaff]);
+
+      return (
+        <div>
+          <PageHeader title="Schedule" subtitle="Weekly shift planning, coverage, and gap detection"
+            action={<PrimaryButton onClick={() => openNew()}>{icons.plus({ size: 16 })} New Shift</PrimaryButton>}
+          />
+
+          {/* Toolbar: week nav + filters + view mode */}
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+            marginBottom: 16, padding: "12px 16px", background: CB.white, borderRadius: 12,
+            border: `1px solid ${CB.border}`, flexWrap: "wrap",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <button onClick={goPrevWeek} style={{
+                padding: "7px 10px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
+                color: CB.textMid, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+              }}>‹</button>
+              <button onClick={goToday} style={{
+                padding: "7px 14px", borderRadius: 8, border: `1px solid ${CB.border}`,
+                background: isCurrentWeek ? CB.navy : CB.white,
+                color: isCurrentWeek ? CB.white : CB.textMid,
+                fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+              }}>Today</button>
+              <button onClick={goNextWeek} style={{
+                padding: "7px 10px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
+                color: CB.textMid, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+              }}>›</button>
+              <span style={{ fontSize: 13, fontWeight: 700, color: CB.navy, marginLeft: 8 }}>{weekLabel}</span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <select value={filterStaff} onChange={e => setFilterStaff(e.target.value)} style={{ ...fieldStyle, padding: "7px 12px", fontSize: 13, width: "auto", minWidth: 160 }}>
+                <option value="">All staff</option>
+                {staff.map(s => <option key={s.id} value={s.id}>{s.first_name} {s.last_name}</option>)}
+              </select>
+              <div style={{ display: "flex", alignItems: "center", gap: 4, background: CB.cream, padding: 3, borderRadius: 9, border: `1px solid ${CB.border}` }}>
+                <button onClick={() => setViewMode("grid")} style={{
+                  padding: "6px 12px", borderRadius: 7, border: "none", fontSize: 11, fontWeight: 700, fontFamily: "inherit",
+                  cursor: "pointer", background: viewMode === "grid" ? CB.navy : "transparent",
+                  color: viewMode === "grid" ? CB.white : CB.textMid,
+                }}>Grid</button>
+                <button onClick={() => setViewMode("list")} style={{
+                  padding: "6px 12px", borderRadius: 7, border: "none", fontSize: 11, fontWeight: 700, fontFamily: "inherit",
+                  cursor: "pointer", background: viewMode === "list" ? CB.navy : "transparent",
+                  color: viewMode === "list" ? CB.white : CB.textMid,
+                }}>List</button>
+              </div>
+            </div>
+          </div>
+
+          {/* Week summary stat strip */}
+          {!loading && shifts.length > 0 && (
+            <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(5, 1fr)", gap: 10, marginBottom: 16 }}>
+              {[
+                { key: "total", label: "Total", color: CB.navy },
+                { key: "scheduled", label: "Scheduled", color: CB.blue },
+                { key: "in_progress", label: "In Progress", color: CB.teal },
+                { key: "completed", label: "Completed", color: CB.green },
+                { key: "missed", label: "No-Show", color: CB.red },
+              ].map(s => (
+                <div key={s.key} style={{
+                  padding: "12px 14px", borderRadius: 10, background: CB.white,
+                  border: `1px solid ${CB.border}`, textAlign: "center",
+                }}>
+                  <div style={{ fontSize: 20, fontWeight: 800, color: s.color }}>{summary[s.key] || 0}</div>
+                  <div style={{ fontSize: 10, fontWeight: 600, color: CB.textMid, textTransform: "uppercase", letterSpacing: 0.5 }}>{s.label}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {loading ? (
+            <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><Spinner size={28} /></div>
+          ) : shifts.length === 0 && staff.length === 0 ? (
+            // Empty state: migration probably hasn't been run
+            <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>
+              <div style={{ marginBottom: 14 }}>{icons.calendar({ size: 40, color: CB.textLight })}</div>
+              <p style={{ fontSize: 15, fontWeight: 600, color: CB.navy, marginBottom: 8 }}>Schedule ready to go.</p>
+              <p style={{ fontSize: 13, color: CB.textMid, marginBottom: 14 }}>If you're seeing this and expected shifts, the <code>shifts</code> table may not exist yet. Run the v19.0 migration SQL.</p>
+              <PrimaryButton onClick={() => openNew()}>{icons.plus({ size: 14 })} Schedule First Shift</PrimaryButton>
+            </div>
+          ) : viewMode === "grid" && !isMobile ? (
+            /* ── GRID VIEW ── */
+            <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, overflow: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 900 }}>
+                <thead>
+                  <tr style={{ background: CB.cream }}>
+                    <th style={{ padding: "11px 14px", textAlign: "left", fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.6, borderBottom: `1px solid ${CB.border}`, position: "sticky", left: 0, background: CB.cream, minWidth: 150 }}>Staff</th>
+                    {weekDays.map(d => {
+                      const isToday = fmtISODate(d) === fmtISODate(new Date());
+                      return (
+                        <th key={d.toISOString()} style={{
+                          padding: "11px 10px", textAlign: "center", fontSize: 11, fontWeight: 700,
+                          color: isToday ? CB.teal : CB.textLight, textTransform: "uppercase", letterSpacing: 0.6,
+                          borderBottom: `1px solid ${CB.border}`, minWidth: 110,
+                          background: isToday ? `${CB.teal}08` : "transparent",
+                        }}>
+                          <div>{d.toLocaleDateString("en-US", { weekday: "short" })}</div>
+                          <div style={{ fontSize: 14, fontWeight: 800, color: isToday ? CB.teal : CB.navy, marginTop: 2 }}>{d.getDate()}</div>
+                        </th>
+                      );
+                    })}
+                  </tr>
+                </thead>
+                <tbody>
+                  {staffInGrid.map(s => (
+                    <tr key={s.id} style={{ borderBottom: `1px solid ${CB.border}` }}>
+                      <td style={{ padding: "10px 14px", fontSize: 13, fontWeight: 600, color: CB.text, position: "sticky", left: 0, background: CB.white, borderRight: `1px solid ${CB.border}` }}>
+                        {s.first_name} {s.last_name}
+                      </td>
+                      {weekDays.map(d => {
+                        const dateStr = fmtISODate(d);
+                        const cellShifts = shiftsByStaffDate[`${s.id}__${dateStr}`] || [];
+                        return (
+                          <td key={dateStr} onClick={() => cellShifts.length === 0 && openNew(dateStr, s.id)} style={{
+                            padding: 6, verticalAlign: "top", cursor: cellShifts.length === 0 ? "pointer" : "default",
+                            borderRight: `1px solid ${CB.border}`, minHeight: 60, height: 60,
+                            background: cellShifts.length === 0 ? "transparent" : `${CB.cream}30`,
+                          }}
+                            onMouseEnter={e => { if (cellShifts.length === 0) e.currentTarget.style.background = `${CB.teal}06`; }}
+                            onMouseLeave={e => { if (cellShifts.length === 0) e.currentTarget.style.background = "transparent"; }}
+                          >
+                            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                              {cellShifts.map(sh => {
+                                const style = SHIFT_STATUS_STYLE[sh.derived_status] || SHIFT_STATUS_STYLE.scheduled;
+                                return (
+                                  <div key={sh.id} onClick={(e) => { e.stopPropagation(); openEdit(sh); }} style={{
+                                    padding: "5px 8px", borderRadius: 6, cursor: "pointer",
+                                    background: style.bg, border: `1px solid ${style.border}40`, borderLeft: `3px solid ${style.border}`,
+                                    transition: "transform 0.1s, box-shadow 0.1s",
+                                  }}
+                                    onMouseEnter={e => { e.currentTarget.style.transform = "translateY(-1px)"; e.currentTarget.style.boxShadow = "0 2px 8px rgba(10,30,51,0.08)"; }}
+                                    onMouseLeave={e => { e.currentTarget.style.transform = "translateY(0)"; e.currentTarget.style.boxShadow = "none"; }}
+                                  >
+                                    <div style={{ fontSize: 10, fontWeight: 700, color: style.text }}>
+                                      {sh.scheduled_start.slice(0, 5)}–{sh.scheduled_end.slice(0, 5)}
+                                    </div>
+                                    <div style={{ fontSize: 11, fontWeight: 600, color: CB.navy, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                      {sh.persons ? `${sh.persons.first_name} ${sh.persons.last_name[0]}.` : "—"}
+                                    </div>
+                                    {sh.service_code_definitions?.code && (
+                                      <div style={{ fontSize: 9, fontWeight: 700, color: style.text, marginTop: 1 }}>
+                                        {sh.service_code_definitions.code}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                              {cellShifts.length === 0 && (
+                                <div style={{ fontSize: 18, color: "transparent", textAlign: "center", padding: "10px 0", transition: "color 0.15s" }}
+                                  onMouseEnter={e => e.currentTarget.style.color = CB.textLight}
+                                  onMouseLeave={e => e.currentTarget.style.color = "transparent"}>+</div>
+                              )}
+                            </div>
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div style={{ padding: "10px 16px", borderTop: `1px solid ${CB.border}`, fontSize: 11, color: CB.textLight, background: CB.cream }}>
+                Click an empty cell to schedule. Click a shift to edit. Status auto-derives from EVV data where possible.
+              </div>
+            </div>
+          ) : (
+            /* ── LIST VIEW ── (also used on mobile) */
+            <div>
+              {weekDays.map(d => {
+                const dateStr = fmtISODate(d);
+                const dayShifts = visibleShifts.filter(s => s.scheduled_date === dateStr).sort((a, b) => a.scheduled_start.localeCompare(b.scheduled_start));
+                const isToday = dateStr === fmtISODate(new Date());
+                const label = d.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
+                return (
+                  <CollapsibleTimeGroup key={dateStr} label={isToday ? `${label} · Today` : label} count={dayShifts.length} defaultOpen={isToday || dayShifts.length > 0} accentColor={isToday ? CB.teal : CB.blue}>
+                    {dayShifts.length === 0 ? (
+                      <div style={{ padding: "14px 16px", textAlign: "center", fontSize: 12, color: CB.textLight, background: CB.cream, borderRadius: 8 }}>
+                        No shifts scheduled.
+                        <button onClick={() => openNew(dateStr)} style={{
+                          marginLeft: 10, padding: "4px 10px", borderRadius: 6, border: `1px solid ${CB.teal}40`,
+                          background: `${CB.teal}10`, color: CB.teal, fontSize: 11, fontWeight: 600,
+                          cursor: "pointer", fontFamily: "inherit",
+                        }}>+ Add shift</button>
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        {dayShifts.map(sh => {
+                          const style = SHIFT_STATUS_STYLE[sh.derived_status] || SHIFT_STATUS_STYLE.scheduled;
+                          return (
+                            <div key={sh.id} onClick={() => openEdit(sh)} style={{
+                              padding: "10px 14px", borderRadius: 10, background: CB.cream,
+                              border: `1px solid ${CB.border}`, borderLeft: `4px solid ${style.border}`,
+                              cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between",
+                              gap: 12, flexWrap: "wrap", transition: "all 0.15s",
+                            }}
+                              onMouseEnter={e => { e.currentTarget.style.background = CB.white; e.currentTarget.style.borderColor = style.border; }}
+                              onMouseLeave={e => { e.currentTarget.style.background = CB.cream; e.currentTarget.style.borderColor = CB.border; e.currentTarget.style.borderLeftColor = style.border; }}
+                            >
+                              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                                <span style={{ fontSize: 13, fontWeight: 700, color: CB.navy, minWidth: 100 }}>
+                                  {sh.scheduled_start.slice(0, 5)} – {sh.scheduled_end.slice(0, 5)}
+                                </span>
+                                <span style={{ fontSize: 13, color: CB.text, fontWeight: 600 }}>
+                                  {sh.staff ? `${sh.staff.first_name} ${sh.staff.last_name}` : "—"}
+                                </span>
+                                <span style={{ fontSize: 12, color: CB.textMid }}>
+                                  → {sh.persons ? `${sh.persons.first_name} ${sh.persons.last_name}` : "—"}
+                                </span>
+                                {sh.service_code_definitions?.code && <Badge text={sh.service_code_definitions.code} color={CB.blue} />}
+                                {sh.location && <span style={{ fontSize: 11, color: CB.textLight }}>{icons.mapPin({ size: 10, color: CB.textLight })} {sh.location}</span>}
+                              </div>
+                              <Badge text={style.label} color={style.border} />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </CollapsibleTimeGroup>
+                );
+              })}
+            </div>
+          )}
+
+          <ShiftForm
+            open={showForm}
+            onClose={() => setShowForm(false)}
+            onSaved={loadWeek}
+            editing={editing}
+            prefillDate={prefillDate}
+            prefillStaffId={prefillStaffId}
+          />
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // MODULE 5: EVV CLOCK IN / OUT — GPS-based with geofence
     // ═══════════════════════════════════════════════════════════════
     function EVVPage() {
@@ -3787,17 +4395,58 @@
         setClockingIn(true);
         try {
           const gps = await getGPS();
-          const { error } = await supabase.from("evv_sessions").insert({
+          const now = new Date();
+          const nowISO = now.toISOString();
+
+          // ── v19.0: look for a scheduled shift to link ──
+          // Match: same staff+client, same day, scheduled_start within ±60 min of now, status still "scheduled"
+          let matchedShiftId = null;
+          try {
+            const today = fmtISODate(now);
+            const { data: candidateShifts } = await supabase.from("shifts")
+              .select("id, scheduled_start, scheduled_end, status")
+              .eq("staff_id", clockForm.staff_id)
+              .eq("person_id", clockForm.person_id)
+              .eq("scheduled_date", today)
+              .eq("status", "scheduled");
+            if (Array.isArray(candidateShifts) && candidateShifts.length > 0) {
+              const match = candidateShifts.find(sh => {
+                const start = new Date(`${today}T${sh.scheduled_start}`);
+                return Math.abs(now - start) <= 60 * 60 * 1000;
+              });
+              if (match) matchedShiftId = match.id;
+            }
+          } catch (e) {
+            // Shifts table may not exist yet — ignore and proceed with EVV only
+          }
+
+          const evvPayload = {
             org_id: orgId,
             staff_id: clockForm.staff_id,
             person_id: clockForm.person_id,
             service_code_id: clockForm.service_code_id,
-            clock_in_at: new Date().toISOString(),
+            clock_in_at: nowISO,
             clock_in_lat: gps.lat,
             clock_in_lng: gps.lng,
-          });
+          };
+          if (matchedShiftId) evvPayload.shift_id = matchedShiftId;
+
+          let { error } = await supabase.from("evv_sessions").insert(evvPayload);
+          // If shift_id column doesn't exist yet, retry without it
+          if (error && /column .*shift_id.* does not exist/i.test(error.message || "")) {
+            delete evvPayload.shift_id;
+            const retry = await supabase.from("evv_sessions").insert(evvPayload);
+            error = retry.error;
+          }
           if (error) throw error;
-          addToast("Clocked in successfully", "success");
+
+          // If we matched a shift, advance its status to in_progress
+          if (matchedShiftId) {
+            await supabase.from("shifts").update({ status: "in_progress" }).eq("id", matchedShiftId);
+            addToast("Clocked in — shift linked", "success");
+          } else {
+            addToast("Clocked in successfully", "success");
+          }
           setShowClockIn(false);
           loadAll();
         } catch (e) {
@@ -3811,13 +4460,27 @@
         setClockingOut(sessionId);
         try {
           const gps = await getGPS();
+          // Check if this session is linked to a shift (graceful if column doesn't exist)
+          let linkedShiftId = null;
+          try {
+            const { data: sess } = await supabase.from("evv_sessions").select("shift_id").eq("id", sessionId).maybeSingle();
+            if (sess && sess.shift_id) linkedShiftId = sess.shift_id;
+          } catch (e) { /* column may not exist — ignore */ }
+
           const { error } = await supabase.from("evv_sessions").update({
             clock_out_at: new Date().toISOString(),
             clock_out_lat: gps.lat,
             clock_out_lng: gps.lng,
           }).eq("id", sessionId);
           if (error) throw error;
-          addToast("Clocked out successfully", "success");
+
+          // Advance linked shift to "completed"
+          if (linkedShiftId) {
+            await supabase.from("shifts").update({ status: "completed" }).eq("id", linkedShiftId);
+            addToast("Clocked out — shift marked completed", "success");
+          } else {
+            addToast("Clocked out successfully", "success");
+          }
           loadAll();
         } catch (e) {
           addToast(e.message || "Clock-out failed", "error");
@@ -10928,6 +11591,7 @@
           case "staff": return <StaffPage onNavigate={navigate} />;
           case "clients": return <ClientsPage onNavigate={navigate} />;
           case "intake": return <IntakePage />;
+          case "schedule": return <SchedulePage onNavigate={navigate} />;
           case "training": return <TrainingPage />;
           case "notes": return <ServiceNotesPage />;
           case "evv": return <EVVPage />;
