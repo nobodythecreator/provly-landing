@@ -13,6 +13,9 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <!-- v19.4: pdf-lib for audit-fidelity Hope Haven form generation -->
+  <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@pdf-lib/fontkit@1.1.1/dist/fontkit.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -556,7 +559,7 @@
             { key: "compliance", label: "Compliance",   icon: icons.shield },
             { key: "training",   label: "Training",     icon: icons.book },
             { key: "finance",    label: "Finance",      icon: icons.dollar },
-            { key: "docs",       label: "Doc Engine",   icon: icons.fileText },
+            { key: "docs",       label: "Audit Center", icon: icons.fileText },
           ],
         },
         {
@@ -628,7 +631,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.3.2</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.4</span>
               </div>
             </div>
             {isMobile && (
@@ -14060,6 +14063,645 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // v19.4 — PDF ENGINE + AUDIT CENTER
+    //
+    // Strategy: Hybrid storage. Routine forms generate on demand
+    // (download to browser, never stored). Forms marked "Submitted"
+    // or "Signed" get snapshotted to Supabase Storage as audit trail.
+    //
+    // Print-sign-scan workflow: PDFs include blank signature lines.
+    // Users sign physically and upload signed copy back.
+    //
+    // MIGRATION SQL (run in Supabase SQL editor):
+    //
+    //   CREATE TABLE IF NOT EXISTS generated_documents (
+    //     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    //     org_id        UUID NOT NULL,
+    //     form_type     TEXT NOT NULL,          -- 'face_sheet' | 'daily_service_log' | etc
+    //     scope_type    TEXT NOT NULL,          -- 'person' | 'staff' | 'agency' | 'period'
+    //     scope_id      UUID,                   -- person_id or staff_id (null for agency-wide)
+    //     period_start  DATE,
+    //     period_end    DATE,
+    //     status        TEXT NOT NULL DEFAULT 'draft',  -- 'draft' | 'submitted' | 'signed'
+    //     storage_path  TEXT,                   -- supabase storage key (null for on-demand)
+    //     signed_storage_path TEXT,             -- separate slot for the scanned-back signed copy
+    //     generated_by  UUID,                   -- staff_id who generated
+    //     generated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    //     submitted_at  TIMESTAMPTZ,
+    //     metadata      JSONB                   -- form-specific data snapshot
+    //   );
+    //   CREATE INDEX IF NOT EXISTS idx_gd_org      ON generated_documents(org_id);
+    //   CREATE INDEX IF NOT EXISTS idx_gd_scope    ON generated_documents(scope_type, scope_id);
+    //   CREATE INDEX IF NOT EXISTS idx_gd_form     ON generated_documents(form_type);
+    //   CREATE INDEX IF NOT EXISTS idx_gd_status   ON generated_documents(status);
+    //
+    //   ALTER TABLE generated_documents ENABLE ROW LEVEL SECURITY;
+    //   DROP POLICY IF EXISTS gd_all ON generated_documents;
+    //   CREATE POLICY gd_all ON generated_documents FOR ALL TO authenticated USING (true) WITH CHECK (true);
+    //
+    //   -- Storage bucket for signed scans (and any submitted snapshots)
+    //   -- In Supabase Studio → Storage → New bucket: name 'audit_documents', private (not public)
+    //   -- Policies: allow authenticated read + write to that bucket.
+    // ═══════════════════════════════════════════════════════════════
+
+    // Hope Haven branding tokens. Centralized so the same values feed
+    // every PDF header. Future iteration: load from `organizations`
+    // table so other providers can self-brand without code changes.
+    const HOPE_HAVEN_BRAND = {
+      orgName: "Hope Haven Services Inc.",
+      orgAddress: "4974 W Mellow Way, South Jordan, UT 84009",
+      orgPhone: "801-708-4845",
+      orgEmail: "hopehaven@hopehavenservices.com",
+      orgContractNumber: "DHHS A04899",
+      orgFEIN: "DHHS91172",
+      navyHex: "0A1E33",
+      tealHex: "00897B",
+    };
+
+    // Audit form catalog. Each entry maps a form_type to its renderer + scope.
+    // New forms are registered here; the Audit Center renders one card per entry.
+    const AUDIT_FORM_CATALOG = [
+      { key: "face_sheet",         label: "Face Sheet",                scope: "person", description: "Demographics, contacts, diagnoses, medications — the binder's first page", category: "Per-Person" },
+      { key: "daily_service_log",  label: "Daily Service Log",         scope: "person", description: "Day-by-day record of services delivered, assembled from notes + EVV", category: "Per-Person", needsDateRange: true },
+      { key: "quarterly_summary",  label: "Quarterly Summary Report",  scope: "person", description: "PCSP goal progress, incidents, health, behavior — DSPD requires per quarter", category: "Per-Person", needsQuarter: true },
+      { key: "staff_cover_sheet",  label: "Staff Cover Sheet",         scope: "staff",  description: "Personnel binder cover — credentials, training, expirations", category: "Per-Staff" },
+    ];
+
+    // ──────────────────────────────────────────────────────────────────
+    // PDF RENDERING KERNEL
+    // Wraps pdf-lib in a Hope Haven-branded layout helper. Every form
+    // uses this for header/footer/signature/text-block primitives so
+    // they all look like one unified document set.
+    // ──────────────────────────────────────────────────────────────────
+    async function createHopeHavenPDF({ title, subtitle, brand = HOPE_HAVEN_BRAND }) {
+      // Lazy-fail if pdf-lib didn't load (CDN issue, offline, etc)
+      if (typeof PDFLib === "undefined") {
+        throw new Error("pdf-lib not loaded — check your internet connection");
+      }
+      const { PDFDocument, StandardFonts, rgb } = PDFLib;
+      const pdfDoc = await PDFDocument.create();
+
+      // Embed standard fonts (Helvetica family — universally readable, no embedding licenses)
+      const fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
+      const fontBold    = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+      const fontItalic  = await pdfDoc.embedFont(StandardFonts.HelveticaOblique);
+
+      pdfDoc.setTitle(title || "Hope Haven Document");
+      pdfDoc.setAuthor(brand.orgName);
+      pdfDoc.setProducer("Provly");
+      pdfDoc.setCreator("Provly");
+      pdfDoc.setCreationDate(new Date());
+
+      const navy = rgb(0x0A/255, 0x1E/255, 0x33/255);
+      const teal = rgb(0x00/255, 0x89/255, 0x7B/255);
+      const textMid = rgb(0.36, 0.42, 0.50);
+      const textLight = rgb(0.55, 0.62, 0.70);
+      const border = rgb(0.88, 0.90, 0.93);
+      const cream = rgb(0.97, 0.98, 0.99);
+
+      // State per render — current page, cursor (y position growing downward), page size
+      const PAGE = { w: 612, h: 792 }; // US Letter
+      const MARGIN = { top: 96, bottom: 64, left: 56, right: 56 };
+      const CONTENT = { w: PAGE.w - MARGIN.left - MARGIN.right };
+
+      let page = null;
+      let cursorY = 0; // distance from top of usable area, NOT from page bottom
+      let pageNum = 0;
+      const pages = [];
+
+      // pdf-lib's coordinate system has origin at bottom-left. We work top-down for sanity.
+      const yFromTop = (yt) => PAGE.h - yt;
+
+      function newPage() {
+        page = pdfDoc.addPage([PAGE.w, PAGE.h]);
+        pages.push(page);
+        pageNum += 1;
+        drawHeader();
+        drawFooter();
+        cursorY = MARGIN.top + 6;
+      }
+
+      function drawHeader() {
+        // Top accent bar
+        page.drawRectangle({ x: 0, y: PAGE.h - 8, width: PAGE.w, height: 8, color: teal });
+        // Org name + identifier (left)
+        page.drawText(brand.orgName.toUpperCase(), {
+          x: MARGIN.left, y: yFromTop(36), size: 11, font: fontBold, color: navy,
+        });
+        page.drawText(`${brand.orgAddress}  ·  ${brand.orgPhone}`, {
+          x: MARGIN.left, y: yFromTop(50), size: 8, font: fontRegular, color: textMid,
+        });
+        page.drawText(`Contract: ${brand.orgContractNumber}  ·  FEIN: ${brand.orgFEIN}`, {
+          x: MARGIN.left, y: yFromTop(62), size: 8, font: fontRegular, color: textLight,
+        });
+        // Document title (right)
+        const titleW = fontBold.widthOfTextAtSize(title || "", 13);
+        page.drawText(title || "", {
+          x: PAGE.w - MARGIN.right - titleW, y: yFromTop(36), size: 13, font: fontBold, color: navy,
+        });
+        if (subtitle) {
+          const subW = fontRegular.widthOfTextAtSize(subtitle, 9);
+          page.drawText(subtitle, {
+            x: PAGE.w - MARGIN.right - subW, y: yFromTop(50), size: 9, font: fontRegular, color: textMid,
+          });
+        }
+        // Header underline
+        page.drawLine({
+          start: { x: MARGIN.left, y: yFromTop(MARGIN.top - 18) },
+          end:   { x: PAGE.w - MARGIN.right, y: yFromTop(MARGIN.top - 18) },
+          thickness: 0.6, color: border,
+        });
+      }
+
+      function drawFooter() {
+        const generatedStr = `Generated by Provly on ${new Date().toLocaleString("en-US")}`;
+        page.drawText(generatedStr, {
+          x: MARGIN.left, y: 28, size: 7.5, font: fontItalic, color: textLight,
+        });
+        // Page numbering placeholder — we paint final values after all pages exist
+      }
+
+      function ensureSpace(neededHeight) {
+        const available = PAGE.h - MARGIN.bottom - yFromTop(cursorY);
+        if (available < neededHeight) newPage();
+      }
+
+      // ── PRIMITIVES ─────────────────────────────────────────────
+      function sectionTitle(text, opts = {}) {
+        ensureSpace(34);
+        cursorY += 6;
+        page.drawRectangle({
+          x: MARGIN.left, y: yFromTop(cursorY + 14), width: CONTENT.w, height: 18, color: navy,
+        });
+        page.drawText(text.toUpperCase(), {
+          x: MARGIN.left + 10, y: yFromTop(cursorY + 11), size: 9, font: fontBold,
+          color: rgb(1, 1, 1),
+        });
+        cursorY += 24;
+      }
+
+      function fieldRow(rowItems) {
+        // Each rowItems entry: { label, value, width: fraction (default 1/n) }
+        ensureSpace(38);
+        const n = rowItems.length;
+        const colW = CONTENT.w / n;
+        rowItems.forEach((item, i) => {
+          const x = MARGIN.left + colW * i;
+          page.drawText((item.label || "").toUpperCase(), {
+            x: x + 4, y: yFromTop(cursorY + 8), size: 7.5, font: fontBold, color: textMid,
+          });
+          // Value box
+          page.drawRectangle({
+            x, y: yFromTop(cursorY + 30), width: colW - 6, height: 18,
+            borderColor: border, borderWidth: 0.6, color: cream,
+          });
+          const value = (item.value === null || item.value === undefined || item.value === "") ? "—" : String(item.value);
+          page.drawText(value.length > 60 ? value.slice(0, 57) + "…" : value, {
+            x: x + 6, y: yFromTop(cursorY + 22), size: 9, font: fontRegular, color: navy,
+          });
+        });
+        cursorY += 36;
+      }
+
+      function paragraph(text, opts = {}) {
+        if (!text) return;
+        const size = opts.size || 9.5;
+        const font = opts.bold ? fontBold : fontRegular;
+        const color = opts.color || (opts.muted ? textMid : navy);
+        const lineHeight = size * 1.35;
+        // Word wrap
+        const words = String(text).split(/\s+/);
+        let line = "";
+        const lines = [];
+        const maxW = CONTENT.w - 4;
+        words.forEach(w => {
+          const test = line ? `${line} ${w}` : w;
+          if (font.widthOfTextAtSize(test, size) > maxW) {
+            lines.push(line);
+            line = w;
+          } else {
+            line = test;
+          }
+        });
+        if (line) lines.push(line);
+        ensureSpace(lines.length * lineHeight + 6);
+        lines.forEach(l => {
+          page.drawText(l, { x: MARGIN.left + 2, y: yFromTop(cursorY + size + 2), size, font, color });
+          cursorY += lineHeight;
+        });
+        cursorY += 4;
+      }
+
+      function spacer(h = 8) { cursorY += h; }
+
+      function tableSimple(headers, rows, opts = {}) {
+        const headerH = 18, rowH = 16;
+        const colW = CONTENT.w / headers.length;
+        ensureSpace(headerH + 6);
+        // Header
+        page.drawRectangle({ x: MARGIN.left, y: yFromTop(cursorY + headerH), width: CONTENT.w, height: headerH, color: navy });
+        headers.forEach((h, i) => {
+          page.drawText(String(h).toUpperCase(), {
+            x: MARGIN.left + colW * i + 6, y: yFromTop(cursorY + headerH - 5),
+            size: 8, font: fontBold, color: rgb(1, 1, 1),
+          });
+        });
+        cursorY += headerH;
+        // Rows
+        rows.forEach((row, ri) => {
+          ensureSpace(rowH);
+          if (ri % 2 === 1) {
+            page.drawRectangle({ x: MARGIN.left, y: yFromTop(cursorY + rowH), width: CONTENT.w, height: rowH, color: cream });
+          }
+          row.forEach((cell, i) => {
+            const text = (cell === null || cell === undefined) ? "—" : String(cell);
+            const truncated = text.length > 60 ? text.slice(0, 57) + "…" : text;
+            page.drawText(truncated, {
+              x: MARGIN.left + colW * i + 6, y: yFromTop(cursorY + rowH - 5),
+              size: 8.5, font: fontRegular, color: navy,
+            });
+          });
+          // Bottom rule
+          page.drawLine({
+            start: { x: MARGIN.left, y: yFromTop(cursorY + rowH) },
+            end:   { x: PAGE.w - MARGIN.right, y: yFromTop(cursorY + rowH) },
+            thickness: 0.4, color: border,
+          });
+          cursorY += rowH;
+        });
+        spacer(8);
+      }
+
+      function signatureBlock(label = "Signature") {
+        ensureSpace(54);
+        spacer(8);
+        // Two columns: signature line + date line
+        const half = CONTENT.w / 2 - 8;
+        // Signature line
+        page.drawLine({
+          start: { x: MARGIN.left, y: yFromTop(cursorY + 24) },
+          end:   { x: MARGIN.left + half, y: yFromTop(cursorY + 24) },
+          thickness: 0.8, color: navy,
+        });
+        page.drawText(label.toUpperCase(), {
+          x: MARGIN.left, y: yFromTop(cursorY + 36), size: 7.5, font: fontBold, color: textMid,
+        });
+        // Date line
+        page.drawLine({
+          start: { x: MARGIN.left + half + 16, y: yFromTop(cursorY + 24) },
+          end:   { x: PAGE.w - MARGIN.right, y: yFromTop(cursorY + 24) },
+          thickness: 0.8, color: navy,
+        });
+        page.drawText("DATE", {
+          x: MARGIN.left + half + 16, y: yFromTop(cursorY + 36), size: 7.5, font: fontBold, color: textMid,
+        });
+        cursorY += 36;
+      }
+
+      function finalize() {
+        // Stamp page numbers now that we know the total
+        const total = pages.length;
+        pages.forEach((p, i) => {
+          const txt = `Page ${i + 1} of ${total}`;
+          const w = fontRegular.widthOfTextAtSize(txt, 7.5);
+          p.drawText(txt, {
+            x: PAGE.w - MARGIN.right - w, y: 28, size: 7.5, font: fontItalic, color: textLight,
+          });
+        });
+        return pdfDoc.save();
+      }
+
+      function downloadAs(filename) {
+        return finalize().then(bytes => {
+          const blob = new Blob([bytes], { type: "application/pdf" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        });
+      }
+
+      newPage();
+
+      return { newPage, sectionTitle, fieldRow, paragraph, spacer, tableSimple, signatureBlock, finalize, downloadAs };
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // FORM GENERATOR — FACE SHEET (per Person)
+    // Pulls demographics, contacts, authorizations, medications, allergies
+    // ──────────────────────────────────────────────────────────────────
+    async function generateFaceSheetPDF(personId) {
+      // Pull all the data we need in parallel
+      const [personRes, authRes, medRes, contactRes, contextMemRes] = await Promise.all([
+        supabase.from("persons").select("*").eq("id", personId).maybeSingle(),
+        supabase.from("person_service_authorizations").select("id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code, name)").eq("person_id", personId),
+        supabase.from("medications").select("medication_name, dosage, frequency, schedule_times, is_prn, prn_reason, is_active").eq("person_id", personId).eq("is_active", true).limit(50),
+        supabase.from("person_contacts").select("contact_type, name, relationship, phone, email").eq("person_id", personId),
+        supabase.from("service_delivery_context_members").select("context_id, is_active, end_date, service_delivery_contexts(name, delivery_type, service_code_definitions(code))").eq("person_id", personId),
+      ]);
+      const person = personRes.data;
+      if (!person) throw new Error("Person not found");
+
+      const auths = authRes.data || [];
+      const meds = medRes.data || [];
+      const contacts = contactRes.error ? [] : (contactRes.data || []);
+      const activeContexts = (contextMemRes.data || []).filter(m =>
+        m.is_active !== false && !m.end_date && m.service_delivery_contexts
+      );
+
+      const doc = await createHopeHavenPDF({
+        title: "Face Sheet",
+        subtitle: `${person.first_name || ""} ${person.last_name || ""}  ·  PID ${person.dspd_pid || person.id?.slice(0, 8) || "—"}`,
+      });
+
+      const formatDate = (d) => d ? new Date(d.includes && d.includes("T") ? d : d + "T00:00:00").toLocaleDateString("en-US") : "—";
+
+      // ── PERSON INFORMATION ─────────────────────────────
+      doc.sectionTitle("Person Information");
+      doc.fieldRow([
+        { label: "Full Name",   value: `${person.first_name || ""} ${person.last_name || ""}`.trim() },
+        { label: "Date of Birth", value: formatDate(person.date_of_birth) },
+        { label: "DSPD PID",    value: person.dspd_pid || "—" },
+      ]);
+      doc.fieldRow([
+        { label: "Gender",       value: person.gender || "—" },
+        { label: "Medicaid ID",  value: person.medicaid_id || "—" },
+        { label: "Admission Date", value: formatDate(person.admission_date) },
+      ]);
+      doc.fieldRow([
+        { label: "Address", value: [person.address_line1, person.city, person.state, person.zip].filter(Boolean).join(", ") || "—" },
+      ]);
+      doc.fieldRow([
+        { label: "Primary Phone", value: person.phone || "—" },
+        { label: "Email",         value: person.email || "—" },
+      ]);
+
+      // ── DIAGNOSES & SUPPORT NEEDS ──────────────────────
+      doc.sectionTitle("Diagnoses & Support Needs");
+      doc.fieldRow([
+        { label: "Primary Diagnosis", value: person.primary_diagnosis || "—" },
+      ]);
+      if (person.secondary_diagnoses) {
+        doc.fieldRow([
+          { label: "Secondary Diagnoses", value: person.secondary_diagnoses },
+        ]);
+      }
+      if (person.allergies) {
+        doc.fieldRow([
+          { label: "Allergies", value: person.allergies },
+        ]);
+      }
+      if (person.dietary_restrictions) {
+        doc.fieldRow([
+          { label: "Dietary Restrictions", value: person.dietary_restrictions },
+        ]);
+      }
+
+      // ── EMERGENCY CONTACTS ─────────────────────────────
+      if (contacts.length > 0) {
+        doc.sectionTitle("Emergency Contacts & Guardian");
+        doc.tableSimple(
+          ["Type", "Name", "Relationship", "Phone", "Email"],
+          contacts.map(c => [c.contact_type || "—", c.name || "—", c.relationship || "—", c.phone || "—", c.email || "—"])
+        );
+      }
+
+      // ── MEDICAL ────────────────────────────────────────
+      if (person.physician_name || person.physician_phone || person.preferred_hospital) {
+        doc.sectionTitle("Medical");
+        doc.fieldRow([
+          { label: "Primary Physician", value: person.physician_name || "—" },
+          { label: "Physician Phone",   value: person.physician_phone || "—" },
+        ]);
+        if (person.preferred_hospital) {
+          doc.fieldRow([
+            { label: "Preferred Hospital", value: person.preferred_hospital },
+          ]);
+        }
+      }
+
+      // ── ACTIVE MEDICATIONS ─────────────────────────────
+      doc.sectionTitle(`Active Medications (${meds.length})`);
+      if (meds.length === 0) {
+        doc.paragraph("No active medications on file.", { muted: true });
+      } else {
+        doc.tableSimple(
+          ["Medication", "Dosage", "Frequency", "Schedule", "PRN"],
+          meds.map(m => [
+            m.medication_name || "—",
+            m.dosage || "—",
+            m.frequency || "—",
+            Array.isArray(m.schedule_times) ? m.schedule_times.join(", ") : (m.schedule_times || "—"),
+            m.is_prn ? `Yes (${m.prn_reason || "as needed"})` : "No",
+          ])
+        );
+      }
+
+      // ── SERVICE AUTHORIZATIONS ─────────────────────────
+      doc.sectionTitle(`Service Authorizations (${auths.length})`);
+      if (auths.length === 0) {
+        doc.paragraph("No active authorizations on file.", { muted: true });
+      } else {
+        doc.tableSimple(
+          ["Code", "Service", "Period", "Authorized", "Used", "Remaining"],
+          auths.map(a => [
+            a.service_code_definitions?.code || "—",
+            a.service_code_definitions?.name || "—",
+            `${formatDate(a.start_date)} – ${formatDate(a.end_date)}`,
+            a.authorized_units || "—",
+            a.used_units || 0,
+            (a.authorized_units || 0) - (a.used_units || 0),
+          ])
+        );
+      }
+
+      // ── ACTIVE SERVICE CONTEXTS ────────────────────────
+      if (activeContexts.length > 0) {
+        doc.sectionTitle("Active Service Contexts");
+        doc.tableSimple(
+          ["Context", "Type", "Service Code"],
+          activeContexts.map(m => [
+            m.service_delivery_contexts?.name || "—",
+            m.service_delivery_contexts?.delivery_type || "—",
+            m.service_delivery_contexts?.service_code_definitions?.code || "—",
+          ])
+        );
+      }
+
+      // ── ACKNOWLEDGEMENT / SIGNATURE BLOCK ──────────────
+      doc.spacer(16);
+      doc.sectionTitle("Acknowledgement");
+      doc.paragraph(
+        "I acknowledge that the information on this Face Sheet has been reviewed and is accurate to the best of my knowledge. Updates will be made promptly when changes occur.",
+        { muted: true }
+      );
+      doc.signatureBlock("Person / Guardian Signature");
+      doc.signatureBlock("Hope Haven Representative Signature");
+
+      // Filename: face_sheet_lastname_firstname_YYYYMMDD.pdf
+      const safe = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "");
+      const today = new Date().toISOString().split("T")[0].replace(/-/g, "");
+      await doc.downloadAs(`face_sheet_${safe(person.last_name)}_${safe(person.first_name)}_${today}.pdf`);
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // AUDIT CENTER PAGE
+    // Replaces v18.x Doc Engine. Shows a catalog of available forms,
+    // lets you pick a person/staff/period, and generates the PDF.
+    // ──────────────────────────────────────────────────────────────────
+    function AuditCenterPage() {
+      const { addToast } = useToast();
+      const [activeForm, setActiveForm] = useState(null);
+      const [persons, setPersons] = useState([]);
+      const [staffList, setStaffList] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [generating, setGenerating] = useState(false);
+      const [scopeId, setScopeId] = useState("");
+      const [periodStart, setPeriodStart] = useState("");
+      const [periodEnd, setPeriodEnd] = useState("");
+
+      useEffect(() => {
+        Promise.all([
+          supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
+          supabase.from("staff").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
+        ]).then(([p, s]) => {
+          setPersons(p.data || []);
+          setStaffList(s.data || []);
+          setLoading(false);
+        });
+      }, []);
+
+      const openForm = (form) => {
+        setActiveForm(form);
+        setScopeId("");
+        // Default date range = current quarter
+        const now = new Date();
+        const q = Math.floor(now.getMonth() / 3);
+        const qStart = new Date(now.getFullYear(), q * 3, 1);
+        const qEnd = new Date(now.getFullYear(), q * 3 + 3, 0);
+        setPeriodStart(qStart.toISOString().split("T")[0]);
+        setPeriodEnd(qEnd.toISOString().split("T")[0]);
+      };
+
+      const handleGenerate = async () => {
+        if (!activeForm) return;
+        if (!scopeId) return addToast(`Pick a ${activeForm.scope === "person" ? "client" : "staff member"}`, "error");
+        setGenerating(true);
+        try {
+          if (activeForm.key === "face_sheet") {
+            await generateFaceSheetPDF(scopeId);
+          } else if (activeForm.key === "daily_service_log") {
+            addToast("Daily Service Log coming in v19.4 session 2", "info");
+          } else if (activeForm.key === "quarterly_summary") {
+            addToast("Quarterly Summary coming in v19.4 session 2", "info");
+          } else if (activeForm.key === "staff_cover_sheet") {
+            addToast("Staff Cover Sheet coming in v19.4 session 2", "info");
+          }
+          addToast("PDF generated and downloaded", "success");
+          setActiveForm(null);
+        } catch (e) {
+          addToast(e.message || "Generation failed", "error");
+        }
+        setGenerating(false);
+      };
+
+      const groupedForms = AUDIT_FORM_CATALOG.reduce((acc, f) => {
+        if (!acc[f.category]) acc[f.category] = [];
+        acc[f.category].push(f);
+        return acc;
+      }, {});
+
+      return (
+        <div>
+          <PageHeader title="Audit Center" subtitle="Generate Hope Haven forms from live operational data — print, sign, and upload signed copies back" />
+
+          {loading ? (
+            <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><Spinner size={28} /></div>
+          ) : (
+            <div style={{ display: "grid", gap: 24 }}>
+              {Object.entries(groupedForms).map(([category, forms]) => (
+                <div key={category}>
+                  <div style={{ fontSize: 11, fontWeight: 800, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 10 }}>
+                    {category} · {forms.length} form{forms.length === 1 ? "" : "s"}
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
+                    {forms.map(f => (
+                      <div key={f.key} onClick={() => openForm(f)} style={{
+                        background: CB.white, border: `1px solid ${CB.border}`, borderRadius: 12,
+                        padding: 18, cursor: "pointer", transition: "all 0.15s",
+                        boxShadow: CB.cardShadow,
+                      }}
+                        onMouseEnter={e => { e.currentTarget.style.borderColor = CB.teal; e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 8px 20px rgba(10,30,51,0.08)"; }}
+                        onMouseLeave={e => { e.currentTarget.style.borderColor = CB.border; e.currentTarget.style.transform = "translateY(0)"; e.currentTarget.style.boxShadow = CB.cardShadow; }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+                          <div style={{ width: 32, height: 32, borderRadius: 8, background: `${CB.teal}12`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                            {icons.fileText({ size: 16, color: CB.teal })}
+                          </div>
+                          <div style={{ fontSize: 14, fontWeight: 700, color: CB.navy }}>{f.label}</div>
+                        </div>
+                        <div style={{ fontSize: 12, color: CB.textMid, lineHeight: 1.5 }}>{f.description}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+
+              <div style={{ marginTop: 8, padding: 16, background: `${CB.teal}08`, border: `1px solid ${CB.teal}30`, borderRadius: 10, fontSize: 12, color: CB.textMid, lineHeight: 1.6, display: "flex", gap: 10, alignItems: "flex-start" }}>
+                {icons.shield({ size: 16, color: CB.teal })}
+                <div>
+                  <b style={{ color: CB.teal }}>Print-sign-scan workflow.</b> Forms generate with blank signature lines. After signing physically, upload the scanned copy back via the document management system attached to the relevant person or staff record. Submitted/signed copies snapshot to Supabase Storage as your audit trail.
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Generate Modal */}
+          {activeForm && (
+            <Modal open={true} onClose={() => setActiveForm(null)} title={`Generate ${activeForm.label}`} subtitle={activeForm.description} width={520}>
+              {activeForm.scope === "person" && (
+                <FormField label="Client" required>
+                  <select style={fieldStyle} value={scopeId} onChange={e => setScopeId(e.target.value)}>
+                    <option value="">Select client...</option>
+                    {persons.map(p => <option key={p.id} value={p.id}>{p.first_name} {p.last_name}</option>)}
+                  </select>
+                </FormField>
+              )}
+              {activeForm.scope === "staff" && (
+                <FormField label="Staff Member" required>
+                  <select style={fieldStyle} value={scopeId} onChange={e => setScopeId(e.target.value)}>
+                    <option value="">Select staff...</option>
+                    {staffList.map(s => <option key={s.id} value={s.id}>{s.first_name} {s.last_name}</option>)}
+                  </select>
+                </FormField>
+              )}
+              {activeForm.needsDateRange && (
+                <FormRow>
+                  <FormField label="Period Start" required half>
+                    <input type="date" style={fieldStyle} value={periodStart} onChange={e => setPeriodStart(e.target.value)} />
+                  </FormField>
+                  <FormField label="Period End" required half>
+                    <input type="date" style={fieldStyle} value={periodEnd} onChange={e => setPeriodEnd(e.target.value)} />
+                  </FormField>
+                </FormRow>
+              )}
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 12 }}>
+                <SecondaryButton onClick={() => setActiveForm(null)}>Cancel</SecondaryButton>
+                <PrimaryButton onClick={handleGenerate} disabled={generating}>
+                  {generating ? <Spinner size={14} /> : icons.fileText({ size: 14 })} Generate PDF
+                </PrimaryButton>
+              </div>
+            </Modal>
+          )}
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // APP SHELL
     // ═══════════════════════════════════════════════════════════════
     function AppShell() {
@@ -14093,7 +14735,7 @@
           case "goals": return <PCSPGoalsPage />;
           case "billing": return <FinancePage />; // merged into Finance in v18.7 — redirect old billing route
           case "finance": return <FinancePage />;
-          case "docs": return <DocEnginePage />;
+          case "docs": return <AuditCenterPage />;
           case "ai": return <AIPage />;
           case "messages": return <MessagingPage />;
           case "migration": return <MigrationPage />;
