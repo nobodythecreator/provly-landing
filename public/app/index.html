@@ -485,29 +485,108 @@
     // ═══════════════════════════════════════════════════════════════
     function Sidebar({ active, onNavigate, isMobile, isOpen, onClose }) {
       const { user, signOut, staffProfile, role, navItems: allowedNav } = useAuth();
-      const allNavItems = [
-        { key: "dashboard", label: "Dashboard", icon: icons.dashboard },
-        { key: "staff", label: "Staff", icon: icons.users },
-        { key: "clients", label: "Clients", icon: icons.heart },
-        { key: "intake", label: "Intake", icon: icons.plus },
-        { key: "schedule", label: "Schedule", icon: icons.calendar },
-        { key: "contexts", label: "Service Contexts", icon: icons.dashboard },
-        { key: "training", label: "Training", icon: icons.book },
-        { key: "notes", label: "Service Notes", icon: icons.fileText },
-        { key: "evv", label: "EVV", icon: icons.mapPin },
-        { key: "compliance", label: "Compliance", icon: icons.shield },
-        { key: "incidents", label: "Incidents", icon: icons.alertTriangle },
-        { key: "alerts", label: "Alerts", icon: icons.bell },
-        { key: "medications", label: "Medications", icon: icons.capsule },
-        { key: "goals", label: "PCSP Goals", icon: icons.crosshair },
-        { key: "finance", label: "Finance", icon: icons.dollar },
-        { key: "docs", label: "Doc Engine", icon: icons.fileText },
-        { key: "ai", label: "AI Intelligence", icon: icons.zap },
-        { key: "messages", label: "Messages", icon: icons.mail },
-        { key: "migration", label: "Data Migration", icon: icons.upload },
-        { key: "settings", label: "Org Structure", icon: icons.lock },
+
+      // v19.3 — sidebar reorganized into 6 collapsible groups.
+      // Each group lists items in the order they appear inside the group.
+      // Items are filtered by `allowedNav` (role-based) before rendering.
+      const NAV_GROUPS = [
+        {
+          key: "overview",
+          label: "Overview",
+          icon: icons.dashboard,
+          items: [
+            { key: "dashboard", label: "Dashboard", icon: icons.dashboard },
+          ],
+        },
+        {
+          key: "people",
+          label: "People",
+          icon: icons.users,
+          items: [
+            { key: "clients", label: "Clients", icon: icons.heart },
+            { key: "staff",   label: "Staff",   icon: icons.users },
+            { key: "intake",  label: "Intake",  icon: icons.plus },
+          ],
+        },
+        {
+          key: "services",
+          label: "Services",
+          icon: icons.calendar,
+          items: [
+            { key: "schedule", label: "Schedule",         icon: icons.calendar },
+            { key: "contexts", label: "Service Contexts", icon: icons.dashboard },
+            { key: "evv",      label: "EVV",              icon: icons.mapPin },
+            { key: "notes",    label: "Service Notes",    icon: icons.fileText },
+          ],
+        },
+        {
+          key: "care",
+          label: "Care",
+          icon: icons.heart,
+          items: [
+            { key: "goals",       label: "PCSP Goals",  icon: icons.crosshair },
+            { key: "medications", label: "Medications", icon: icons.capsule },
+            { key: "incidents",   label: "Incidents",   icon: icons.alertTriangle },
+            { key: "alerts",      label: "Alerts",      icon: icons.bell },
+          ],
+        },
+        {
+          key: "operations",
+          label: "Operations",
+          icon: icons.shield,
+          items: [
+            { key: "compliance", label: "Compliance",   icon: icons.shield },
+            { key: "training",   label: "Training",     icon: icons.book },
+            { key: "finance",    label: "Finance",      icon: icons.dollar },
+            { key: "docs",       label: "Doc Engine",   icon: icons.fileText },
+          ],
+        },
+        {
+          key: "system",
+          label: "System",
+          icon: icons.lock,
+          items: [
+            { key: "messages",  label: "Messages",       icon: icons.mail },
+            { key: "ai",        label: "AI Intelligence",icon: icons.zap },
+            { key: "migration", label: "Data Migration", icon: icons.upload },
+            { key: "settings",  label: "Org Structure",  icon: icons.lock },
+          ],
+        },
       ];
-      const visibleNav = allNavItems.filter(item => allowedNav.includes(item.key));
+
+      // Collapsed/expanded state — persist across reloads via localStorage
+      const [collapsedGroups, setCollapsedGroups] = useState(() => {
+        try {
+          const saved = localStorage.getItem("provly.sidebar.collapsed");
+          return saved ? JSON.parse(saved) : {};
+        } catch { return {}; }
+      });
+      const toggleGroup = (key) => {
+        setCollapsedGroups(prev => {
+          const next = { ...prev, [key]: !prev[key] };
+          try { localStorage.setItem("provly.sidebar.collapsed", JSON.stringify(next)); } catch {}
+          return next;
+        });
+      };
+
+      // Filter groups/items by role permissions
+      const visibleGroups = NAV_GROUPS
+        .map(g => ({ ...g, items: g.items.filter(it => allowedNav.includes(it.key)) }))
+        .filter(g => g.items.length > 0);
+
+      // If the active page lives in a collapsed group, auto-expand it
+      useEffect(() => {
+        const owning = visibleGroups.find(g => g.items.some(it => it.key === active));
+        if (owning && collapsedGroups[owning.key]) {
+          setCollapsedGroups(prev => {
+            const next = { ...prev, [owning.key]: false };
+            try { localStorage.setItem("provly.sidebar.collapsed", JSON.stringify(next)); } catch {}
+            return next;
+          });
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [active]);
+
       const displayName = staffProfile ? `${staffProfile.first_name || ""} ${staffProfile.last_name || ""}`.trim() : user?.email?.split("@")[0] || "User";
       const roleLabel = STAFF_ROLES.find(r => r.value === role)?.label || role?.replace(/_/g, " ") || "User";
 
@@ -531,7 +610,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.2</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.3</span>
               </div>
             </div>
             {isMobile && (
@@ -540,24 +619,74 @@
               </button>
             )}
           </div>
-          <nav style={{ flex: 1, padding: "16px 12px", overflowY: "auto" }}>
-            {visibleNav.map((item, i) => {
-              const isActive = active === item.key;
+          <nav style={{ flex: 1, padding: "12px 10px", overflowY: "auto" }}>
+            {visibleGroups.map((group, gi) => {
+              const isCollapsed = !!collapsedGroups[group.key];
+              const hasActive = group.items.some(it => it.key === active);
+              // Overview (single-item) groups render their item directly without a header
+              if (group.items.length === 1 && group.key === "overview") {
+                const item = group.items[0];
+                const isActive = active === item.key;
+                return (
+                  <button key={item.key} onClick={() => handleNav(item.key)} style={{
+                    width: "100%", display: "flex", alignItems: "center", gap: 12,
+                    padding: "11px 14px", borderRadius: 10, border: "none",
+                    background: isActive ? "rgba(0,137,123,0.15)" : "transparent",
+                    color: isActive ? CB.tealLight : "rgba(255,255,255,0.55)",
+                    fontSize: 14, fontWeight: isActive ? 600 : 500, fontFamily: "inherit",
+                    cursor: "pointer", transition: "all 0.15s", textAlign: "left",
+                    marginBottom: 8, animation: `slideIn 0.3s ease ${gi * 0.03}s both`,
+                  }}
+                    onMouseEnter={e => { if (!isActive) { e.currentTarget.style.background = "rgba(255,255,255,0.06)"; e.currentTarget.style.color = "rgba(255,255,255,0.85)"; }}}
+                    onMouseLeave={e => { if (!isActive) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "rgba(255,255,255,0.55)"; }}}
+                  >
+                    {item.icon({ size: 18 })} {item.label}
+                  </button>
+                );
+              }
               return (
-                <button key={item.key} onClick={() => handleNav(item.key)} style={{
-                  width: "100%", display: "flex", alignItems: "center", gap: 12,
-                  padding: "11px 14px", borderRadius: 10, border: "none",
-                  background: isActive ? "rgba(0,137,123,0.15)" : "transparent",
-                  color: isActive ? CB.tealLight : "rgba(255,255,255,0.55)",
-                  fontSize: 14, fontWeight: isActive ? 600 : 500, fontFamily: "inherit",
-                  cursor: "pointer", transition: "all 0.15s", textAlign: "left",
-                  marginBottom: 2, animation: `slideIn 0.3s ease ${i * 0.03}s both`,
-                }}
-                  onMouseEnter={e => { if (!isActive) { e.currentTarget.style.background = "rgba(255,255,255,0.06)"; e.currentTarget.style.color = "rgba(255,255,255,0.85)"; }}}
-                  onMouseLeave={e => { if (!isActive) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "rgba(255,255,255,0.55)"; }}}
-                >
-                  {item.icon({ size: 18 })} {item.label}
-                </button>
+                <div key={group.key} style={{ marginBottom: 4, animation: `slideIn 0.3s ease ${gi * 0.04}s both` }}>
+                  <button onClick={() => toggleGroup(group.key)} style={{
+                    width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
+                    padding: "8px 14px 8px 10px", borderRadius: 8, border: "none",
+                    background: "transparent", color: hasActive ? "rgba(255,255,255,0.85)" : "rgba(255,255,255,0.38)",
+                    fontSize: 10, fontWeight: 800, fontFamily: "inherit", letterSpacing: 0.8,
+                    textTransform: "uppercase", cursor: "pointer", textAlign: "left",
+                    transition: "color 0.15s",
+                  }}
+                    onMouseEnter={e => { e.currentTarget.style.color = "rgba(255,255,255,0.85)"; }}
+                    onMouseLeave={e => { e.currentTarget.style.color = hasActive ? "rgba(255,255,255,0.85)" : "rgba(255,255,255,0.38)"; }}
+                  >
+                    <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      {group.icon({ size: 12 })}
+                      {group.label}
+                    </span>
+                    <span style={{ fontSize: 9, transition: "transform 0.15s", transform: isCollapsed ? "rotate(-90deg)" : "rotate(0deg)" }}>▾</span>
+                  </button>
+                  {!isCollapsed && (
+                    <div style={{ marginTop: 2, marginBottom: 6 }}>
+                      {group.items.map((item, i) => {
+                        const isActive = active === item.key;
+                        return (
+                          <button key={item.key} onClick={() => handleNav(item.key)} style={{
+                            width: "100%", display: "flex", alignItems: "center", gap: 12,
+                            padding: "9px 14px 9px 22px", borderRadius: 10, border: "none",
+                            background: isActive ? "rgba(0,137,123,0.15)" : "transparent",
+                            color: isActive ? CB.tealLight : "rgba(255,255,255,0.55)",
+                            fontSize: 13, fontWeight: isActive ? 600 : 500, fontFamily: "inherit",
+                            cursor: "pointer", transition: "all 0.15s", textAlign: "left",
+                            marginBottom: 1,
+                          }}
+                            onMouseEnter={e => { if (!isActive) { e.currentTarget.style.background = "rgba(255,255,255,0.06)"; e.currentTarget.style.color = "rgba(255,255,255,0.85)"; }}}
+                            onMouseLeave={e => { if (!isActive) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "rgba(255,255,255,0.55)"; }}}
+                          >
+                            {item.icon({ size: 16 })} {item.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
               );
             })}
           </nav>
@@ -739,8 +868,24 @@
             supabase.from("person_service_authorizations").select("id", { count: "exact", head: true }),
             supabase.from("staff_trainings").select("id, expires_at, staff(first_name, last_name), training_topic_definitions(topic_name)").lt("expires_at", in30.toISOString()).order("expires_at", { ascending: true }).limit(5),
             supabase.from("person_service_authorizations").select("id, end_date, service_code_definitions(code), persons(first_name, last_name)").lt("end_date", in30.toISOString().split("T")[0]).order("end_date", { ascending: true }).limit(5),
-            supabase.from("documents").select("id, doc_type, expires_at, staff(first_name, last_name), persons(first_name, last_name)").eq("is_archived", false).not("expires_at", "is", null).lt("expires_at", in30.toISOString()).order("expires_at", { ascending: true }).limit(5),
+            // v19.2.1 hotfix: split the join — some FKs weren't resolvable by PostgREST, causing 400
+            supabase.from("documents").select("id, doc_type, expires_at, staff_id, person_id").eq("is_archived", false).not("expires_at", "is", null).lt("expires_at", in30.toISOString()).order("expires_at", { ascending: true }).limit(5),
           ]);
+          // v19.2.1 — hydrate document names client-side
+          const docs = expDocRes.data || [];
+          const staffIds = [...new Set(docs.map(d => d.staff_id).filter(Boolean))];
+          const personIds = [...new Set(docs.map(d => d.person_id).filter(Boolean))];
+          const [staffLookup, personLookup] = await Promise.all([
+            staffIds.length ? supabase.from("staff").select("id, first_name, last_name").in("id", staffIds) : Promise.resolve({ data: [] }),
+            personIds.length ? supabase.from("persons").select("id, first_name, last_name").in("id", personIds) : Promise.resolve({ data: [] }),
+          ]);
+          const staffById = Object.fromEntries((staffLookup.data || []).map(s => [s.id, s]));
+          const personById = Object.fromEntries((personLookup.data || []).map(p => [p.id, p]));
+          docs.forEach(d => {
+            d.staff = d.staff_id ? staffById[d.staff_id] : null;
+            d.persons = d.person_id ? personById[d.person_id] : null;
+          });
+
           setStats({
             staff: staffRes.count || 0,
             clients: clientRes.count || 0,
@@ -758,7 +903,7 @@
             const days = Math.ceil((new Date(a.end_date + "T00:00:00") - now) / 86400000);
             combined.push({ type: "auth", days, label: a.service_code_definitions?.code || "Auth", who: a.persons ? `${a.persons.first_name} ${a.persons.last_name}` : "?" });
           });
-          (expDocRes.data || []).forEach(d => {
+          docs.forEach(d => {
             const days = Math.ceil((new Date(d.expires_at) - now) / 86400000);
             combined.push({ type: "doc", days, label: (d.doc_type || "Document").replace(/_/g, " "), who: d.staff ? `${d.staff.first_name} ${d.staff.last_name}` : d.persons ? `${d.persons.first_name} ${d.persons.last_name}` : "?" });
           });
@@ -881,6 +1026,133 @@
       { value: "bcba", label: "BCBA" },
       { value: "rn", label: "Registered Nurse" },
     ];
+
+    // ═══════════════════════════════════════════════════════════════
+    // v19.3 — ROLES, TRAINING DECKS, COMPETENCY MATRIX, ENFORCEMENT
+    //
+    // MIGRATION SQL (run in Supabase SQL editor). The app has graceful
+    // fallbacks so existing functionality keeps working pre-migration.
+    //
+    //   -- Training deck catalog (universal + service-code-specific)
+    //   CREATE TABLE IF NOT EXISTS training_decks (
+    //     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    //     org_id      UUID NOT NULL,
+    //     name        TEXT NOT NULL,
+    //     deck_type   TEXT NOT NULL CHECK (deck_type IN ('universal','service_code','person_specific','role_specific')),
+    //     description TEXT,
+    //     slide_count INT DEFAULT 0,
+    //     file_url    TEXT,
+    //     version     TEXT DEFAULT '1.0',
+    //     is_active   BOOLEAN NOT NULL DEFAULT true,
+    //     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    //     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    //   );
+    //
+    //   -- Many-to-many: which service codes does each deck satisfy
+    //   CREATE TABLE IF NOT EXISTS training_deck_service_codes (
+    //     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    //     deck_id         UUID NOT NULL REFERENCES training_decks(id) ON DELETE CASCADE,
+    //     service_code_id UUID NOT NULL REFERENCES service_code_definitions(id) ON DELETE CASCADE,
+    //     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    //     UNIQUE (deck_id, service_code_id)
+    //   );
+    //
+    //   -- Staff completion records per deck (optionally person-scoped)
+    //   CREATE TABLE IF NOT EXISTS staff_deck_completions (
+    //     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    //     org_id       UUID NOT NULL,
+    //     staff_id     UUID NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+    //     deck_id      UUID NOT NULL REFERENCES training_decks(id) ON DELETE CASCADE,
+    //     person_id    UUID REFERENCES persons(id) ON DELETE CASCADE,
+    //     completed_at DATE NOT NULL,
+    //     expires_at   DATE,
+    //     trainer_name TEXT,
+    //     signature_data TEXT,
+    //     notes        TEXT,
+    //     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    //   );
+    //   CREATE INDEX IF NOT EXISTS idx_sdc_staff   ON staff_deck_completions(staff_id);
+    //   CREATE INDEX IF NOT EXISTS idx_sdc_deck    ON staff_deck_completions(deck_id);
+    //   CREATE INDEX IF NOT EXISTS idx_sdc_person  ON staff_deck_completions(person_id);
+    //
+    //   -- Org-level enforcement settings
+    //   ALTER TABLE organizations
+    //     ADD COLUMN IF NOT EXISTS enforcement_role           TEXT DEFAULT 'soft',
+    //     ADD COLUMN IF NOT EXISTS enforcement_training       TEXT DEFAULT 'warn',
+    //     ADD COLUMN IF NOT EXISTS enforcement_person_specific TEXT DEFAULT 'warn';
+    //
+    //   -- Enable RLS (permissive for now; tighten in v20)
+    //   ALTER TABLE training_decks               ENABLE ROW LEVEL SECURITY;
+    //   ALTER TABLE training_deck_service_codes  ENABLE ROW LEVEL SECURITY;
+    //   ALTER TABLE staff_deck_completions       ENABLE ROW LEVEL SECURITY;
+    //   DROP POLICY IF EXISTS td_all   ON training_decks;
+    //   DROP POLICY IF EXISTS tdsc_all ON training_deck_service_codes;
+    //   DROP POLICY IF EXISTS sdc_all  ON staff_deck_completions;
+    //   CREATE POLICY td_all   ON training_decks              FOR ALL TO authenticated USING (true) WITH CHECK (true);
+    //   CREATE POLICY tdsc_all ON training_deck_service_codes FOR ALL TO authenticated USING (true) WITH CHECK (true);
+    //   CREATE POLICY sdc_all  ON staff_deck_completions      FOR ALL TO authenticated USING (true) WITH CHECK (true);
+    // ═══════════════════════════════════════════════════════════════
+
+    // Training deck type metadata — colors + labels for UI
+    const DECK_TYPE_META = {
+      universal:        { label: "Universal",        color: "#0A1E33", desc: "SOW 1.8 general staff training — 24 topics required for all staff" },
+      service_code:     { label: "Service Code",     color: "#00897B", desc: "Specific to one or more service codes a staff member may deliver" },
+      person_specific:  { label: "Person-Specific",  color: "#D4A537", desc: "Individualized training for each person a staff member supports" },
+      role_specific:    { label: "Role-Specific",    color: "#4FC3F7", desc: "Required for a specific job role (e.g., RN-only medication training)" },
+    };
+
+    // Enforcement-level metadata — for settings UI + runtime checks
+    const ENFORCE_ROLE_LEVELS = [
+      { value: "loose",  label: "Loose",  desc: "All staff see everything. Roles are informational only." },
+      { value: "soft",   label: "Soft",   desc: "UI surfaces role-based warnings and hints but does not hide pages." },
+      { value: "strict", label: "Strict", desc: "Role permissions hide pages and block actions. Not recommended until org is mature." },
+    ];
+    const ENFORCE_TRAIN_LEVELS = [
+      { value: "warn",  label: "Warn only", desc: "Surface a yellow banner when a shift's staff is not fully trained. Allow the action." },
+      { value: "block", label: "Block",     desc: "Refuse to save shifts or clock-ins when training is incomplete. Strictest." },
+    ];
+
+    // ── Competency computation helpers ───────────────────────────────
+    // Given a staff member, a service code, and optionally a person,
+    // determine which decks they should have completed and which are
+    // missing or expired.
+    function computeCompetency({ staffId, serviceCodeId, personId, decks, deckServiceCodes, completions, requirePersonSpecific = true }) {
+      const today = new Date().toISOString().split("T")[0];
+      const required = [];
+      // 1. Universal decks (all active decks of type 'universal')
+      decks.filter(d => d.is_active !== false && d.deck_type === "universal").forEach(d => required.push({ deck: d, scopePersonId: null }));
+      // 2. Service-code decks (all decks mapped to this code)
+      if (serviceCodeId) {
+        const deckIds = deckServiceCodes.filter(m => m.service_code_id === serviceCodeId).map(m => m.deck_id);
+        decks.filter(d => d.is_active !== false && d.deck_type === "service_code" && deckIds.includes(d.id)).forEach(d => required.push({ deck: d, scopePersonId: null }));
+      }
+      // 3. Person-specific decks (one completion per person per deck)
+      if (personId && requirePersonSpecific) {
+        decks.filter(d => d.is_active !== false && d.deck_type === "person_specific").forEach(d => required.push({ deck: d, scopePersonId: personId }));
+      }
+      // Match each required deck to a completion for this staff
+      const results = required.map(({ deck, scopePersonId }) => {
+        const match = completions.find(c =>
+          c.staff_id === staffId &&
+          c.deck_id === deck.id &&
+          ((scopePersonId == null && c.person_id == null) || c.person_id === scopePersonId)
+        );
+        if (!match) return { deck, scopePersonId, status: "missing", completion: null };
+        if (match.expires_at && match.expires_at < today) return { deck, scopePersonId, status: "expired", completion: match };
+        return { deck, scopePersonId, status: "complete", completion: match };
+      });
+      const missing = results.filter(r => r.status === "missing");
+      const expired = results.filter(r => r.status === "expired");
+      const complete = results.filter(r => r.status === "complete");
+      return {
+        results,
+        missing,
+        expired,
+        complete,
+        isFullyQualified: missing.length === 0 && expired.length === 0,
+        pctComplete: required.length === 0 ? 1 : complete.length / required.length,
+      };
+    }
 
     function StaffForm({ open, onClose, onSaved, editing }) {
       const { addToast } = useToast();
@@ -1831,6 +2103,16 @@
       const [formOpen, setFormOpen] = useState(false);
       const [selectedStaff, setSelectedStaff] = useState(null);
 
+      // v19.3 — training decks + competency state
+      const [decks, setDecks] = useState([]);
+      const [deckSvcCodes, setDeckSvcCodes] = useState([]); // rows of { id, deck_id, service_code_id }
+      const [deckCompletions, setDeckCompletions] = useState([]); // staff_deck_completions
+      const [serviceCodes, setServiceCodes] = useState([]);
+      const [clients, setClients] = useState([]);
+      const [deckEditing, setDeckEditing] = useState(null);
+      const [deckFormOpen, setDeckFormOpen] = useState(false);
+      const [decksTablesMissing, setDecksTablesMissing] = useState(false);
+
       useEffect(() => { loadAll(); }, []);
 
       const loadAll = async () => {
@@ -1857,6 +2139,25 @@
           setTopics(Array.from(seen.values()));
         }
         if (!staffRes.error) setStaff(staffRes.data || []);
+
+        // v19.3 — load decks, mappings, completions (with graceful fallback)
+        const [deckRes, mapRes, complRes, scRes, clRes] = await Promise.all([
+          supabase.from("training_decks").select("id, name, deck_type, description, slide_count, file_url, version, is_active").order("deck_type").order("name"),
+          supabase.from("training_deck_service_codes").select("id, deck_id, service_code_id"),
+          supabase.from("staff_deck_completions").select("id, staff_id, deck_id, person_id, completed_at, expires_at, trainer_name, notes"),
+          supabase.from("service_code_definitions").select("id, code, name").order("code"),
+          supabase.from("persons").select("id, first_name, last_name, is_active").eq("is_active", true).order("last_name"),
+        ]);
+        if (deckRes.error && /relation .*training_decks.* does not exist/i.test(deckRes.error.message || "")) {
+          setDecksTablesMissing(true);
+        } else {
+          setDecks(deckRes.data || []);
+          setDeckSvcCodes(mapRes.data || []);
+          setDeckCompletions(complRes.data || []);
+        }
+        setServiceCodes(scRes.data || []);
+        setClients(clRes.data || []);
+
         setLoading(false);
       };
 
@@ -1934,10 +2235,12 @@
           <PageHeader title="Training Tracker" subtitle={`${topics.length} training ${topics.length === 1 ? "topic" : "topics"} — view by staff member, completion log, or topic definitions`}
             action={<PrimaryButton onClick={() => setFormOpen(true)}>{icons.plus({ size: 16 })} Log Training</PrimaryButton>}
           />
-          <div style={{ display: "flex", gap: 4, marginBottom: 20, background: CB.cream, padding: 4, borderRadius: 10, width: "fit-content" }}>
+          <div style={{ display: "flex", gap: 4, marginBottom: 20, background: CB.cream, padding: 4, borderRadius: 10, width: "fit-content", flexWrap: "wrap" }}>
             <TabButton value="bystaff" label="By Staff" />
             <TabButton value="completions" label="Completions" />
             <TabButton value="topics" label="Topic Definitions" />
+            <TabButton value="decks" label="Training Decks" />
+            <TabButton value="matrix" label="Competency Matrix" />
           </div>
 
           {tab === "bystaff" && (
@@ -2080,7 +2383,423 @@
               })()}
             </div>
           )}
+          {/* v19.3 — TRAINING DECKS tab */}
+          {tab === "decks" && (
+            <div style={{ animation: "fadeIn 0.3s ease" }}>
+              {decksTablesMissing ? (
+                <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, padding: 40, textAlign: "center", boxShadow: CB.cardShadow }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 6 }}>Training Decks table not found</div>
+                  <div style={{ fontSize: 13, color: CB.textMid, lineHeight: 1.6, maxWidth: 520, margin: "0 auto" }}>
+                    Run the v19.3 migration SQL in Supabase SQL editor to create the <code style={{ background: CB.cream, padding: "1px 6px", borderRadius: 4, fontSize: 12 }}>training_decks</code>, <code style={{ background: CB.cream, padding: "1px 6px", borderRadius: 4, fontSize: 12 }}>training_deck_service_codes</code>, and <code style={{ background: CB.cream, padding: "1px 6px", borderRadius: 4, fontSize: 12 }}>staff_deck_completions</code> tables. The SQL is embedded as a comment block in the v19.3 HTML source.
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 12 }}>
+                    <div style={{ fontSize: 13, color: CB.textMid }}>
+                      {decks.length} deck{decks.length === 1 ? "" : "s"} catalogued · {deckSvcCodes.length} service-code mapping{deckSvcCodes.length === 1 ? "" : "s"}
+                    </div>
+                    <PrimaryButton onClick={() => { setDeckEditing(null); setDeckFormOpen(true); }}>{icons.plus({ size: 15 })} New Deck</PrimaryButton>
+                  </div>
+                  {decks.length === 0 ? (
+                    <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, padding: 40, textAlign: "center", boxShadow: CB.cardShadow }}>
+                      <div style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 6 }}>No training decks yet</div>
+                      <div style={{ fontSize: 13, color: CB.textMid, lineHeight: 1.6, maxWidth: 480, margin: "0 auto 16px" }}>
+                        Add your universal staff training (SOW 1.8 — 24 topics) and a deck for each service code Hope Haven delivers. Then map each service-code deck to the codes it satisfies.
+                      </div>
+                      <PrimaryButton onClick={() => { setDeckEditing(null); setDeckFormOpen(true); }}>{icons.plus({ size: 15 })} Create First Deck</PrimaryButton>
+                    </div>
+                  ) : (
+                    <div style={{ display: "grid", gap: 10 }}>
+                      {["universal", "service_code", "person_specific", "role_specific"].map(dt => {
+                        const meta = DECK_TYPE_META[dt];
+                        const groupDecks = decks.filter(d => d.deck_type === dt);
+                        if (groupDecks.length === 0) return null;
+                        return (
+                          <div key={dt} style={{ marginTop: 8 }}>
+                            <div style={{ fontSize: 11, fontWeight: 800, color: meta.color, textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
+                              <span style={{ width: 7, height: 7, borderRadius: "50%", background: meta.color }} />
+                              {meta.label} · {groupDecks.length}
+                              <span style={{ color: CB.textLight, fontSize: 10, fontWeight: 500, textTransform: "none", letterSpacing: 0 }}>— {meta.desc}</span>
+                            </div>
+                            <div style={{ display: "grid", gap: 6 }}>
+                              {groupDecks.map(d => {
+                                const mappedCodes = deckSvcCodes.filter(m => m.deck_id === d.id)
+                                  .map(m => serviceCodes.find(sc => sc.id === m.service_code_id))
+                                  .filter(Boolean);
+                                const completionCount = deckCompletions.filter(c => c.deck_id === d.id).length;
+                                return (
+                                  <div key={d.id} onClick={() => { setDeckEditing(d); setDeckFormOpen(true); }} style={{
+                                    background: CB.white, border: `1px solid ${CB.border}`, borderLeft: `3px solid ${meta.color}`,
+                                    borderRadius: 10, padding: "12px 16px", cursor: "pointer", transition: "all 0.15s",
+                                    display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap",
+                                  }}
+                                    onMouseEnter={e => { e.currentTarget.style.boxShadow = "0 4px 12px rgba(10,30,51,0.08)"; e.currentTarget.style.transform = "translateY(-1px)"; }}
+                                    onMouseLeave={e => { e.currentTarget.style.boxShadow = "none"; e.currentTarget.style.transform = "translateY(0)"; }}
+                                  >
+                                    <div style={{ flex: 1, minWidth: 180 }}>
+                                      <div style={{ fontSize: 14, fontWeight: 700, color: CB.navy, display: "flex", alignItems: "center", gap: 8 }}>
+                                        {d.name}
+                                        {d.is_active === false && <Badge text="Inactive" color={CB.textLight} />}
+                                      </div>
+                                      {d.description && <div style={{ fontSize: 12, color: CB.textMid, marginTop: 3 }}>{d.description}</div>}
+                                    </div>
+                                    <div style={{ display: "flex", gap: 16, fontSize: 11, color: CB.textMid }}>
+                                      {d.slide_count ? <div><b>{d.slide_count}</b> slides</div> : null}
+                                      {d.version ? <div>v{d.version}</div> : null}
+                                      <div><b>{completionCount}</b> completion{completionCount === 1 ? "" : "s"}</div>
+                                    </div>
+                                    {mappedCodes.length > 0 && (
+                                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", maxWidth: 300, justifyContent: "flex-end" }}>
+                                        {mappedCodes.slice(0, 6).map(sc => <Badge key={sc.id} text={sc.code} color={meta.color} />)}
+                                        {mappedCodes.length > 6 && <span style={{ fontSize: 11, color: CB.textLight }}>+{mappedCodes.length - 6}</span>}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
+              )}
+              <TrainingDeckForm
+                open={deckFormOpen}
+                onClose={() => setDeckFormOpen(false)}
+                onSaved={loadAll}
+                editing={deckEditing}
+                serviceCodes={serviceCodes}
+                existingMappings={deckSvcCodes}
+              />
+            </div>
+          )}
+
+          {/* v19.3 — COMPETENCY MATRIX tab */}
+          {tab === "matrix" && (
+            <div style={{ animation: "fadeIn 0.3s ease" }}>
+              {decksTablesMissing ? (
+                <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, padding: 40, textAlign: "center", boxShadow: CB.cardShadow }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 6 }}>Competency Matrix requires the v19.3 migration</div>
+                  <div style={{ fontSize: 13, color: CB.textMid }}>Run the v19.3 SQL in Supabase first, then come back here.</div>
+                </div>
+              ) : decks.length === 0 ? (
+                <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, padding: 40, textAlign: "center", boxShadow: CB.cardShadow }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 6 }}>No training decks to evaluate against</div>
+                  <div style={{ fontSize: 13, color: CB.textMid }}>Create decks in the Training Decks tab first. Then this matrix will show who's qualified to deliver what.</div>
+                </div>
+              ) : (
+                <CompetencyMatrixView
+                  staff={staff}
+                  decks={decks}
+                  deckSvcCodes={deckSvcCodes}
+                  deckCompletions={deckCompletions}
+                  serviceCodes={serviceCodes}
+                />
+              )}
+            </div>
+          )}
+
           <TrainingLogForm open={formOpen} onClose={() => setFormOpen(false)} onSaved={loadAll} />
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // v19.3 — TRAINING DECK FORM
+    // Create/edit a deck + its service-code mappings in one modal.
+    // ═══════════════════════════════════════════════════════════════
+    function TrainingDeckForm({ open, onClose, onSaved, editing, serviceCodes, existingMappings }) {
+      const { addToast } = useToast();
+      const { orgId } = useAuth();
+      const [saving, setSaving] = useState(false);
+      const [deleting, setDeleting] = useState(false);
+      const [form, setForm] = useState({
+        name: "", deck_type: "service_code", description: "",
+        slide_count: "", file_url: "", version: "1.0", is_active: true,
+      });
+      const [mappedCodeIds, setMappedCodeIds] = useState(new Set());
+
+      useEffect(() => {
+        if (!open) return;
+        if (editing) {
+          setForm({
+            name: editing.name || "",
+            deck_type: editing.deck_type || "service_code",
+            description: editing.description || "",
+            slide_count: editing.slide_count || "",
+            file_url: editing.file_url || "",
+            version: editing.version || "1.0",
+            is_active: editing.is_active !== false,
+          });
+          const existing = new Set(
+            (existingMappings || []).filter(m => m.deck_id === editing.id).map(m => m.service_code_id)
+          );
+          setMappedCodeIds(existing);
+        } else {
+          setForm({ name: "", deck_type: "service_code", description: "", slide_count: "", file_url: "", version: "1.0", is_active: true });
+          setMappedCodeIds(new Set());
+        }
+      }, [open, editing]);
+
+      const toggleCode = (codeId) => {
+        setMappedCodeIds(prev => {
+          const next = new Set(prev);
+          if (next.has(codeId)) next.delete(codeId); else next.add(codeId);
+          return next;
+        });
+      };
+
+      const handleSave = async () => {
+        if (!form.name.trim()) return addToast("Deck name is required", "error");
+        setSaving(true);
+        const payload = {
+          org_id: orgId,
+          name: form.name.trim(),
+          deck_type: form.deck_type,
+          description: form.description || null,
+          slide_count: form.slide_count ? parseInt(form.slide_count, 10) : null,
+          file_url: form.file_url || null,
+          version: form.version || "1.0",
+          is_active: form.is_active,
+        };
+        Object.keys(payload).forEach(k => { if (payload[k] === null) delete payload[k]; });
+
+        let deckId = editing?.id;
+        if (editing) {
+          const { error } = await supabase.from("training_decks").update(payload).eq("id", editing.id);
+          if (error) { setSaving(false); return addToast(error.message, "error"); }
+        } else {
+          const { data, error } = await supabase.from("training_decks").insert(payload).select("id").single();
+          if (error) { setSaving(false); return addToast(error.message, "error"); }
+          deckId = data.id;
+        }
+
+        // Sync service-code mappings only for service_code decks
+        if (form.deck_type === "service_code" && deckId) {
+          // Delete existing mappings for this deck, then re-insert the new set.
+          // Simple and correct; quantity is always small (< 30).
+          await supabase.from("training_deck_service_codes").delete().eq("deck_id", deckId);
+          if (mappedCodeIds.size > 0) {
+            const rows = Array.from(mappedCodeIds).map(scId => ({ deck_id: deckId, service_code_id: scId }));
+            const { error: mapErr } = await supabase.from("training_deck_service_codes").insert(rows);
+            if (mapErr) { setSaving(false); return addToast("Deck saved, but mapping failed: " + mapErr.message, "warning"); }
+          }
+        } else if (form.deck_type !== "service_code" && deckId) {
+          // Clean up any stale mappings if type was changed away from service_code
+          await supabase.from("training_deck_service_codes").delete().eq("deck_id", deckId);
+        }
+
+        setSaving(false);
+        addToast(editing ? "Deck updated" : "Deck created", "success");
+        onSaved();
+        onClose();
+      };
+
+      const handleDelete = async () => {
+        if (!editing || !window.confirm(`Delete "${editing.name}"? This removes all completion records for this deck.`)) return;
+        setDeleting(true);
+        const { error } = await supabase.from("training_decks").delete().eq("id", editing.id);
+        setDeleting(false);
+        if (error) return addToast(error.message, "error");
+        addToast("Deck deleted", "success");
+        onSaved();
+        onClose();
+      };
+
+      const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
+      const meta = DECK_TYPE_META[form.deck_type] || {};
+
+      return (
+        <Modal open={open} onClose={onClose} title={editing ? "Edit Training Deck" : "New Training Deck"} subtitle="Decks are reusable training modules staff complete to become qualified" width={680}>
+          <FormRow>
+            <FormField label="Deck Name" required half>
+              <input style={fieldStyle} value={form.name} onChange={e => set("name", e.target.value)} placeholder="e.g. RHS Service Code Training" />
+            </FormField>
+            <FormField label="Deck Type" required half>
+              <select style={fieldStyle} value={form.deck_type} onChange={e => set("deck_type", e.target.value)}>
+                {Object.keys(DECK_TYPE_META).map(k => <option key={k} value={k}>{DECK_TYPE_META[k].label}</option>)}
+              </select>
+              {meta.desc && <div style={{ marginTop: 4, fontSize: 11, color: CB.textLight, fontStyle: "italic" }}>{meta.desc}</div>}
+            </FormField>
+          </FormRow>
+
+          <FormField label="Description">
+            <textarea style={{ ...fieldStyle, minHeight: 60, resize: "vertical", fontFamily: "inherit" }} value={form.description} onChange={e => set("description", e.target.value)} placeholder="What this deck covers, when staff should complete it, etc." />
+          </FormField>
+
+          <FormRow>
+            <FormField label="Slide Count" half>
+              <input type="number" style={fieldStyle} value={form.slide_count} onChange={e => set("slide_count", e.target.value)} placeholder="30" />
+            </FormField>
+            <FormField label="Version" half>
+              <input style={fieldStyle} value={form.version} onChange={e => set("version", e.target.value)} placeholder="1.0" />
+            </FormField>
+          </FormRow>
+
+          <FormField label="File URL (optional)">
+            <input style={fieldStyle} value={form.file_url} onChange={e => set("file_url", e.target.value)} placeholder="https://... link to the .pptx or hosted deck" />
+          </FormField>
+
+          {form.deck_type === "service_code" && (
+            <FormField label={`Service Codes This Deck Satisfies (${mappedCodeIds.size} selected)`}>
+              <div style={{ border: `1px solid ${CB.border}`, borderRadius: 10, padding: 10, maxHeight: 240, overflowY: "auto", background: CB.cream }}>
+                {serviceCodes.length === 0 ? (
+                  <div style={{ fontSize: 12, color: CB.textLight, padding: 12 }}>No service codes defined.</div>
+                ) : (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 4 }}>
+                    {serviceCodes.map(sc => {
+                      const checked = mappedCodeIds.has(sc.id);
+                      return (
+                        <label key={sc.id} style={{
+                          display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderRadius: 6,
+                          background: checked ? `${meta.color || CB.teal}15` : "transparent",
+                          cursor: "pointer", fontSize: 12,
+                        }}>
+                          <input type="checkbox" checked={checked} onChange={() => toggleCode(sc.id)} />
+                          <span style={{ fontWeight: 700, color: CB.navy }}>{sc.code}</span>
+                          <span style={{ color: CB.textMid, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sc.name}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+              <div style={{ marginTop: 4, fontSize: 11, color: CB.textLight }}>
+                A single deck can satisfy multiple codes (e.g. the BC deck typically covers BC1, BC2, and BC3).
+              </div>
+            </FormField>
+          )}
+
+          <FormField>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: CB.textMid, cursor: "pointer" }}>
+              <input type="checkbox" checked={form.is_active} onChange={e => set("is_active", e.target.checked)} />
+              Active — staff are expected to complete this deck
+            </label>
+          </FormField>
+
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 20, gap: 10, flexWrap: "wrap" }}>
+            <div>
+              {editing && (
+                <SecondaryButton onClick={handleDelete} disabled={deleting} style={{ color: CB.red, borderColor: "#fecaca" }}>
+                  {deleting ? <Spinner size={14} /> : icons.trash({ size: 14 })} Delete
+                </SecondaryButton>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <SecondaryButton onClick={onClose}>Cancel</SecondaryButton>
+              <PrimaryButton onClick={handleSave} disabled={saving}>
+                {saving ? <Spinner size={14} /> : icons.save({ size: 14 })} {editing ? "Save Changes" : "Create Deck"}
+              </PrimaryButton>
+            </div>
+          </div>
+        </Modal>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // v19.3 — COMPETENCY MATRIX VIEW
+    // staff × service-code heatmap: ✓ qualified, ⚠ partial, ✗ not started
+    // ═══════════════════════════════════════════════════════════════
+    function CompetencyMatrixView({ staff, decks, deckSvcCodes, deckCompletions, serviceCodes }) {
+      // Only show codes that actually have a deck mapped (plus universal matters for everyone)
+      const mappedCodeIds = new Set(deckSvcCodes.map(m => m.service_code_id));
+      const relevantCodes = serviceCodes.filter(sc => mappedCodeIds.has(sc.id));
+      const hasUniversal = decks.some(d => d.deck_type === "universal" && d.is_active !== false);
+
+      if (relevantCodes.length === 0 && !hasUniversal) {
+        return (
+          <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, padding: 40, textAlign: "center", boxShadow: CB.cardShadow }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 6 }}>Map service codes to decks first</div>
+            <div style={{ fontSize: 13, color: CB.textMid }}>Open a service-code deck in the Decks tab and check which codes it satisfies. Then this matrix populates.</div>
+          </div>
+        );
+      }
+
+      // Pre-compute cell status for every staff × code combo
+      const cellFor = (staffId, codeId) => {
+        return computeCompetency({
+          staffId, serviceCodeId: codeId, personId: null,
+          decks, deckServiceCodes: deckSvcCodes, completions: deckCompletions,
+          requirePersonSpecific: false,
+        });
+      };
+
+      // Universal-only column (no code — just "is this staff baseline-trained?")
+      const universalFor = (staffId) => {
+        return computeCompetency({
+          staffId, serviceCodeId: null, personId: null,
+          decks, deckServiceCodes: deckSvcCodes, completions: deckCompletions,
+          requirePersonSpecific: false,
+        });
+      };
+
+      const statusCell = (comp) => {
+        if (comp.results.length === 0) return { color: CB.textLight, bg: "transparent", icon: "—", label: "N/A" };
+        if (comp.isFullyQualified) return { color: CB.green, bg: `${CB.green}18`, icon: "✓", label: `${comp.complete.length}/${comp.results.length}` };
+        if (comp.complete.length > 0) return { color: CB.amber, bg: `${CB.amber}18`, icon: "⚠", label: `${comp.complete.length}/${comp.results.length}` };
+        return { color: CB.red, bg: `${CB.red}12`, icon: "✗", label: `0/${comp.results.length}` };
+      };
+
+      return (
+        <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, overflow: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 780 }}>
+            <thead>
+              <tr style={{ background: CB.cream }}>
+                <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.6, borderBottom: `1px solid ${CB.border}`, position: "sticky", left: 0, background: CB.cream, minWidth: 180 }}>Staff Member</th>
+                {hasUniversal && (
+                  <th style={{ padding: "12px 10px", textAlign: "center", fontSize: 11, fontWeight: 800, color: DECK_TYPE_META.universal.color, textTransform: "uppercase", letterSpacing: 0.6, borderBottom: `1px solid ${CB.border}`, minWidth: 86 }}>Universal</th>
+                )}
+                {relevantCodes.map(sc => (
+                  <th key={sc.id} style={{ padding: "12px 10px", textAlign: "center", fontSize: 11, fontWeight: 800, color: DECK_TYPE_META.service_code.color, textTransform: "uppercase", letterSpacing: 0.6, borderBottom: `1px solid ${CB.border}`, minWidth: 76 }}>
+                    {sc.code}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {staff.map(s => (
+                <tr key={s.id} style={{ borderBottom: `1px solid ${CB.border}` }}>
+                  <td style={{ padding: "10px 14px", position: "sticky", left: 0, background: CB.white, borderRight: `1px solid ${CB.border}`, fontWeight: 700, color: CB.navy, fontSize: 13 }}>
+                    {s.first_name} {s.last_name}
+                    <div style={{ fontSize: 10, fontWeight: 500, color: CB.textLight, marginTop: 2 }}>
+                      {STAFF_ROLES.find(r => r.value === s.role)?.label || s.role || "—"}
+                    </div>
+                  </td>
+                  {hasUniversal && (() => {
+                    const cell = statusCell(universalFor(s.id));
+                    return (
+                      <td style={{ padding: 6, textAlign: "center", background: cell.bg }}>
+                        <div style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+                          <span style={{ fontSize: 16, fontWeight: 800, color: cell.color }}>{cell.icon}</span>
+                          <span style={{ fontSize: 10, color: cell.color, fontWeight: 700 }}>{cell.label}</span>
+                        </div>
+                      </td>
+                    );
+                  })()}
+                  {relevantCodes.map(sc => {
+                    const cell = statusCell(cellFor(s.id, sc.id));
+                    return (
+                      <td key={sc.id} style={{ padding: 6, textAlign: "center", background: cell.bg }}>
+                        <div style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 2 }} title={`${s.first_name} ${s.last_name} — ${sc.code}`}>
+                          <span style={{ fontSize: 16, fontWeight: 800, color: cell.color }}>{cell.icon}</span>
+                          <span style={{ fontSize: 10, color: cell.color, fontWeight: 700 }}>{cell.label}</span>
+                        </div>
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ padding: "10px 16px", borderTop: `1px solid ${CB.border}`, fontSize: 11, color: CB.textLight, background: CB.cream, display: "flex", gap: 20, flexWrap: "wrap" }}>
+            <span><span style={{ color: CB.green, fontWeight: 800 }}>✓</span> Fully qualified</span>
+            <span><span style={{ color: CB.amber, fontWeight: 800 }}>⚠</span> Partial — some decks complete</span>
+            <span><span style={{ color: CB.red, fontWeight: 800 }}>✗</span> Not started</span>
+            <span style={{ marginLeft: "auto" }}>Numbers = decks completed / decks required. Person-specific training is evaluated per-shift, not in this matrix.</span>
+          </div>
         </div>
       );
     }
@@ -4431,6 +5150,10 @@
       const [serviceCodes, setServiceCodes] = useState([]);
       const [contexts, setContexts] = useState([]); // v19.2 — active service delivery contexts
       const [contextMembers, setContextMembers] = useState({}); // v19.2 — { context_id → [person_id, ...] active members }
+      // v19.3 — competency data for soft warnings
+      const [decks, setDecks] = useState([]);
+      const [deckSvcCodes, setDeckSvcCodes] = useState([]);
+      const [deckCompletions, setDeckCompletions] = useState([]);
       const [form, setForm] = useState({
         staff_id: "", person_id: "", service_code_id: "",
         context_id: "", // v19.2
@@ -4470,6 +5193,16 @@
                 setContextMembers(byCtx);
               });
           }
+          // v19.3 — load decks + completions for competency checks (silent on error — tables may not exist)
+          Promise.all([
+            supabase.from("training_decks").select("id, name, deck_type, is_active"),
+            supabase.from("training_deck_service_codes").select("deck_id, service_code_id"),
+            supabase.from("staff_deck_completions").select("staff_id, deck_id, person_id, completed_at, expires_at"),
+          ]).then(([d, m, c]) => {
+            if (!d.error) setDecks(d.data || []);
+            if (!m.error) setDeckSvcCodes(m.data || []);
+            if (!c.error) setDeckCompletions(c.data || []);
+          });
         });
         if (editing) {
           setForm({
@@ -4520,6 +5253,20 @@
       }, [clients, form.context_id, contextMembers]);
 
       const selectedContext = contexts.find(c => c.id === form.context_id);
+
+      // v19.3 — competency check for the currently-selected staff + service code + client
+      const competency = useMemo(() => {
+        if (!form.staff_id) return null;
+        if (decks.length === 0) return null;
+        const codeId = form.service_code_id || (selectedContext?.service_code_id) || null;
+        return computeCompetency({
+          staffId: form.staff_id,
+          serviceCodeId: codeId,
+          personId: form.person_id || null,
+          decks, deckServiceCodes: deckSvcCodes, completions: deckCompletions,
+          requirePersonSpecific: !!form.person_id,
+        });
+      }, [form.staff_id, form.service_code_id, form.person_id, selectedContext, decks, deckSvcCodes, deckCompletions]);
 
       const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
 
@@ -4586,6 +5333,43 @@
 
       return (
         <Modal open={open} onClose={onClose} title={editing ? "Edit Shift" : "Schedule Shift"} subtitle="Assign a staff member to cover a client at a specific time" width={640}>
+          {/* v19.3 — competency warning banner (soft, not blocking) */}
+          {competency && competency.results.length > 0 && !competency.isFullyQualified && (
+            <div style={{
+              background: competency.complete.length === 0 ? `${CB.red}10` : `${CB.amber}12`,
+              border: `1px solid ${competency.complete.length === 0 ? CB.red : CB.amber}40`,
+              borderLeft: `3px solid ${competency.complete.length === 0 ? CB.red : CB.amber}`,
+              borderRadius: 8, padding: "10px 14px", marginBottom: 14, display: "flex", gap: 10, alignItems: "flex-start",
+            }}>
+              <div style={{ paddingTop: 1, flexShrink: 0 }}>
+                {icons.alertTriangle({ size: 16, color: competency.complete.length === 0 ? CB.red : CB.amber })}
+              </div>
+              <div style={{ flex: 1, fontSize: 12 }}>
+                <div style={{ fontWeight: 700, color: competency.complete.length === 0 ? CB.red : CB.amber, marginBottom: 3 }}>
+                  Training gap — {competency.complete.length}/{competency.results.length} decks complete
+                </div>
+                <div style={{ color: CB.textMid, lineHeight: 1.5 }}>
+                  Missing: {competency.missing.map(m => m.deck.name).join(", ") || "none"}
+                  {competency.expired.length > 0 && <><br />Expired: {competency.expired.map(e => e.deck.name).join(", ")}</>}
+                </div>
+                <div style={{ color: CB.textLight, fontSize: 11, marginTop: 4, fontStyle: "italic" }}>
+                  Shift can still be saved. Review training before the shift date.
+                </div>
+              </div>
+            </div>
+          )}
+          {competency && competency.results.length > 0 && competency.isFullyQualified && (
+            <div style={{
+              background: `${CB.green}10`,
+              border: `1px solid ${CB.green}40`,
+              borderLeft: `3px solid ${CB.green}`,
+              borderRadius: 8, padding: "8px 14px", marginBottom: 14, display: "flex", gap: 10, alignItems: "center", fontSize: 12,
+            }}>
+              {icons.checkCircle({ size: 14, color: CB.green })}
+              <span style={{ color: CB.green, fontWeight: 700 }}>Fully qualified</span>
+              <span style={{ color: CB.textMid }}>— all {competency.results.length} required decks complete</span>
+            </div>
+          )}
           {/* v19.2 — Service Context picker (optional but recommended) */}
           {contexts.length > 0 && (
             <FormField label="Service Context">
@@ -6573,7 +7357,7 @@
             supabase.from("staff").select("id, first_name, last_name, hire_date, is_active").eq("is_active", true),
             supabase.from("person_service_authorizations").select("id, person_id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code), persons(first_name, last_name)"),
             supabase.from("persons").select("id, first_name, last_name, is_active").eq("is_active", true),
-            supabase.from("documents").select("id, staff_id, person_id, doc_type, file_name, expires_at, uploaded_at, staff(first_name, last_name), persons(first_name, last_name)").eq("is_archived", false).not("expires_at", "is", null),
+            supabase.from("documents").select("id, staff_id, person_id, doc_type, file_name, expires_at, uploaded_at").eq("is_archived", false).not("expires_at", "is", null),
             supabase.from("medications").select("id, person_id, medication_name, dosage, frequency, schedule_times, is_prn, is_active, persons(first_name, last_name)").eq("is_active", true),
             supabase.from("medication_logs").select("id, medication_id, person_id, scheduled_date, scheduled_time, status").gte("scheduled_date", new Date(new Date().setDate(new Date().getDate() - 3)).toISOString().split("T")[0]),
           ]);
@@ -6583,6 +7367,14 @@
           const staff = staffRes.data || [];
           const auths = authRes.data || [];
           const docs = docRes.data || [];
+          // v19.2.1 — hydrate staff/person lookups for docs client-side (PostgREST embed caused 400s)
+          const staffById = Object.fromEntries(staff.map(s => [s.id, s]));
+          const allClients = clientRes.data || [];
+          const personById = Object.fromEntries(allClients.map(p => [p.id, p]));
+          docs.forEach(d => {
+            d.staff = d.staff_id ? staffById[d.staff_id] : null;
+            d.persons = d.person_id ? personById[d.person_id] : null;
+          });
           const now = new Date();
           const collected = [];
 
