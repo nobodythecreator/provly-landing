@@ -119,10 +119,27 @@
       const [loading, setLoading] = useState(true);
       const [orgId, setOrgId] = useState(null);
       const [staffProfile, setStaffProfile] = useState(null);
+      // v19.3 — org-level enforcement settings (defaults match Soft/Warn/Warn)
+      const [enforcement, setEnforcement] = useState({
+        role: "soft", training: "warn", person_specific: "warn",
+      });
 
       const fetchOrgId = async () => {
         const { data, error } = await supabase.rpc('org_id');
-        if (!error && data) setOrgId(data);
+        if (!error && data) {
+          setOrgId(data);
+          // Try to load enforcement settings — graceful fallback if columns don't exist yet
+          const { data: org } = await supabase.from("organizations")
+            .select("enforcement_role, enforcement_training, enforcement_person_specific")
+            .eq("id", data).maybeSingle();
+          if (org) {
+            setEnforcement({
+              role: org.enforcement_role || "soft",
+              training: org.enforcement_training || "warn",
+              person_specific: org.enforcement_person_specific || "warn",
+            });
+          }
+        }
       };
 
       const fetchStaffProfile = async (email) => {
@@ -163,7 +180,7 @@
       const signOut = () => supabase.auth.signOut();
 
       return (
-        <AuthContext.Provider value={{ user, session, loading, signIn, signOut, orgId, staffProfile, role, permissions, navItems }}>
+        <AuthContext.Provider value={{ user, session, loading, signIn, signOut, orgId, staffProfile, role, permissions, navItems, enforcement }}>
           {children}
         </AuthContext.Provider>
       );
@@ -610,7 +627,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.3</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.3.1</span>
               </div>
             </div>
             {isMobile && (
@@ -2112,6 +2129,9 @@
       const [deckEditing, setDeckEditing] = useState(null);
       const [deckFormOpen, setDeckFormOpen] = useState(false);
       const [decksTablesMissing, setDecksTablesMissing] = useState(false);
+      // v19.3 — completion logging
+      const [completingDeck, setCompletingDeck] = useState(null);
+      const [completionFormOpen, setCompletionFormOpen] = useState(false);
 
       useEffect(() => { loadAll(); }, []);
 
@@ -2429,15 +2449,12 @@
                                   .filter(Boolean);
                                 const completionCount = deckCompletions.filter(c => c.deck_id === d.id).length;
                                 return (
-                                  <div key={d.id} onClick={() => { setDeckEditing(d); setDeckFormOpen(true); }} style={{
+                                  <div key={d.id} style={{
                                     background: CB.white, border: `1px solid ${CB.border}`, borderLeft: `3px solid ${meta.color}`,
-                                    borderRadius: 10, padding: "12px 16px", cursor: "pointer", transition: "all 0.15s",
+                                    borderRadius: 10, padding: "12px 16px", transition: "all 0.15s",
                                     display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap",
-                                  }}
-                                    onMouseEnter={e => { e.currentTarget.style.boxShadow = "0 4px 12px rgba(10,30,51,0.08)"; e.currentTarget.style.transform = "translateY(-1px)"; }}
-                                    onMouseLeave={e => { e.currentTarget.style.boxShadow = "none"; e.currentTarget.style.transform = "translateY(0)"; }}
-                                  >
-                                    <div style={{ flex: 1, minWidth: 180 }}>
+                                  }}>
+                                    <div style={{ flex: 1, minWidth: 180, cursor: "pointer" }} onClick={() => { setDeckEditing(d); setDeckFormOpen(true); }}>
                                       <div style={{ fontSize: 14, fontWeight: 700, color: CB.navy, display: "flex", alignItems: "center", gap: 8 }}>
                                         {d.name}
                                         {d.is_active === false && <Badge text="Inactive" color={CB.textLight} />}
@@ -2450,11 +2467,22 @@
                                       <div><b>{completionCount}</b> completion{completionCount === 1 ? "" : "s"}</div>
                                     </div>
                                     {mappedCodes.length > 0 && (
-                                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", maxWidth: 300, justifyContent: "flex-end" }}>
+                                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", maxWidth: 240, justifyContent: "flex-end" }}>
                                         {mappedCodes.slice(0, 6).map(sc => <Badge key={sc.id} text={sc.code} color={meta.color} />)}
                                         {mappedCodes.length > 6 && <span style={{ fontSize: 11, color: CB.textLight }}>+{mappedCodes.length - 6}</span>}
                                       </div>
                                     )}
+                                    <button onClick={(e) => { e.stopPropagation(); setCompletingDeck(d); setCompletionFormOpen(true); }} style={{
+                                      padding: "6px 12px", borderRadius: 7, border: `1px solid ${meta.color}40`,
+                                      background: `${meta.color}10`, color: meta.color,
+                                      fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                                      display: "flex", alignItems: "center", gap: 5, whiteSpace: "nowrap",
+                                    }}
+                                      onMouseEnter={e => { e.currentTarget.style.background = `${meta.color}25`; }}
+                                      onMouseLeave={e => { e.currentTarget.style.background = `${meta.color}10`; }}
+                                    >
+                                      {icons.checkCircle({ size: 12 })} Log
+                                    </button>
                                   </div>
                                 );
                               })}
@@ -2473,6 +2501,14 @@
                 editing={deckEditing}
                 serviceCodes={serviceCodes}
                 existingMappings={deckSvcCodes}
+              />
+              <DeckCompletionForm
+                open={completionFormOpen}
+                onClose={() => setCompletionFormOpen(false)}
+                onSaved={loadAll}
+                deck={completingDeck}
+                staff={staff}
+                clients={clients}
               />
             </div>
           )}
@@ -2694,6 +2730,129 @@
                 {saving ? <Spinner size={14} /> : icons.save({ size: 14 })} {editing ? "Save Changes" : "Create Deck"}
               </PrimaryButton>
             </div>
+          </div>
+        </Modal>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // v19.3 — DECK COMPLETION FORM
+    // Log a staff member's completion of a training deck.
+    // For person_specific decks, also pick which person it's for.
+    // ═══════════════════════════════════════════════════════════════
+    function DeckCompletionForm({ open, onClose, onSaved, deck, staff, clients }) {
+      const { addToast } = useToast();
+      const { orgId } = useAuth();
+      const [saving, setSaving] = useState(false);
+      const [form, setForm] = useState({
+        staff_id: "", person_id: "",
+        completed_at: new Date().toISOString().split("T")[0],
+        expires_at: "",
+        trainer_name: "",
+        notes: "",
+      });
+
+      useEffect(() => {
+        if (open) {
+          setForm({
+            staff_id: "", person_id: "",
+            completed_at: new Date().toISOString().split("T")[0],
+            expires_at: "",
+            trainer_name: "",
+            notes: "",
+          });
+        }
+      }, [open, deck]);
+
+      const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
+
+      const handleSave = async () => {
+        if (!deck) return;
+        if (!form.staff_id) return addToast("Pick a staff member", "error");
+        if (deck.deck_type === "person_specific" && !form.person_id) {
+          return addToast("Person-specific decks require selecting a client", "error");
+        }
+        if (!form.completed_at) return addToast("Completion date is required", "error");
+        setSaving(true);
+        const payload = {
+          org_id: orgId,
+          staff_id: form.staff_id,
+          deck_id: deck.id,
+          person_id: form.person_id || null,
+          completed_at: form.completed_at,
+          expires_at: form.expires_at || null,
+          trainer_name: form.trainer_name || null,
+          notes: form.notes || null,
+        };
+        Object.keys(payload).forEach(k => { if (payload[k] === null) delete payload[k]; });
+        const { error } = await supabase.from("staff_deck_completions").insert(payload);
+        setSaving(false);
+        if (error) {
+          if (/relation .*staff_deck_completions.* does not exist/i.test(error.message || "")) {
+            return addToast("Completions table not found — run the v19.3 migration first", "error");
+          }
+          return addToast(error.message, "error");
+        }
+        addToast("Completion logged", "success");
+        onSaved();
+        onClose();
+      };
+
+      if (!deck) return null;
+      const meta = DECK_TYPE_META[deck.deck_type] || {};
+
+      return (
+        <Modal open={open} onClose={onClose} title="Log Completion" subtitle={deck.name} width={560}>
+          <div style={{
+            background: `${meta.color}10`, border: `1px solid ${meta.color}30`, borderLeft: `3px solid ${meta.color}`,
+            borderRadius: 8, padding: "8px 14px", marginBottom: 14, display: "flex", alignItems: "center", gap: 10, fontSize: 12, color: CB.textMid,
+          }}>
+            <span style={{ fontWeight: 800, color: meta.color, textTransform: "uppercase", letterSpacing: 0.4, fontSize: 11 }}>{meta.label}</span>
+            {deck.description && <span>· {deck.description}</span>}
+          </div>
+
+          <FormField label="Staff Member" required>
+            <select style={fieldStyle} value={form.staff_id} onChange={e => set("staff_id", e.target.value)}>
+              <option value="">Select staff...</option>
+              {staff.map(s => <option key={s.id} value={s.id}>{s.first_name} {s.last_name}</option>)}
+            </select>
+          </FormField>
+
+          {deck.deck_type === "person_specific" && (
+            <FormField label="Client" required>
+              <select style={fieldStyle} value={form.person_id} onChange={e => set("person_id", e.target.value)}>
+                <option value="">Select client...</option>
+                {clients.map(c => <option key={c.id} value={c.id}>{c.first_name} {c.last_name}</option>)}
+              </select>
+              <div style={{ marginTop: 4, fontSize: 11, color: CB.textLight, fontStyle: "italic" }}>
+                Person-specific training is logged separately for each client a staff member supports.
+              </div>
+            </FormField>
+          )}
+
+          <FormRow>
+            <FormField label="Completed On" required half>
+              <input type="date" style={fieldStyle} value={form.completed_at} onChange={e => set("completed_at", e.target.value)} />
+            </FormField>
+            <FormField label="Expires On" half>
+              <input type="date" style={fieldStyle} value={form.expires_at} onChange={e => set("expires_at", e.target.value)} />
+              <div style={{ marginTop: 4, fontSize: 11, color: CB.textLight }}>Leave blank for one-time training</div>
+            </FormField>
+          </FormRow>
+
+          <FormField label="Trainer">
+            <input style={fieldStyle} value={form.trainer_name} onChange={e => set("trainer_name", e.target.value)} placeholder="Who delivered the training" />
+          </FormField>
+
+          <FormField label="Notes">
+            <textarea style={{ ...fieldStyle, minHeight: 60, resize: "vertical", fontFamily: "inherit" }} value={form.notes} onChange={e => set("notes", e.target.value)} placeholder="Any context worth recording" />
+          </FormField>
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 12 }}>
+            <SecondaryButton onClick={onClose}>Cancel</SecondaryButton>
+            <PrimaryButton onClick={handleSave} disabled={saving}>
+              {saving ? <Spinner size={14} /> : icons.checkCircle({ size: 14 })} Log Completion
+            </PrimaryButton>
           </div>
         </Modal>
       );
@@ -5142,7 +5301,7 @@
 
     function ShiftForm({ open, onClose, onSaved, editing, prefillDate, prefillStaffId, prefillContextId }) {
       const { addToast } = useToast();
-      const { orgId } = useAuth();
+      const { orgId, enforcement } = useAuth();
       const [saving, setSaving] = useState(false);
       const [deleting, setDeleting] = useState(false);
       const [staffList, setStaffList] = useState([]);
@@ -5273,6 +5432,21 @@
       const handleSave = async () => {
         if (!form.staff_id || !form.person_id || !form.scheduled_date || !form.scheduled_start || !form.scheduled_end) {
           return addToast("Staff, client, date, start, and end times are all required", "error");
+        }
+        // v19.3 — enforce competency if org settings are set to "block"
+        if (competency && !competency.isFullyQualified && enforcement) {
+          // Determine which gap matters under which setting
+          const personSpecificMissing = competency.missing.some(m => m.deck.deck_type === "person_specific" || m.scopePersonId);
+          const generalMissing = competency.missing.some(m => m.deck.deck_type === "universal" || m.deck.deck_type === "service_code");
+          const generalExpired = competency.expired.some(m => m.deck.deck_type === "universal" || m.deck.deck_type === "service_code");
+          const personExpired = competency.expired.some(m => m.deck.deck_type === "person_specific" || m.scopePersonId);
+
+          if (enforcement.training === "block" && (generalMissing || generalExpired)) {
+            return addToast("Cannot save shift — staff is missing required universal or service-code training. Update Settings → Compliance Enforcement to allow.", "error");
+          }
+          if (enforcement.person_specific === "block" && (personSpecificMissing || personExpired)) {
+            return addToast("Cannot save shift — staff has not completed person-specific training for this client. Update Settings → Compliance Enforcement to allow.", "error");
+          }
         }
         setSaving(true);
         const payload = {
@@ -6123,7 +6297,7 @@
     // ═══════════════════════════════════════════════════════════════
     function EVVPage() {
       const { addToast } = useToast();
-      const { orgId } = useAuth();
+      const { orgId, enforcement } = useAuth();
       const [sessions, setSessions] = useState([]);
       const [loading, setLoading] = useState(true);
       const [staffList, setStaffList] = useState([]);
@@ -6140,6 +6314,10 @@
       const [savingEVV, setSavingEVV] = useState(false);
       const [clientEvvAuths, setClientEvvAuths] = useState([]);
       const [clientContexts, setClientContexts] = useState([]); // v19.2 — contexts the picked client is a member of
+      // v19.3 — competency data
+      const [decks, setDecks] = useState([]);
+      const [deckSvcCodes, setDeckSvcCodes] = useState([]);
+      const [deckCompletions, setDeckCompletions] = useState([]);
 
       useEffect(() => { loadAll(); }, []);
 
@@ -6161,8 +6339,30 @@
         setStaffList(staffRes.data || []);
         setClients(clientRes.data || []);
         setServiceCodes((scRes.data || []).filter(sc => sc.evv_required));
+        // v19.3 — load deck data for competency checks
+        const [d, m, c] = await Promise.all([
+          supabase.from("training_decks").select("id, name, deck_type, is_active"),
+          supabase.from("training_deck_service_codes").select("deck_id, service_code_id"),
+          supabase.from("staff_deck_completions").select("staff_id, deck_id, person_id, completed_at, expires_at"),
+        ]);
+        if (!d.error) setDecks(d.data || []);
+        if (!m.error) setDeckSvcCodes(m.data || []);
+        if (!c.error) setDeckCompletions(c.data || []);
         setLoading(false);
       };
+
+      // v19.3 — competency for the in-progress clock-in
+      const evvCompetency = useMemo(() => {
+        if (!clockForm.staff_id) return null;
+        if (decks.length === 0) return null;
+        return computeCompetency({
+          staffId: clockForm.staff_id,
+          serviceCodeId: clockForm.service_code_id || null,
+          personId: clockForm.person_id || null,
+          decks, deckServiceCodes: deckSvcCodes, completions: deckCompletions,
+          requirePersonSpecific: !!clockForm.person_id,
+        });
+      }, [clockForm.staff_id, clockForm.service_code_id, clockForm.person_id, decks, deckSvcCodes, deckCompletions]);
 
       // When client changes in clock-in form, load their authorized EVV codes + context memberships (v19.2)
       const handleEvvClientChange = async (personId) => {
@@ -6249,6 +6449,19 @@
       const handleClockIn = async () => {
         if (!clockForm.staff_id || !clockForm.person_id || !clockForm.service_code_id) {
           return addToast("Select staff, client, and service code", "error");
+        }
+        // v19.3 — enforce competency if "block" is set
+        if (evvCompetency && !evvCompetency.isFullyQualified && enforcement) {
+          const personSpecificMissing = evvCompetency.missing.some(m => m.deck.deck_type === "person_specific" || m.scopePersonId);
+          const personExpired = evvCompetency.expired.some(m => m.deck.deck_type === "person_specific" || m.scopePersonId);
+          const generalMissing = evvCompetency.missing.some(m => m.deck.deck_type === "universal" || m.deck.deck_type === "service_code");
+          const generalExpired = evvCompetency.expired.some(m => m.deck.deck_type === "universal" || m.deck.deck_type === "service_code");
+          if (enforcement.training === "block" && (generalMissing || generalExpired)) {
+            return addToast("Cannot clock in — staff is missing required universal or service-code training.", "error");
+          }
+          if (enforcement.person_specific === "block" && (personSpecificMissing || personExpired)) {
+            return addToast("Cannot clock in — staff has not completed person-specific training for this client.", "error");
+          }
         }
         setClockingIn(true);
         try {
@@ -6661,6 +6874,41 @@
                 <span style={{ fontSize: 13, fontWeight: 600, color: gpsStatus === "found" ? CB.green : gpsStatus === "error" ? CB.red : CB.blue }}>
                   {gpsStatus === "locating" ? "Acquiring GPS..." : gpsStatus === "found" ? "GPS location captured" : "GPS error — check permissions"}
                 </span>
+              </div>
+            )}
+
+            {/* v19.3 — competency warning */}
+            {evvCompetency && evvCompetency.results.length > 0 && !evvCompetency.isFullyQualified && (
+              <div style={{
+                background: evvCompetency.complete.length === 0 ? `${CB.red}10` : `${CB.amber}12`,
+                border: `1px solid ${evvCompetency.complete.length === 0 ? CB.red : CB.amber}40`,
+                borderLeft: `3px solid ${evvCompetency.complete.length === 0 ? CB.red : CB.amber}`,
+                borderRadius: 8, padding: "10px 14px", marginTop: 12, marginBottom: 4, display: "flex", gap: 10, alignItems: "flex-start",
+              }}>
+                <div style={{ paddingTop: 1, flexShrink: 0 }}>
+                  {icons.alertTriangle({ size: 16, color: evvCompetency.complete.length === 0 ? CB.red : CB.amber })}
+                </div>
+                <div style={{ flex: 1, fontSize: 12 }}>
+                  <div style={{ fontWeight: 700, color: evvCompetency.complete.length === 0 ? CB.red : CB.amber, marginBottom: 3 }}>
+                    Training gap — {evvCompetency.complete.length}/{evvCompetency.results.length} decks complete
+                  </div>
+                  <div style={{ color: CB.textMid, lineHeight: 1.5 }}>
+                    Missing: {evvCompetency.missing.map(m => m.deck.name).join(", ") || "none"}
+                    {evvCompetency.expired.length > 0 && <><br />Expired: {evvCompetency.expired.map(e => e.deck.name).join(", ")}</>}
+                  </div>
+                </div>
+              </div>
+            )}
+            {evvCompetency && evvCompetency.results.length > 0 && evvCompetency.isFullyQualified && (
+              <div style={{
+                background: `${CB.green}10`,
+                border: `1px solid ${CB.green}40`,
+                borderLeft: `3px solid ${CB.green}`,
+                borderRadius: 8, padding: "8px 14px", marginTop: 12, marginBottom: 4, display: "flex", gap: 10, alignItems: "center", fontSize: 12,
+              }}>
+                {icons.checkCircle({ size: 14, color: CB.green })}
+                <span style={{ color: CB.green, fontWeight: 700 }}>Fully qualified</span>
+                <span style={{ color: CB.textMid }}>— all {evvCompetency.results.length} required decks complete</span>
               </div>
             )}
 
@@ -9942,7 +10190,7 @@
     // ═══════════════════════════════════════════════════════════════
     // ORG UNITS — recursive tree builder (UPI-compatible structure)
     // ═══════════════════════════════════════════════════════════════
-    function OrgUnitsPage() {
+    function OrgUnitsPage({ hideHeader = false }) {
       const { addToast } = useToast();
       const { orgId } = useAuth();
       const [units, setUnits] = useState([]);
@@ -10021,10 +10269,16 @@
 
       return (
         <div>
-          <PageHeader title="Organization Structure" subtitle="Build your org tree (UPI-compatible) — Administration → Regions → Programs → Sites"
-            action={<PrimaryButton onClick={() => setAddingTo(null)} color={CB.navy}>{icons.plus({ size: 16 })} Add Root Unit</PrimaryButton>}
-          />
-
+          {!hideHeader && (
+            <PageHeader title="Organization Structure" subtitle="Build your org tree (UPI-compatible) — Administration → Regions → Programs → Sites"
+              action={<PrimaryButton onClick={() => setAddingTo(null)} color={CB.navy}>{icons.plus({ size: 16 })} Add Root Unit</PrimaryButton>}
+            />
+          )}
+          {hideHeader && (
+            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
+              <PrimaryButton onClick={() => setAddingTo(null)} color={CB.navy}>{icons.plus({ size: 16 })} Add Root Unit</PrimaryButton>
+            </div>
+          )}
           {loading ? (
             <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><Spinner size={28} /></div>
           ) : (
@@ -13593,6 +13847,182 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // v19.3 — SETTINGS PAGE
+    // Wraps Org Structure as a tab and adds Compliance Enforcement.
+    // Future tabs (Branding, Billing, API keys) will land here too.
+    // ═══════════════════════════════════════════════════════════════
+    function SettingsPage() {
+      const [tab, setTab] = useState("org");
+      const TabButton = ({ value, label, icon }) => (
+        <button onClick={() => setTab(value)} style={{
+          padding: "9px 18px", borderRadius: 8, border: "none", fontSize: 13, fontWeight: 700,
+          background: tab === value ? CB.navy : "transparent",
+          color: tab === value ? CB.white : CB.textMid,
+          cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s",
+          display: "flex", alignItems: "center", gap: 7,
+        }}>{icon} {label}</button>
+      );
+      return (
+        <div>
+          <PageHeader title="Settings" subtitle="Organization configuration, structure, and compliance enforcement" />
+          <div style={{ display: "flex", gap: 4, marginBottom: 20, background: CB.cream, padding: 4, borderRadius: 10, width: "fit-content", flexWrap: "wrap" }}>
+            <TabButton value="org" label="Org Structure" icon={icons.lock({ size: 13 })} />
+            <TabButton value="enforcement" label="Compliance Enforcement" icon={icons.shield({ size: 13 })} />
+          </div>
+          {tab === "org" && <OrgUnitsPageEmbedded />}
+          {tab === "enforcement" && <EnforcementSettings />}
+        </div>
+      );
+    }
+
+    // Wrapper: render OrgUnitsPage without its own PageHeader since SettingsPage provides one
+    function OrgUnitsPageEmbedded() {
+      return <OrgUnitsPage hideHeader />;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // v19.3 — COMPLIANCE ENFORCEMENT SETTINGS
+    // Provider-configurable knobs for role permissions, training
+    // competency, and person-specific training enforcement.
+    // ═══════════════════════════════════════════════════════════════
+    function EnforcementSettings() {
+      const { orgId } = useAuth();
+      const { addToast } = useToast();
+      const [loading, setLoading] = useState(true);
+      const [saving, setSaving] = useState(false);
+      const [tablesMissing, setTablesMissing] = useState(false);
+      const [settings, setSettings] = useState({
+        enforcement_role: "soft",
+        enforcement_training: "warn",
+        enforcement_person_specific: "warn",
+      });
+
+      useEffect(() => { loadSettings(); }, [orgId]);
+
+      const loadSettings = async () => {
+        if (!orgId) { setLoading(false); return; }
+        setLoading(true);
+        const { data, error } = await supabase
+          .from("organizations")
+          .select("enforcement_role, enforcement_training, enforcement_person_specific")
+          .eq("id", orgId).maybeSingle();
+        if (error && /column .*enforcement_.* does not exist/i.test(error.message || "")) {
+          setTablesMissing(true);
+        } else if (data) {
+          setSettings({
+            enforcement_role: data.enforcement_role || "soft",
+            enforcement_training: data.enforcement_training || "warn",
+            enforcement_person_specific: data.enforcement_person_specific || "warn",
+          });
+        }
+        setLoading(false);
+      };
+
+      const handleSave = async () => {
+        setSaving(true);
+        const { error } = await supabase.from("organizations").update({
+          enforcement_role: settings.enforcement_role,
+          enforcement_training: settings.enforcement_training,
+          enforcement_person_specific: settings.enforcement_person_specific,
+        }).eq("id", orgId);
+        setSaving(false);
+        if (error) {
+          if (/column .*enforcement_.* does not exist/i.test(error.message || "")) {
+            return addToast("Enforcement columns not found — run the v19.3 migration in Supabase first", "error");
+          }
+          return addToast(error.message, "error");
+        }
+        addToast("Enforcement settings saved", "success");
+      };
+
+      const SettingCard = ({ title, description, value, options, onChange, icon }) => (
+        <div style={{ background: CB.white, borderRadius: 12, border: `1px solid ${CB.border}`, padding: 20, boxShadow: CB.cardShadow, marginBottom: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+            {icon}
+            <div style={{ fontSize: 15, fontWeight: 700, color: CB.navy }}>{title}</div>
+          </div>
+          <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 14, lineHeight: 1.5 }}>{description}</div>
+          <div style={{ display: "grid", gap: 8 }}>
+            {options.map(opt => {
+              const selected = value === opt.value;
+              return (
+                <label key={opt.value} style={{
+                  display: "flex", alignItems: "flex-start", gap: 12, padding: "12px 14px", borderRadius: 9,
+                  border: `1px solid ${selected ? CB.teal : CB.border}`,
+                  background: selected ? `${CB.teal}08` : CB.white,
+                  cursor: "pointer", transition: "all 0.15s",
+                }}>
+                  <input type="radio" checked={selected} onChange={() => onChange(opt.value)} style={{ marginTop: 2, accentColor: CB.teal }} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: selected ? CB.teal : CB.navy }}>{opt.label}</div>
+                    <div style={{ fontSize: 11, color: CB.textMid, marginTop: 3, lineHeight: 1.4 }}>{opt.desc}</div>
+                  </div>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      );
+
+      if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
+
+      if (tablesMissing) {
+        return (
+          <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, padding: 40, textAlign: "center", boxShadow: CB.cardShadow }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 6 }}>Enforcement settings require the v19.3 migration</div>
+            <div style={{ fontSize: 13, color: CB.textMid, lineHeight: 1.6, maxWidth: 520, margin: "0 auto" }}>
+              The <code style={{ background: CB.cream, padding: "1px 6px", borderRadius: 4, fontSize: 12 }}>organizations</code> table needs three new columns: <code style={{ background: CB.cream, padding: "1px 6px", borderRadius: 4, fontSize: 12 }}>enforcement_role</code>, <code style={{ background: CB.cream, padding: "1px 6px", borderRadius: 4, fontSize: 12 }}>enforcement_training</code>, <code style={{ background: CB.cream, padding: "1px 6px", borderRadius: 4, fontSize: 12 }}>enforcement_person_specific</code>. Run the v19.3 migration SQL in Supabase first.
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div style={{ maxWidth: 760 }}>
+          <div style={{ background: `${CB.teal}08`, border: `1px solid ${CB.teal}30`, borderRadius: 10, padding: 14, marginBottom: 20, fontSize: 12, color: CB.textMid, lineHeight: 1.6, display: "flex", gap: 10, alignItems: "flex-start" }}>
+            {icons.shield({ size: 16, color: CB.teal })}
+            <div>
+              <b style={{ color: CB.teal }}>About these settings.</b> They control how strictly Provly enforces compliance rules across the app. Defaults are intentionally conservative — Soft permissions and Warn-only competency mean Provly surfaces issues without blocking your team from getting work done. Tighten these as your data hygiene improves.
+            </div>
+          </div>
+
+          <SettingCard
+            title="Role Permissions"
+            description="Controls whether a staff member's role hides pages and restricts actions. Lower settings are easier to onboard new providers; higher settings are safer once your roles are accurate."
+            value={settings.enforcement_role}
+            options={ENFORCE_ROLE_LEVELS}
+            onChange={(v) => setSettings(s => ({ ...s, enforcement_role: v }))}
+            icon={icons.users({ size: 16, color: CB.navy })}
+          />
+
+          <SettingCard
+            title="Training Competency (Universal + Service Code)"
+            description="Whether scheduling or clocking in is allowed when a staff member hasn't completed required universal or service-code training. Warnings are visible in the shift form and EVV clock-in."
+            value={settings.enforcement_training}
+            options={ENFORCE_TRAIN_LEVELS}
+            onChange={(v) => setSettings(s => ({ ...s, enforcement_training: v }))}
+            icon={icons.book({ size: 16, color: CB.navy })}
+          />
+
+          <SettingCard
+            title="Person-Specific Training"
+            description="Whether scheduling or clocking in is allowed when a staff member hasn't completed person-specific training for the client they're being assigned to. This affects safety more directly than general training."
+            value={settings.enforcement_person_specific}
+            options={ENFORCE_TRAIN_LEVELS}
+            onChange={(v) => setSettings(s => ({ ...s, enforcement_person_specific: v }))}
+            icon={icons.heart({ size: 16, color: CB.navy })}
+          />
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 8 }}>
+            <PrimaryButton onClick={handleSave} disabled={saving}>
+              {saving ? <Spinner size={14} /> : icons.save({ size: 14 })} Save Settings
+            </PrimaryButton>
+          </div>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // APP SHELL
     // ═══════════════════════════════════════════════════════════════
     function AppShell() {
@@ -13630,7 +14060,7 @@
           case "ai": return <AIPage />;
           case "messages": return <MessagingPage />;
           case "migration": return <MigrationPage />;
-          case "settings": return <OrgUnitsPage />;
+          case "settings": return <SettingsPage />;
           case "staff-profile":
             return pageContext?.id
               ? <StaffProfilePage staffId={pageContext.id} onNavigate={navigate} onBack={() => navigate("staff")} />
