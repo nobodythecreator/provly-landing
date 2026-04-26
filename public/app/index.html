@@ -631,7 +631,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.4.1</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.4.2</span>
               </div>
             </div>
             {isMobile && (
@@ -14226,6 +14226,14 @@
         if (available < neededHeight) newPage();
       }
 
+      // v19.4.2 — force a section to start on a page that has room for ALL of it.
+      // Use before sectionTitle when the section's title + body is "atomic" and
+      // shouldn't split across a page boundary (e.g., signature + ack block).
+      function keepTogether(neededHeight) {
+        const available = PAGE.h - MARGIN.bottom - yFromTop(cursorY);
+        if (available < neededHeight) newPage();
+      }
+
       // ── PRIMITIVES ─────────────────────────────────────────────
       function sectionTitle(text, opts = {}) {
         ensureSpace(34);
@@ -14417,7 +14425,7 @@
 
       newPage();
 
-      return { newPage, sectionTitle, fieldRow, paragraph, spacer, tableSimple, signatureBlock, finalize, downloadAs };
+      return { newPage, sectionTitle, fieldRow, paragraph, spacer, tableSimple, signatureBlock, keepTogether, finalize, downloadAs };
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -14425,12 +14433,13 @@
     // Pulls demographics, contacts, authorizations, medications, allergies
     // ──────────────────────────────────────────────────────────────────
     async function generateFaceSheetPDF(personId) {
-      // Pull all the data we need in parallel
-      const [personRes, authRes, medRes, contactRes, contextMemRes] = await Promise.all([
+      // v19.4.2 — query the actual columns Hope Haven uses.
+      // Many fields are stored as jsonb (primary_physician, medical_specialists,
+      // medical_insurance_info, medical_info, emergency_contacts) — handled below.
+      const [personRes, authRes, medRes, contextMemRes] = await Promise.all([
         supabase.from("persons").select("*").eq("id", personId).maybeSingle(),
         supabase.from("person_service_authorizations").select("id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code, name)").eq("person_id", personId),
         supabase.from("medications").select("medication_name, dosage, frequency, schedule_times, is_prn, prn_reason, is_active").eq("person_id", personId).eq("is_active", true).limit(50),
-        supabase.from("person_contacts").select("contact_type, name, relationship, phone, email").eq("person_id", personId),
         supabase.from("service_delivery_context_members").select("context_id, is_active, end_date, service_delivery_contexts(name, delivery_type, service_code_definitions(code))").eq("person_id", personId),
       ]);
       const person = personRes.data;
@@ -14438,14 +14447,34 @@
 
       const auths = authRes.data || [];
       const meds = medRes.data || [];
-      const contacts = contactRes.error ? [] : (contactRes.data || []);
       const activeContexts = (contextMemRes.data || []).filter(m =>
         m.is_active !== false && !m.end_date && m.service_delivery_contexts
       );
 
+      // Defensive jsonb readers — Hope Haven's records sometimes have these as
+      // strings, sometimes as objects, sometimes null.
+      const asObj = (v) => {
+        if (!v) return {};
+        if (typeof v === "string") { try { return JSON.parse(v); } catch { return {}; } }
+        return v;
+      };
+      const asArr = (v) => {
+        if (!v) return [];
+        if (Array.isArray(v)) return v;
+        if (typeof v === "string") { try { const p = JSON.parse(v); return Array.isArray(p) ? p : []; } catch { return []; } }
+        return [];
+      };
+
+      const physician = asObj(person.primary_physician);
+      const specialists = asArr(person.medical_specialists);
+      const insurance = asObj(person.medical_insurance_info);
+      const medicalInfo = asObj(person.medical_info);
+      const emergencyContacts = asArr(person.emergency_contacts);
+      const diagnosisCodes = Array.isArray(person.diagnosis_codes) ? person.diagnosis_codes : asArr(person.diagnosis_codes);
+
       const doc = await createHopeHavenPDF({
         title: "Face Sheet",
-        subtitle: `${person.first_name || ""} ${person.last_name || ""}  ·  PID ${person.dspd_pid || "—"}`,
+        subtitle: `${person.first_name || ""} ${person.last_name || ""}  ·  PID ${person.identification_number || "—"}`,
       });
 
       const formatDate = (d) => d ? new Date(d.includes && d.includes("T") ? d : d + "T00:00:00").toLocaleDateString("en-US") : "—";
@@ -14455,62 +14484,139 @@
       doc.fieldRow([
         { label: "Full Name",   value: `${person.first_name || ""} ${person.last_name || ""}`.trim() },
         { label: "Date of Birth", value: formatDate(person.date_of_birth) },
-        { label: "DSPD PID",    value: person.dspd_pid || "—" },
+        { label: "DSPD PID",    value: person.identification_number || "—" },
       ]);
       doc.fieldRow([
-        { label: "Gender",       value: person.gender || "—" },
-        { label: "Medicaid ID",  value: person.medicaid_id || "—" },
+        { label: "Gender",       value: medicalInfo.gender || person.gender || "—" },
+        { label: "Medicaid #",   value: person.medicaid_number || "—" },
         { label: "Admission Date", value: formatDate(person.admission_date) },
       ]);
+      const fullAddr = [person.address, person.city, person.state, person.zip].filter(Boolean).join(", ");
       doc.fieldRow([
-        { label: "Address", value: [person.address_line1, person.city, person.state, person.zip].filter(Boolean).join(", ") || "—" },
+        { label: "Address", value: fullAddr || "—" },
       ]);
       doc.fieldRow([
         { label: "Primary Phone", value: person.phone || "—" },
-        { label: "Email",         value: person.email || "—" },
+        { label: "Email",         value: medicalInfo.email || person.email || "—" },
       ]);
 
       // ── DIAGNOSES & SUPPORT NEEDS ──────────────────────
+      const allergies = medicalInfo.allergies || person.allergies;
+      const dietaryRestrictions = medicalInfo.dietary_restrictions || person.dietary_restrictions;
       doc.sectionTitle("Diagnoses & Support Needs");
       doc.fieldRow([
-        { label: "Primary Diagnosis", value: person.primary_diagnosis || "—" },
+        { label: "Diagnosis Codes", value: diagnosisCodes.length > 0 ? diagnosisCodes.join(", ") : (medicalInfo.primary_diagnosis || "—") },
       ]);
-      if (person.secondary_diagnoses) {
+      if (medicalInfo.secondary_diagnoses) {
         doc.fieldRow([
-          { label: "Secondary Diagnoses", value: person.secondary_diagnoses },
+          { label: "Secondary Diagnoses", value: medicalInfo.secondary_diagnoses },
         ]);
       }
-      if (person.allergies) {
+      if (allergies) {
         doc.fieldRow([
-          { label: "Allergies", value: person.allergies },
+          { label: "Allergies", value: allergies },
         ]);
       }
-      if (person.dietary_restrictions) {
+      if (dietaryRestrictions) {
         doc.fieldRow([
-          { label: "Dietary Restrictions", value: person.dietary_restrictions },
+          { label: "Dietary Restrictions", value: dietaryRestrictions },
+        ]);
+      }
+      if (medicalInfo.mobility) {
+        doc.fieldRow([
+          { label: "Mobility / Communication", value: medicalInfo.mobility },
         ]);
       }
 
-      // ── EMERGENCY CONTACTS ─────────────────────────────
-      if (contacts.length > 0) {
+      // ── EMERGENCY CONTACTS & GUARDIAN ──────────────────
+      // Combine: jsonb emergency_contacts (multi) + scalar guardian + scalar emergency_contact + support coordinator
+      const contactRows = [];
+      if (person.guardian_name || person.guardian_phone) {
+        contactRows.push(["Guardian", person.guardian_name || "—", person.guardian_relation || "—", person.guardian_phone || "—", person.guardian_address || "—"]);
+      }
+      if (person.emergency_contact_name || person.emergency_contact_phone) {
+        contactRows.push(["Emergency", person.emergency_contact_name || "—", "—", person.emergency_contact_phone || "—", "—"]);
+      }
+      emergencyContacts.forEach(c => {
+        contactRows.push([
+          c.type || c.contact_type || "Emergency",
+          c.name || "—",
+          c.relationship || c.relation || "—",
+          c.phone || "—",
+          c.email || c.address || "—",
+        ]);
+      });
+      const scName = person.support_coordinator_name || person.support_coordinator;
+      const scPhone = person.sc_phone || person.support_coordinator_phone;
+      const scEmail = person.sc_email || person.support_coordinator_email;
+      if (scName || scPhone || scEmail) {
+        contactRows.push(["Support Coord.", scName || "—", person.support_coordinator_agency || "—", scPhone || "—", scEmail || "—"]);
+      }
+
+      if (contactRows.length > 0) {
         doc.sectionTitle("Emergency Contacts & Guardian");
         doc.tableSimple(
-          ["Type", "Name", "Relationship", "Phone", "Email"],
-          contacts.map(c => [c.contact_type || "—", c.name || "—", c.relationship || "—", c.phone || "—", c.email || "—"]),
+          ["Type", "Name", "Relation / Agency", "Phone", "Email / Address"],
+          contactRows,
           { weights: [1.4, 2.2, 1.6, 1.6, 2.6] }
         );
       }
 
       // ── MEDICAL ────────────────────────────────────────
-      if (person.physician_name || person.physician_phone || person.preferred_hospital) {
+      const physicianName = physician.name || person.physician_name;
+      const physicianPhone = physician.phone || person.physician_phone;
+      const preferredHospital = medicalInfo.preferred_hospital || physician.hospital;
+      if (physicianName || physicianPhone || preferredHospital || specialists.length > 0) {
         doc.sectionTitle("Medical");
-        doc.fieldRow([
-          { label: "Primary Physician", value: person.physician_name || "—" },
-          { label: "Physician Phone",   value: person.physician_phone || "—" },
-        ]);
-        if (person.preferred_hospital) {
+        if (physicianName || physicianPhone) {
           doc.fieldRow([
-            { label: "Preferred Hospital", value: person.preferred_hospital },
+            { label: "Primary Physician", value: physicianName || "—" },
+            { label: "Physician Phone",   value: physicianPhone || "—" },
+          ]);
+        }
+        if (physician.practice || physician.address) {
+          doc.fieldRow([
+            { label: "Practice", value: physician.practice || physician.address || "—" },
+          ]);
+        }
+        if (preferredHospital) {
+          doc.fieldRow([
+            { label: "Preferred Hospital", value: preferredHospital },
+          ]);
+        }
+        if (specialists.length > 0) {
+          doc.tableSimple(
+            ["Specialist", "Type", "Phone"],
+            specialists.map(s => [s.name || "—", s.type || s.specialty || "—", s.phone || "—"]),
+            { weights: [3, 2, 2] }
+          );
+        }
+      }
+
+      // ── INSURANCE ──────────────────────────────────────
+      const hasInsurance = insurance && (insurance.primary || insurance.secondary || insurance.medicaid_plan || insurance.member_id);
+      if (hasInsurance) {
+        doc.sectionTitle("Insurance");
+        if (insurance.medicaid_plan) {
+          doc.fieldRow([
+            { label: "Medicaid Plan", value: insurance.medicaid_plan },
+            { label: "Medicaid #",    value: person.medicaid_number || insurance.medicaid_number || "—" },
+          ]);
+        }
+        if (insurance.primary) {
+          const p = typeof insurance.primary === "object" ? insurance.primary : { plan: insurance.primary };
+          doc.fieldRow([
+            { label: "Primary Insurance", value: p.plan || p.name || "—" },
+            { label: "Member ID",         value: p.member_id || p.id || "—" },
+            { label: "Group #",           value: p.group_number || p.group || "—" },
+          ]);
+        }
+        if (insurance.secondary) {
+          const s = typeof insurance.secondary === "object" ? insurance.secondary : { plan: insurance.secondary };
+          doc.fieldRow([
+            { label: "Secondary Insurance", value: s.plan || s.name || "—" },
+            { label: "Member ID",           value: s.member_id || s.id || "—" },
+            { label: "Group #",             value: s.group_number || s.group || "—" },
           ]);
         }
       }
@@ -14561,12 +14667,16 @@
             m.service_delivery_contexts?.name || "—",
             m.service_delivery_contexts?.delivery_type || "—",
             m.service_delivery_contexts?.service_code_definitions?.code || "—",
-          ])
+          ]),
+          { weights: [3, 1.5, 1.5] }
         );
       }
 
       // ── ACKNOWLEDGEMENT / SIGNATURE BLOCK ──────────────
+      // v19.4.2 — keepTogether prevents the ack section from being silently dropped
+      // when the rest of the page filled up. Reserve ~160px for title + paragraph + 2 sig blocks.
       doc.spacer(16);
+      doc.keepTogether(160);
       doc.sectionTitle("Acknowledgement");
       doc.paragraph(
         "I acknowledge that the information on this Face Sheet has been reviewed and is accurate to the best of my knowledge. Updates will be made promptly when changes occur.",
