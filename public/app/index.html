@@ -631,7 +631,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.4.2</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.4.3</span>
               </div>
             </div>
             {isMobile && (
@@ -14221,22 +14221,27 @@
         // Page numbering placeholder — we paint final values after all pages exist
       }
 
+      // v19.4.3 — fix the math: cursorY is distance from top, MARGIN.bottom is
+      // a bottom-up offset. Available remaining content height is the page's
+      // usable bottom edge (PAGE.h - MARGIN.bottom) minus the current cursor.
       function ensureSpace(neededHeight) {
-        const available = PAGE.h - MARGIN.bottom - yFromTop(cursorY);
+        const usableBottom = PAGE.h - MARGIN.bottom;
+        const available = usableBottom - cursorY;
         if (available < neededHeight) newPage();
       }
 
-      // v19.4.2 — force a section to start on a page that has room for ALL of it.
-      // Use before sectionTitle when the section's title + body is "atomic" and
-      // shouldn't split across a page boundary (e.g., signature + ack block).
       function keepTogether(neededHeight) {
-        const available = PAGE.h - MARGIN.bottom - yFromTop(cursorY);
+        const usableBottom = PAGE.h - MARGIN.bottom;
+        const available = usableBottom - cursorY;
         if (available < neededHeight) newPage();
       }
 
       // ── PRIMITIVES ─────────────────────────────────────────────
       function sectionTitle(text, opts = {}) {
-        ensureSpace(34);
+        // v19.4.3 — reserve enough space for the title bar + at least one
+        // following row (~36px). This prevents orphan section titles at the
+        // bottom of a page where the next primitive ends up on page 2.
+        ensureSpace(60);
         cursorY += 6;
         page.drawRectangle({
           x: MARGIN.left, y: yFromTop(cursorY + 14), width: CONTENT.w, height: 18, color: navy,
@@ -14558,7 +14563,7 @@
         doc.tableSimple(
           ["Type", "Name", "Relation / Agency", "Phone", "Email / Address"],
           contactRows,
-          { weights: [1.4, 2.2, 1.6, 1.6, 2.6] }
+          { weights: [1.4, 2.4, 2.6, 1.8, 2.8] }
         );
       }
 
