@@ -631,7 +631,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.4.3</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.4.4</span>
               </div>
             </div>
             {isMobile && (
@@ -1462,63 +1462,166 @@
       const { orgId } = useAuth();
       const perms = usePermissions();
       const [saving, setSaving] = useState(false);
+      const [tab, setTab] = useState("demographics");
       const [serviceCodes, setServiceCodes] = useState([]);
+
+      // ── Form state ──────────────────────────────────────────────
+      // Scalar fields on persons table (always written directly)
       const [form, setForm] = useState({
-        first_name: "", last_name: "", date_of_birth: "", medicaid_number: "", is_active: true,
+        first_name: "", last_name: "", date_of_birth: "",
+        identification_number: "", medicaid_number: "",
+        admission_date: "", discharge_date: "",
+        address: "", city: "", state: "UT", zip: "", phone: "",
+        photo_url: "",
+        is_active: true,
+        // scalar dupes (kept for back-compat during scalar+jsonb period)
         support_coordinator: "", support_coordinator_phone: "", support_coordinator_email: "", support_coordinator_agency: "",
-        guardian_name: "", guardian_phone: "", guardian_relation: "",
+        support_coordinator_name: "", sc_email: "", sc_phone: "",
+        guardian_name: "", guardian_phone: "", guardian_relation: "", guardian_address: "",
         emergency_contact_name: "", emergency_contact_phone: "",
         physician_name: "", physician_phone: "",
-        address: "", city: "", state: "UT", zip: "", phone: "",
+        notes: "",
       });
+
+      // jsonb subforms — mirror selected fields into these on save
+      const [medicalInfo, setMedicalInfo] = useState({
+        gender: "", email: "",
+        allergies: "", dietary_restrictions: "", mobility: "",
+        primary_diagnosis: "", secondary_diagnoses: "",
+        preferred_hospital: "",
+      });
+      const [diagnosisCodes, setDiagnosisCodes] = useState([]); // text[]
+      const [primaryPhysician, setPrimaryPhysician] = useState({ name: "", phone: "", practice: "", address: "" });
+      const [specialists, setSpecialists] = useState([]); // [{ name, type, phone }]
+      const [insurance, setInsurance] = useState({
+        medicaid_plan: "", medicaid_number: "",
+        primary: { plan: "", member_id: "", group_number: "" },
+        secondary: { plan: "", member_id: "", group_number: "" },
+      });
+      const [emergencyContacts, setEmergencyContacts] = useState([]); // [{ type, name, relationship, phone, email }]
+
       const [auths, setAuths] = useState([]);
       const [newAuth, setNewAuth] = useState({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "" });
+
+      // Helper for jsonb decoding (could be string, object, null)
+      const asObj = (v) => {
+        if (!v) return {};
+        if (typeof v === "string") { try { return JSON.parse(v); } catch { return {}; } }
+        return v;
+      };
+      const asArr = (v) => {
+        if (!v) return [];
+        if (Array.isArray(v)) return v;
+        if (typeof v === "string") { try { const p = JSON.parse(v); return Array.isArray(p) ? p : []; } catch { return []; } }
+        return [];
+      };
 
       useEffect(() => {
         supabase.from("service_code_definitions").select("id, code, name").order("code").then(({ data }) => setServiceCodes(data || []));
       }, []);
 
       useEffect(() => {
+        if (!open) return;
         if (editing) {
           setForm({
             first_name: editing.first_name || "", last_name: editing.last_name || "",
-            date_of_birth: editing.date_of_birth || "", medicaid_number: editing.medicaid_number || "",
-            is_active: editing.is_active !== false,
-            support_coordinator: editing.support_coordinator || "",
-            support_coordinator_phone: editing.support_coordinator_phone || "",
-            support_coordinator_email: editing.support_coordinator_email || "",
-            support_coordinator_agency: editing.support_coordinator_agency || "",
-            guardian_name: editing.guardian_name || "",
-            guardian_phone: editing.guardian_phone || "",
-            guardian_relation: editing.guardian_relation || "",
-            emergency_contact_name: editing.emergency_contact_name || "",
-            emergency_contact_phone: editing.emergency_contact_phone || "",
-            physician_name: editing.physician_name || "",
-            physician_phone: editing.physician_phone || "",
+            date_of_birth: editing.date_of_birth || "",
+            identification_number: editing.identification_number || "",
+            medicaid_number: editing.medicaid_number || "",
+            admission_date: editing.admission_date || "",
+            discharge_date: editing.discharge_date || "",
             address: editing.address || "",
             city: editing.city || "",
             state: editing.state || "UT",
             zip: editing.zip || "",
             phone: editing.phone || "",
+            photo_url: editing.photo_url || "",
+            is_active: editing.is_active !== false,
+            support_coordinator: editing.support_coordinator || "",
+            support_coordinator_phone: editing.support_coordinator_phone || "",
+            support_coordinator_email: editing.support_coordinator_email || "",
+            support_coordinator_agency: editing.support_coordinator_agency || "",
+            support_coordinator_name: editing.support_coordinator_name || "",
+            sc_email: editing.sc_email || "",
+            sc_phone: editing.sc_phone || "",
+            guardian_name: editing.guardian_name || "",
+            guardian_phone: editing.guardian_phone || "",
+            guardian_relation: editing.guardian_relation || "",
+            guardian_address: editing.guardian_address || "",
+            emergency_contact_name: editing.emergency_contact_name || "",
+            emergency_contact_phone: editing.emergency_contact_phone || "",
+            physician_name: editing.physician_name || "",
+            physician_phone: editing.physician_phone || "",
+            notes: editing.notes || "",
           });
+          // jsonb subforms — preload from existing record
+          const mi = asObj(editing.medical_info);
+          setMedicalInfo({
+            gender: mi.gender || "",
+            email: mi.email || "",
+            allergies: mi.allergies || "",
+            dietary_restrictions: mi.dietary_restrictions || "",
+            mobility: mi.mobility || "",
+            primary_diagnosis: mi.primary_diagnosis || "",
+            secondary_diagnoses: mi.secondary_diagnoses || "",
+            preferred_hospital: mi.preferred_hospital || "",
+          });
+          setDiagnosisCodes(Array.isArray(editing.diagnosis_codes) ? editing.diagnosis_codes : asArr(editing.diagnosis_codes));
+          const pp = asObj(editing.primary_physician);
+          setPrimaryPhysician({
+            name: pp.name || editing.physician_name || "",
+            phone: pp.phone || editing.physician_phone || "",
+            practice: pp.practice || "",
+            address: pp.address || "",
+          });
+          setSpecialists(asArr(editing.medical_specialists));
+          const ins = asObj(editing.medical_insurance_info);
+          setInsurance({
+            medicaid_plan: ins.medicaid_plan || "",
+            medicaid_number: ins.medicaid_number || editing.medicaid_number || "",
+            primary: typeof ins.primary === "object" && ins.primary ? {
+              plan: ins.primary.plan || ins.primary.name || "",
+              member_id: ins.primary.member_id || ins.primary.id || "",
+              group_number: ins.primary.group_number || ins.primary.group || "",
+            } : { plan: typeof ins.primary === "string" ? ins.primary : "", member_id: "", group_number: "" },
+            secondary: typeof ins.secondary === "object" && ins.secondary ? {
+              plan: ins.secondary.plan || ins.secondary.name || "",
+              member_id: ins.secondary.member_id || ins.secondary.id || "",
+              group_number: ins.secondary.group_number || ins.secondary.group || "",
+            } : { plan: typeof ins.secondary === "string" ? ins.secondary : "", member_id: "", group_number: "" },
+          });
+          setEmergencyContacts(asArr(editing.emergency_contacts));
           setAuths(editing.person_service_authorizations || []);
         } else {
+          // Reset all on add-new
           setForm({
-            first_name: "", last_name: "", date_of_birth: "", medicaid_number: "", is_active: true,
+            first_name: "", last_name: "", date_of_birth: "",
+            identification_number: "", medicaid_number: "",
+            admission_date: "", discharge_date: "",
+            address: "", city: "", state: "UT", zip: "", phone: "",
+            photo_url: "", is_active: true,
             support_coordinator: "", support_coordinator_phone: "", support_coordinator_email: "", support_coordinator_agency: "",
-            guardian_name: "", guardian_phone: "", guardian_relation: "",
+            support_coordinator_name: "", sc_email: "", sc_phone: "",
+            guardian_name: "", guardian_phone: "", guardian_relation: "", guardian_address: "",
             emergency_contact_name: "", emergency_contact_phone: "",
             physician_name: "", physician_phone: "",
-            address: "", city: "", state: "UT", zip: "", phone: "",
+            notes: "",
           });
+          setMedicalInfo({ gender: "", email: "", allergies: "", dietary_restrictions: "", mobility: "", primary_diagnosis: "", secondary_diagnoses: "", preferred_hospital: "" });
+          setDiagnosisCodes([]);
+          setPrimaryPhysician({ name: "", phone: "", practice: "", address: "" });
+          setSpecialists([]);
+          setInsurance({ medicaid_plan: "", medicaid_number: "", primary: { plan: "", member_id: "", group_number: "" }, secondary: { plan: "", member_id: "", group_number: "" } });
+          setEmergencyContacts([]);
           setAuths([]);
         }
         setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "" });
+        setTab("demographics");
       }, [editing, open]);
 
       const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
 
-      // Get the code string for the selected new auth
+      // ── Auth sub-CRUD ───────────────────────────────────────────
       const newAuthCode = serviceCodes.find(sc => sc.id === newAuth.service_code_id)?.code;
       const newAuthRule = BILLING_RULES[newAuthCode];
       const isWorksheet = newAuthRule?.worksheet;
@@ -1534,7 +1637,6 @@
           d.setFullYear(d.getFullYear() + 1);
           endDate = d.toISOString().split("T")[0];
         }
-
         const payload = {
           org_id: orgId,
           person_id: editing.id,
@@ -1544,20 +1646,13 @@
           start_date: startDate,
           end_date: endDate,
         };
-
-        const { error, data: insertData, status, statusText } = await supabase.from("person_service_authorizations").insert(payload).select();
-
-        if (error) {
-          return addToast("Failed: " + error.message, "error");
-        }
-
+        const { error, data: insertData } = await supabase.from("person_service_authorizations").insert(payload).select();
+        if (error) return addToast("Failed: " + error.message, "error");
         if (!insertData || insertData.length === 0) {
           addToast("Insert blocked — check RLS policies on person_service_authorizations", "error");
         } else {
           addToast("Authorization added", "success");
         }
-
-        // Reload auths
         const { data: authData } = await supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code)").eq("person_id", editing.id);
         setAuths(authData || []);
         setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "" });
@@ -1570,18 +1665,65 @@
         addToast("Authorization removed", "success");
       };
 
+      // ── Save: scalars + jsonb mirror ────────────────────────────
       const handleSave = async () => {
         if (!form.first_name || !form.last_name) return addToast("First and last name are required", "error");
         setSaving(true);
+
+        // Build payload: all scalar form fields, plus jsonb mirrors.
         const payload = { ...form };
-        // Strip all empty optional fields so we don't write empty strings into nullable columns
+
+        // Mirror: primary_physician jsonb. Source-of-truth is the subform; fall back to scalars.
+        const ppName = primaryPhysician.name || form.physician_name;
+        const ppPhone = primaryPhysician.phone || form.physician_phone;
+        if (ppName || ppPhone || primaryPhysician.practice || primaryPhysician.address) {
+          payload.primary_physician = {
+            name: ppName,
+            phone: ppPhone,
+            practice: primaryPhysician.practice,
+            address: primaryPhysician.address,
+          };
+          // also mirror back to scalar for legacy reads
+          payload.physician_name = ppName;
+          payload.physician_phone = ppPhone;
+        }
+
+        // medical_specialists is NOT NULL with default — always write an array
+        payload.medical_specialists = specialists;
+
+        // medical_info jsonb — gender/allergies/etc all live here
+        payload.medical_info = {
+          ...medicalInfo,
+        };
+
+        // diagnosis_codes is NOT NULL text[]
+        payload.diagnosis_codes = diagnosisCodes;
+
+        // medical_insurance_info jsonb — only if anything is filled in
+        const hasInsurance = insurance.medicaid_plan || insurance.primary.plan || insurance.secondary.plan;
+        if (hasInsurance) {
+          payload.medical_insurance_info = {
+            medicaid_plan: insurance.medicaid_plan || null,
+            medicaid_number: insurance.medicaid_number || null,
+            primary: insurance.primary.plan ? insurance.primary : null,
+            secondary: insurance.secondary.plan ? insurance.secondary : null,
+          };
+        }
+
+        // emergency_contacts is NOT NULL jsonb — always write the array
+        payload.emergency_contacts = emergencyContacts;
+
+        // Strip empty optional scalars (let nullable columns stay null)
         const optionalKeys = [
-          "date_of_birth", "medicaid_number",
+          "date_of_birth", "identification_number", "medicaid_number",
+          "admission_date", "discharge_date",
+          "address", "city", "zip", "phone", "photo_url",
           "support_coordinator", "support_coordinator_phone", "support_coordinator_email", "support_coordinator_agency",
-          "guardian_name", "guardian_phone", "guardian_relation",
+          "support_coordinator_name", "sc_email", "sc_phone",
+          "guardian_name", "guardian_phone", "guardian_relation", "guardian_address",
           "emergency_contact_name", "emergency_contact_phone",
           "physician_name", "physician_phone",
-          "address", "city", "zip", "phone",
+          "notes",
         ];
         optionalKeys.forEach(k => { if (!payload[k]) delete payload[k]; });
 
@@ -1593,7 +1735,7 @@
           result = await supabase.from("persons").insert(payload);
         }
 
-        // Schema fallback: if any column doesn't exist yet, retry with core fields only
+        // Schema fallback if any column is missing
         if (result.error && /column .* does not exist/i.test(result.error.message || "")) {
           const core = {
             first_name: form.first_name, last_name: form.last_name,
@@ -1608,7 +1750,7 @@
             core.org_id = orgId;
             result = await supabase.from("persons").insert(core);
           }
-          if (!result.error) addToast("Saved with core fields only — some contact columns missing from schema", "warning");
+          if (!result.error) addToast("Saved with core fields only — some columns missing from schema", "warning");
         }
 
         setSaving(false);
@@ -1621,164 +1763,396 @@
         }
       };
 
+      // ── Tab button ──────────────────────────────────────────────
+      const TabButton = ({ value, label, count }) => (
+        <button onClick={() => setTab(value)} style={{
+          padding: "8px 14px", borderRadius: 8, border: "none", fontSize: 12, fontWeight: 700,
+          background: tab === value ? CB.navy : "transparent",
+          color: tab === value ? CB.white : CB.textMid,
+          cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s",
+          display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap",
+        }}>
+          {label}
+          {count != null && count > 0 && (
+            <span style={{ fontSize: 10, padding: "1px 5px", borderRadius: 4, background: tab === value ? "rgba(255,255,255,0.2)" : `${CB.teal}20`, color: tab === value ? CB.white : CB.teal, fontWeight: 800 }}>{count}</span>
+          )}
+        </button>
+      );
+
+      // ── Specialists sub-CRUD helpers ───────────────────────────
+      const addSpecialist = () => setSpecialists(prev => [...prev, { name: "", type: "", phone: "" }]);
+      const updateSpecialist = (i, k, v) => setSpecialists(prev => prev.map((s, idx) => idx === i ? { ...s, [k]: v } : s));
+      const removeSpecialist = (i) => setSpecialists(prev => prev.filter((_, idx) => idx !== i));
+
+      // ── Emergency contacts sub-CRUD helpers ────────────────────
+      const addEmergencyContact = () => setEmergencyContacts(prev => [...prev, { type: "Emergency", name: "", relationship: "", phone: "", email: "" }]);
+      const updateEmergencyContact = (i, k, v) => setEmergencyContacts(prev => prev.map((c, idx) => idx === i ? { ...c, [k]: v } : c));
+      const removeEmergencyContact = (i) => setEmergencyContacts(prev => prev.filter((_, idx) => idx !== i));
+
+      // ── Diagnosis codes sub-CRUD ───────────────────────────────
+      const [newDxCode, setNewDxCode] = useState("");
+      const addDxCode = () => {
+        const code = newDxCode.trim();
+        if (!code) return;
+        if (diagnosisCodes.includes(code)) return addToast("Already added", "warning");
+        setDiagnosisCodes(prev => [...prev, code]);
+        setNewDxCode("");
+      };
+      const removeDxCode = (c) => setDiagnosisCodes(prev => prev.filter(x => x !== c));
+
       return (
-        <Modal open={open} onClose={onClose} title={editing ? "Edit Client" : "Add Client"} subtitle="Person management and service authorizations" width={760}>
-          <FormRow>
-            <FormField label="First Name" required half>
-              <input style={fieldStyle} value={form.first_name} onChange={e => set("first_name", e.target.value)} placeholder="First name" />
-            </FormField>
-            <FormField label="Last Name" required half>
-              <input style={fieldStyle} value={form.last_name} onChange={e => set("last_name", e.target.value)} placeholder="Last name" />
-            </FormField>
-          </FormRow>
-          <FormRow>
-            <FormField label="Date of Birth" half>
-              <input style={fieldStyle} type="date" value={form.date_of_birth} onChange={e => set("date_of_birth", e.target.value)} />
-            </FormField>
-            <FormField label="Medicaid Number" half>
-              <input style={fieldStyle} value={form.medicaid_number} onChange={e => set("medicaid_number", e.target.value)} placeholder="Medicaid ID" />
-            </FormField>
-          </FormRow>
-          {editing && (
-            <FormField label="Status">
-              <div style={{ display: "flex", gap: 12 }}>
-                {[true, false].map(val => (
-                  <label key={String(val)} style={{
-                    display: "flex", alignItems: "center", gap: 8, padding: "10px 16px",
-                    borderRadius: 10, border: `1px solid ${form.is_active === val ? (val ? CB.green : CB.red) : CB.border}`,
-                    background: form.is_active === val ? (val ? "rgba(46,125,50,0.06)" : "rgba(229,57,53,0.06)") : CB.white,
-                    cursor: "pointer", fontSize: 14, fontWeight: 600, color: form.is_active === val ? (val ? CB.green : CB.red) : CB.textMid,
-                  }}>
-                    <input type="radio" name="client_status" checked={form.is_active === val} onChange={() => set("is_active", val)} style={{ display: "none" }} />
-                    {val ? "Active" : "Inactive"}
-                  </label>
-                ))}
+        <Modal open={open} onClose={onClose} title={editing ? "Edit Client" : "Add Client"} subtitle="Person profile, medical, contacts, insurance, authorizations" width={820}>
+          {/* Tab bar */}
+          <div style={{ display: "flex", gap: 4, marginBottom: 18, background: CB.cream, padding: 4, borderRadius: 10, flexWrap: "wrap" }}>
+            <TabButton value="demographics" label="Demographics" />
+            <TabButton value="medical" label="Medical" count={diagnosisCodes.length + specialists.length} />
+            <TabButton value="contacts" label="Contacts" count={emergencyContacts.length + (form.guardian_name ? 1 : 0)} />
+            <TabButton value="insurance" label="Insurance" />
+            <TabButton value="notes" label="Notes" />
+            {editing && <TabButton value="auths" label="Auths" count={auths.length} />}
+            {editing && <TabButton value="documents" label="Documents" />}
+          </div>
+
+          {/* ─── DEMOGRAPHICS ─── */}
+          {tab === "demographics" && (
+            <div style={{ animation: "fadeIn 0.2s ease" }}>
+              <FormRow>
+                <FormField label="First Name" required half>
+                  <input style={fieldStyle} value={form.first_name} onChange={e => set("first_name", e.target.value)} placeholder="First name" />
+                </FormField>
+                <FormField label="Last Name" required half>
+                  <input style={fieldStyle} value={form.last_name} onChange={e => set("last_name", e.target.value)} placeholder="Last name" />
+                </FormField>
+              </FormRow>
+              <FormRow>
+                <FormField label="Date of Birth" half>
+                  <input style={fieldStyle} type="date" value={form.date_of_birth} onChange={e => set("date_of_birth", e.target.value)} />
+                </FormField>
+                <FormField label="Gender" half>
+                  <select style={fieldStyle} value={medicalInfo.gender} onChange={e => setMedicalInfo(p => ({ ...p, gender: e.target.value }))}>
+                    <option value="">—</option>
+                    <option value="Male">Male</option>
+                    <option value="Female">Female</option>
+                    <option value="Non-binary">Non-binary</option>
+                    <option value="Prefer not to say">Prefer not to say</option>
+                  </select>
+                </FormField>
+              </FormRow>
+              <FormRow>
+                <FormField label="DSPD PID (Identification Number)" half>
+                  <input style={fieldStyle} value={form.identification_number} onChange={e => set("identification_number", e.target.value)} placeholder="9-digit DSPD PID" />
+                </FormField>
+                <FormField label="Medicaid Number" half>
+                  <input style={fieldStyle} value={form.medicaid_number} onChange={e => set("medicaid_number", e.target.value)} placeholder="Medicaid ID" />
+                </FormField>
+              </FormRow>
+              <FormRow>
+                <FormField label="Admission Date" half>
+                  <input style={fieldStyle} type="date" value={form.admission_date} onChange={e => set("admission_date", e.target.value)} />
+                </FormField>
+                <FormField label="Discharge Date" half>
+                  <input style={fieldStyle} type="date" value={form.discharge_date} onChange={e => set("discharge_date", e.target.value)} />
+                </FormField>
+              </FormRow>
+              <FormField label="Photo URL">
+                <input style={fieldStyle} value={form.photo_url} onChange={e => set("photo_url", e.target.value)} placeholder="https://... headshot for binders & face sheets" />
+              </FormField>
+
+              <div style={{ marginTop: 20, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
+                <h3 style={{ fontSize: 14, fontWeight: 700, color: CB.navy, marginBottom: 12 }}>Address & Phone</h3>
+                <FormField label="Street Address">
+                  <input style={fieldStyle} value={form.address} onChange={e => set("address", e.target.value)} placeholder="123 Main St" />
+                </FormField>
+                <FormRow>
+                  <FormField label="City" half>
+                    <input style={fieldStyle} value={form.city} onChange={e => set("city", e.target.value)} placeholder="West Jordan" />
+                  </FormField>
+                  <FormField label="State" half>
+                    <input style={fieldStyle} value={form.state} onChange={e => set("state", e.target.value)} placeholder="UT" maxLength={2} />
+                  </FormField>
+                </FormRow>
+                <FormRow>
+                  <FormField label="ZIP" half>
+                    <input style={fieldStyle} value={form.zip} onChange={e => set("zip", e.target.value)} placeholder="84088" />
+                  </FormField>
+                  <FormField label="Phone" half>
+                    <input style={fieldStyle} type="tel" value={form.phone} onChange={e => set("phone", e.target.value)} placeholder="(801) 555-0000" />
+                  </FormField>
+                </FormRow>
+                <FormField label="Email">
+                  <input style={fieldStyle} type="email" value={medicalInfo.email} onChange={e => setMedicalInfo(p => ({ ...p, email: e.target.value }))} placeholder="client@example.com" />
+                </FormField>
               </div>
-            </FormField>
+
+              {editing && (
+                <div style={{ marginTop: 20, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
+                  <h3 style={{ fontSize: 14, fontWeight: 700, color: CB.navy, marginBottom: 12 }}>Status</h3>
+                  <div style={{ display: "flex", gap: 12 }}>
+                    {[true, false].map(val => (
+                      <label key={String(val)} style={{
+                        display: "flex", alignItems: "center", gap: 8, padding: "10px 16px",
+                        borderRadius: 10, border: `1px solid ${form.is_active === val ? (val ? CB.green : CB.red) : CB.border}`,
+                        background: form.is_active === val ? (val ? "rgba(46,125,50,0.06)" : "rgba(229,57,53,0.06)") : CB.white,
+                        cursor: "pointer", fontSize: 14, fontWeight: 600, color: form.is_active === val ? (val ? CB.green : CB.red) : CB.textMid,
+                      }}>
+                        <input type="radio" name="client_status" checked={form.is_active === val} onChange={() => set("is_active", val)} style={{ display: "none" }} />
+                        {val ? "Active" : "Inactive"}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
           )}
 
-          {/* Support Coordinator */}
-          <div style={{ marginTop: 8, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
-            <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Support Coordinator</h3>
-            <p style={{ fontSize: 12, color: CB.textLight, marginBottom: 14 }}>DSPD-assigned coordinator for this client. Used in face sheets, quarterly reports, and SC correspondence.</p>
-            <FormRow>
-              <FormField label="Coordinator Name" half>
-                <input style={fieldStyle} value={form.support_coordinator} onChange={e => set("support_coordinator", e.target.value)} placeholder="Coordinator's full name" />
+          {/* ─── MEDICAL ─── */}
+          {tab === "medical" && (
+            <div style={{ animation: "fadeIn 0.2s ease" }}>
+              <h3 style={{ fontSize: 14, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Primary Physician</h3>
+              <p style={{ fontSize: 11, color: CB.textLight, marginBottom: 12 }}>Will appear on the Face Sheet and quarterly summaries.</p>
+              <FormRow>
+                <FormField label="Physician Name" half>
+                  <input style={fieldStyle} value={primaryPhysician.name} onChange={e => setPrimaryPhysician(p => ({ ...p, name: e.target.value }))} placeholder="Dr. Full Name" />
+                </FormField>
+                <FormField label="Physician Phone" half>
+                  <input style={fieldStyle} type="tel" value={primaryPhysician.phone} onChange={e => setPrimaryPhysician(p => ({ ...p, phone: e.target.value }))} placeholder="(801) 555-0000" />
+                </FormField>
+              </FormRow>
+              <FormRow>
+                <FormField label="Practice / Clinic" half>
+                  <input style={fieldStyle} value={primaryPhysician.practice} onChange={e => setPrimaryPhysician(p => ({ ...p, practice: e.target.value }))} placeholder="University Health, IHC, etc." />
+                </FormField>
+                <FormField label="Practice Address" half>
+                  <input style={fieldStyle} value={primaryPhysician.address} onChange={e => setPrimaryPhysician(p => ({ ...p, address: e.target.value }))} placeholder="Street, City" />
+                </FormField>
+              </FormRow>
+              <FormField label="Preferred Hospital">
+                <input style={fieldStyle} value={medicalInfo.preferred_hospital} onChange={e => setMedicalInfo(p => ({ ...p, preferred_hospital: e.target.value }))} placeholder="e.g. IHC Riverton" />
               </FormField>
-              <FormField label="Agency" half>
-                <input style={fieldStyle} value={form.support_coordinator_agency} onChange={e => set("support_coordinator_agency", e.target.value)} placeholder="e.g. Chrysalis, Kostopulos, Self" />
-              </FormField>
-            </FormRow>
-            <FormRow>
-              <FormField label="Phone" half>
-                <input style={fieldStyle} type="tel" value={form.support_coordinator_phone} onChange={e => set("support_coordinator_phone", e.target.value)} placeholder="(801) 555-0000" />
-              </FormField>
-              <FormField label="Email" half>
-                <input style={fieldStyle} type="email" value={form.support_coordinator_email} onChange={e => set("support_coordinator_email", e.target.value)} placeholder="coordinator@agency.org" />
-              </FormField>
-            </FormRow>
-          </div>
 
-          {/* Guardian */}
-          <div style={{ marginTop: 8, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
-            <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Guardian</h3>
-            <p style={{ fontSize: 12, color: CB.textLight, marginBottom: 14 }}>Legal guardian if applicable. Leave blank if client is self-guardian.</p>
-            <FormRow>
-              <FormField label="Guardian Name" half>
-                <input style={fieldStyle} value={form.guardian_name} onChange={e => set("guardian_name", e.target.value)} placeholder="Full name" />
-              </FormField>
-              <FormField label="Relationship" half>
-                <input style={fieldStyle} value={form.guardian_relation} onChange={e => set("guardian_relation", e.target.value)} placeholder="Mother, father, sibling, legal guardian, etc." />
-              </FormField>
-            </FormRow>
-            <FormRow>
-              <FormField label="Guardian Phone" half>
-                <input style={fieldStyle} type="tel" value={form.guardian_phone} onChange={e => set("guardian_phone", e.target.value)} placeholder="(801) 555-0000" />
-              </FormField>
-            </FormRow>
-          </div>
+              {/* Specialists */}
+              <div style={{ marginTop: 20, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                  <h3 style={{ fontSize: 14, fontWeight: 700, color: CB.navy }}>Specialists ({specialists.length})</h3>
+                  <button onClick={addSpecialist} style={{ padding: "6px 12px", borderRadius: 7, border: `1px dashed ${CB.teal}`, background: `${CB.teal}08`, color: CB.teal, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 5 }}>
+                    {icons.plus({ size: 12 })} Add
+                  </button>
+                </div>
+                {specialists.length === 0 ? (
+                  <p style={{ fontSize: 12, color: CB.textLight, fontStyle: "italic" }}>No specialists added.</p>
+                ) : (
+                  <div style={{ display: "grid", gap: 8 }}>
+                    {specialists.map((s, i) => (
+                      <div key={i} style={{ display: "grid", gridTemplateColumns: "2fr 1.6fr 1.6fr auto", gap: 8, alignItems: "center" }}>
+                        <input style={fieldStyle} value={s.name || ""} onChange={e => updateSpecialist(i, "name", e.target.value)} placeholder="Specialist name" />
+                        <input style={fieldStyle} value={s.type || ""} onChange={e => updateSpecialist(i, "type", e.target.value)} placeholder="Type (e.g. Neurologist)" />
+                        <input style={fieldStyle} value={s.phone || ""} onChange={e => updateSpecialist(i, "phone", e.target.value)} placeholder="Phone" />
+                        <button onClick={() => removeSpecialist(i)} style={{ padding: 8, borderRadius: 7, border: "none", background: "rgba(229,57,53,0.08)", color: CB.red, cursor: "pointer" }}>{icons.trash({ size: 14 })}</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
 
-          {/* Emergency Contact */}
-          <div style={{ marginTop: 8, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
-            <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Emergency Contact</h3>
-            <p style={{ fontSize: 12, color: CB.textLight, marginBottom: 14 }}>Primary person to contact in case of emergency. Can differ from guardian.</p>
-            <FormRow>
-              <FormField label="Contact Name" half>
-                <input style={fieldStyle} value={form.emergency_contact_name} onChange={e => set("emergency_contact_name", e.target.value)} placeholder="Full name" />
-              </FormField>
-              <FormField label="Phone" half>
-                <input style={fieldStyle} type="tel" value={form.emergency_contact_phone} onChange={e => set("emergency_contact_phone", e.target.value)} placeholder="(801) 555-0000" />
-              </FormField>
-            </FormRow>
-          </div>
+              {/* Allergies, Diet, Mobility */}
+              <div style={{ marginTop: 20, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
+                <h3 style={{ fontSize: 14, fontWeight: 700, color: CB.navy, marginBottom: 12 }}>Health & Support Needs</h3>
+                <FormField label="Allergies">
+                  <textarea style={{ ...fieldStyle, minHeight: 60, resize: "vertical", fontFamily: "inherit" }} value={medicalInfo.allergies} onChange={e => setMedicalInfo(p => ({ ...p, allergies: e.target.value }))} placeholder="Food, drug, environmental — list all known allergies" />
+                </FormField>
+                <FormField label="Dietary Restrictions">
+                  <textarea style={{ ...fieldStyle, minHeight: 50, resize: "vertical", fontFamily: "inherit" }} value={medicalInfo.dietary_restrictions} onChange={e => setMedicalInfo(p => ({ ...p, dietary_restrictions: e.target.value }))} placeholder="Diabetic, low-sodium, mechanical soft, NPO after midnight, etc." />
+                </FormField>
+                <FormField label="Mobility / Communication">
+                  <textarea style={{ ...fieldStyle, minHeight: 50, resize: "vertical", fontFamily: "inherit" }} value={medicalInfo.mobility} onChange={e => setMedicalInfo(p => ({ ...p, mobility: e.target.value }))} placeholder="Wheelchair, walker, AAC device, sign language, etc." />
+                </FormField>
+              </div>
 
-          {/* Medical */}
-          <div style={{ marginTop: 8, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
-            <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Medical</h3>
-            <p style={{ fontSize: 12, color: CB.textLight, marginBottom: 14 }}>Primary care physician on file.</p>
-            <FormRow>
-              <FormField label="Physician Name" half>
-                <input style={fieldStyle} value={form.physician_name} onChange={e => set("physician_name", e.target.value)} placeholder="Dr. Full Name" />
-              </FormField>
-              <FormField label="Physician Phone" half>
-                <input style={fieldStyle} type="tel" value={form.physician_phone} onChange={e => set("physician_phone", e.target.value)} placeholder="(801) 555-0000" />
-              </FormField>
-            </FormRow>
-          </div>
+              {/* Diagnosis */}
+              <div style={{ marginTop: 20, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
+                <h3 style={{ fontSize: 14, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Diagnoses</h3>
+                <p style={{ fontSize: 11, color: CB.textLight, marginBottom: 12 }}>Add ICD-10 codes (e.g. F71, G40.909, F84.0).</p>
+                <FormField label="Primary Diagnosis (text)">
+                  <input style={fieldStyle} value={medicalInfo.primary_diagnosis} onChange={e => setMedicalInfo(p => ({ ...p, primary_diagnosis: e.target.value }))} placeholder="Plain-language primary diagnosis" />
+                </FormField>
+                <FormField label="Secondary Diagnoses (text)">
+                  <textarea style={{ ...fieldStyle, minHeight: 50, resize: "vertical", fontFamily: "inherit" }} value={medicalInfo.secondary_diagnoses} onChange={e => setMedicalInfo(p => ({ ...p, secondary_diagnoses: e.target.value }))} placeholder="Other diagnoses, plain language" />
+                </FormField>
+                <FormField label={`ICD-10 Codes (${diagnosisCodes.length})`}>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <input style={{ ...fieldStyle, flex: 1 }} value={newDxCode} onChange={e => setNewDxCode(e.target.value)} onKeyDown={e => e.key === "Enter" && (e.preventDefault(), addDxCode())} placeholder="F71" />
+                    <button onClick={addDxCode} style={{ padding: "0 14px", borderRadius: 8, border: `1px solid ${CB.teal}`, background: `${CB.teal}10`, color: CB.teal, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Add Code</button>
+                  </div>
+                  {diagnosisCodes.length > 0 && (
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+                      {diagnosisCodes.map(c => (
+                        <span key={c} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 8px", borderRadius: 6, background: `${CB.navy}10`, color: CB.navy, fontSize: 12, fontWeight: 700 }}>
+                          {c}
+                          <button onClick={() => removeDxCode(c)} style={{ border: "none", background: "transparent", color: CB.textMid, cursor: "pointer", fontSize: 14, lineHeight: 1, padding: 0 }}>×</button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </FormField>
+              </div>
+            </div>
+          )}
 
-          {/* Address */}
-          <div style={{ marginTop: 8, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
-            <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Address & Phone</h3>
-            <p style={{ fontSize: 12, color: CB.textLight, marginBottom: 14 }}>Residential address. For group-home clients, use the home address.</p>
-            <FormField label="Street Address">
-              <input style={fieldStyle} value={form.address} onChange={e => set("address", e.target.value)} placeholder="123 Main St" />
-            </FormField>
-            <FormRow>
-              <FormField label="City" half>
-                <input style={fieldStyle} value={form.city} onChange={e => set("city", e.target.value)} placeholder="West Jordan" />
-              </FormField>
-              <FormField label="State" half>
-                <input style={fieldStyle} value={form.state} onChange={e => set("state", e.target.value)} placeholder="UT" maxLength={2} />
-              </FormField>
-            </FormRow>
-            <FormRow>
-              <FormField label="ZIP" half>
-                <input style={fieldStyle} value={form.zip} onChange={e => set("zip", e.target.value)} placeholder="84088" />
-              </FormField>
-              <FormField label="Home Phone" half>
-                <input style={fieldStyle} type="tel" value={form.phone} onChange={e => set("phone", e.target.value)} placeholder="(801) 555-0000" />
-              </FormField>
-            </FormRow>
-          </div>
+          {/* ─── CONTACTS ─── */}
+          {tab === "contacts" && (
+            <div style={{ animation: "fadeIn 0.2s ease" }}>
+              {/* Guardian */}
+              <h3 style={{ fontSize: 14, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Guardian</h3>
+              <p style={{ fontSize: 11, color: CB.textLight, marginBottom: 12 }}>Legal guardian if applicable. Leave blank if client is self-guardian.</p>
+              <FormRow>
+                <FormField label="Guardian Name" half>
+                  <input style={fieldStyle} value={form.guardian_name} onChange={e => set("guardian_name", e.target.value)} placeholder="Full name" />
+                </FormField>
+                <FormField label="Relationship" half>
+                  <input style={fieldStyle} value={form.guardian_relation} onChange={e => set("guardian_relation", e.target.value)} placeholder="Mother, father, legal guardian, etc." />
+                </FormField>
+              </FormRow>
+              <FormRow>
+                <FormField label="Guardian Phone" half>
+                  <input style={fieldStyle} type="tel" value={form.guardian_phone} onChange={e => set("guardian_phone", e.target.value)} placeholder="(801) 555-0000" />
+                </FormField>
+                <FormField label="Guardian Address" half>
+                  <input style={fieldStyle} value={form.guardian_address} onChange={e => set("guardian_address", e.target.value)} placeholder="Street, City, State" />
+                </FormField>
+              </FormRow>
 
-          {/* Authorizations Section */}
-          {editing && (
-            <div style={{ marginTop: 8, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
-              <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 12 }}>Service Authorizations</h3>
+              {/* Emergency Contacts */}
+              <div style={{ marginTop: 20, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                  <div>
+                    <h3 style={{ fontSize: 14, fontWeight: 700, color: CB.navy }}>Emergency Contacts ({emergencyContacts.length})</h3>
+                    <p style={{ fontSize: 11, color: CB.textLight, marginTop: 2 }}>Multi-contact list. Add as many as needed.</p>
+                  </div>
+                  <button onClick={addEmergencyContact} style={{ padding: "6px 12px", borderRadius: 7, border: `1px dashed ${CB.teal}`, background: `${CB.teal}08`, color: CB.teal, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 5 }}>
+                    {icons.plus({ size: 12 })} Add
+                  </button>
+                </div>
+                {emergencyContacts.length === 0 ? (
+                  <p style={{ fontSize: 12, color: CB.textLight, fontStyle: "italic" }}>No emergency contacts added.</p>
+                ) : (
+                  <div style={{ display: "grid", gap: 10 }}>
+                    {emergencyContacts.map((c, i) => (
+                      <div key={i} style={{ padding: 12, border: `1px solid ${CB.border}`, borderRadius: 10, background: CB.cream }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "1.4fr 2fr 1.6fr auto", gap: 8, marginBottom: 8 }}>
+                          <input style={fieldStyle} value={c.type || ""} onChange={e => updateEmergencyContact(i, "type", e.target.value)} placeholder="Type (Parent, Sibling, etc.)" />
+                          <input style={fieldStyle} value={c.name || ""} onChange={e => updateEmergencyContact(i, "name", e.target.value)} placeholder="Full name" />
+                          <input style={fieldStyle} value={c.relationship || ""} onChange={e => updateEmergencyContact(i, "relationship", e.target.value)} placeholder="Relationship" />
+                          <button onClick={() => removeEmergencyContact(i)} style={{ padding: 8, borderRadius: 7, border: "none", background: "rgba(229,57,53,0.08)", color: CB.red, cursor: "pointer" }}>{icons.trash({ size: 14 })}</button>
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                          <input style={fieldStyle} value={c.phone || ""} onChange={e => updateEmergencyContact(i, "phone", e.target.value)} placeholder="Phone" />
+                          <input style={fieldStyle} value={c.email || ""} onChange={e => updateEmergencyContact(i, "email", e.target.value)} placeholder="Email" />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Support Coordinator */}
+              <div style={{ marginTop: 20, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
+                <h3 style={{ fontSize: 14, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Support Coordinator</h3>
+                <p style={{ fontSize: 11, color: CB.textLight, marginBottom: 12 }}>DSPD-assigned coordinator. Used in face sheets and SC correspondence.</p>
+                <FormRow>
+                  <FormField label="Coordinator Name" half>
+                    <input style={fieldStyle} value={form.support_coordinator} onChange={e => set("support_coordinator", e.target.value)} placeholder="Coordinator's full name" />
+                  </FormField>
+                  <FormField label="Agency" half>
+                    <input style={fieldStyle} value={form.support_coordinator_agency} onChange={e => set("support_coordinator_agency", e.target.value)} placeholder="e.g. ESMC DSPD Team" />
+                  </FormField>
+                </FormRow>
+                <FormRow>
+                  <FormField label="Phone" half>
+                    <input style={fieldStyle} type="tel" value={form.support_coordinator_phone} onChange={e => set("support_coordinator_phone", e.target.value)} placeholder="(801) 555-0000" />
+                  </FormField>
+                  <FormField label="Email" half>
+                    <input style={fieldStyle} type="email" value={form.support_coordinator_email} onChange={e => set("support_coordinator_email", e.target.value)} placeholder="coordinator@utah.gov" />
+                  </FormField>
+                </FormRow>
+              </div>
+            </div>
+          )}
+
+          {/* ─── INSURANCE ─── */}
+          {tab === "insurance" && (
+            <div style={{ animation: "fadeIn 0.2s ease" }}>
+              <h3 style={{ fontSize: 14, fontWeight: 700, color: CB.navy, marginBottom: 12 }}>Medicaid</h3>
+              <FormRow>
+                <FormField label="Medicaid Plan" half>
+                  <input style={fieldStyle} value={insurance.medicaid_plan} onChange={e => setInsurance(p => ({ ...p, medicaid_plan: e.target.value }))} placeholder="e.g. Molina, SelectHealth Community Care" />
+                </FormField>
+                <FormField label="Medicaid Number" half>
+                  <input style={fieldStyle} value={insurance.medicaid_number} onChange={e => setInsurance(p => ({ ...p, medicaid_number: e.target.value }))} placeholder="Member ID on Medicaid card" />
+                </FormField>
+              </FormRow>
+
+              <div style={{ marginTop: 20, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
+                <h3 style={{ fontSize: 14, fontWeight: 700, color: CB.navy, marginBottom: 12 }}>Primary Insurance</h3>
+                <FormRow>
+                  <FormField label="Plan / Carrier" half>
+                    <input style={fieldStyle} value={insurance.primary.plan} onChange={e => setInsurance(p => ({ ...p, primary: { ...p.primary, plan: e.target.value } }))} placeholder="e.g. Aetna, Cigna" />
+                  </FormField>
+                  <FormField label="Member ID" half>
+                    <input style={fieldStyle} value={insurance.primary.member_id} onChange={e => setInsurance(p => ({ ...p, primary: { ...p.primary, member_id: e.target.value } }))} placeholder="Member ID" />
+                  </FormField>
+                </FormRow>
+                <FormField label="Group Number">
+                  <input style={fieldStyle} value={insurance.primary.group_number} onChange={e => setInsurance(p => ({ ...p, primary: { ...p.primary, group_number: e.target.value } }))} placeholder="Group #" />
+                </FormField>
+              </div>
+
+              <div style={{ marginTop: 20, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
+                <h3 style={{ fontSize: 14, fontWeight: 700, color: CB.navy, marginBottom: 12 }}>Secondary Insurance</h3>
+                <FormRow>
+                  <FormField label="Plan / Carrier" half>
+                    <input style={fieldStyle} value={insurance.secondary.plan} onChange={e => setInsurance(p => ({ ...p, secondary: { ...p.secondary, plan: e.target.value } }))} placeholder="If applicable" />
+                  </FormField>
+                  <FormField label="Member ID" half>
+                    <input style={fieldStyle} value={insurance.secondary.member_id} onChange={e => setInsurance(p => ({ ...p, secondary: { ...p.secondary, member_id: e.target.value } }))} placeholder="Member ID" />
+                  </FormField>
+                </FormRow>
+                <FormField label="Group Number">
+                  <input style={fieldStyle} value={insurance.secondary.group_number} onChange={e => setInsurance(p => ({ ...p, secondary: { ...p.secondary, group_number: e.target.value } }))} placeholder="Group #" />
+                </FormField>
+              </div>
+            </div>
+          )}
+
+          {/* ─── NOTES ─── */}
+          {tab === "notes" && (
+            <div style={{ animation: "fadeIn 0.2s ease" }}>
+              <FormField label="Notes">
+                <textarea style={{ ...fieldStyle, minHeight: 220, resize: "vertical", fontFamily: "inherit" }} value={form.notes} onChange={e => set("notes", e.target.value)} placeholder="Free-form notes about this person — preferences, history, anything that helps staff support them well." />
+              </FormField>
+            </div>
+          )}
+
+          {/* ─── AUTHORIZATIONS ─── */}
+          {tab === "auths" && editing && (
+            <div style={{ animation: "fadeIn 0.2s ease" }}>
+              <h3 style={{ fontSize: 14, fontWeight: 700, color: CB.navy, marginBottom: 12 }}>Service Authorizations</h3>
               {auths.length > 0 && (
                 <div style={{ marginBottom: 16 }}>
                   {auths.map(a => {
                     const aCode = a.service_code_definitions?.code || serviceCodes.find(sc => sc.id === a.service_code_id)?.code || "?";
                     const aRule = BILLING_RULES[aCode];
                     return (
-                    <div key={a.id} style={{
-                      display: "flex", alignItems: "center", justifyContent: "space-between",
-                      padding: "10px 14px", borderRadius: 10, background: CB.cream, marginBottom: 6,
-                      border: `1px solid ${CB.border}`,
-                    }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                        <Badge text={aCode} color={CB.blue} />
-                        {aRule && <span style={{ fontSize: 11, color: CB.textLight, fontWeight: 600 }}>{aRule.label}</span>}
-                        {aRule?.worksheet && <span style={{ fontSize: 10, color: CB.amber, fontWeight: 700, background: `${CB.amber}12`, padding: "1px 6px", borderRadius: 4 }}>WORKSHEET</span>}
-                        <span style={{ fontSize: 13, color: CB.text, fontWeight: 600 }}>{a.used_units || 0} / {a.authorized_units} units</span>
-                        {perms.viewRates && a.rate_per_unit && <span style={{ fontSize: 12, color: CB.teal, fontWeight: 700 }}>@ ${Number(a.rate_per_unit).toFixed(2)}</span>}
-                        {a.end_date && <span style={{ fontSize: 12, color: CB.textLight }}>exp {new Date(a.end_date + "T00:00:00").toLocaleDateString()}</span>}
+                      <div key={a.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", borderRadius: 10, background: CB.cream, marginBottom: 6, border: `1px solid ${CB.border}` }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <Badge text={aCode} color={CB.blue} />
+                          {aRule && <span style={{ fontSize: 11, color: CB.textLight, fontWeight: 600 }}>{aRule.label}</span>}
+                          {aRule?.worksheet && <span style={{ fontSize: 10, color: CB.amber, fontWeight: 700, background: `${CB.amber}12`, padding: "1px 6px", borderRadius: 4 }}>WORKSHEET</span>}
+                          <span style={{ fontSize: 13, color: CB.text, fontWeight: 600 }}>{a.used_units || 0} / {a.authorized_units} units</span>
+                          {perms.viewRates && a.rate_per_unit && <span style={{ fontSize: 12, color: CB.teal, fontWeight: 700 }}>@ ${Number(a.rate_per_unit).toFixed(2)}</span>}
+                          {a.end_date && <span style={{ fontSize: 12, color: CB.textLight }}>exp {new Date(a.end_date + "T00:00:00").toLocaleDateString()}</span>}
+                        </div>
+                        <button onClick={() => removeAuth(a.id)} style={{ padding: "4px 8px", borderRadius: 6, border: "none", background: "rgba(229,57,53,0.08)", color: CB.red, cursor: "pointer", fontSize: 12, fontWeight: 600, fontFamily: "inherit" }}>{icons.trash({ size: 13, color: CB.red })}</button>
                       </div>
-                      <button onClick={() => removeAuth(a.id)} style={{
-                        padding: "4px 8px", borderRadius: 6, border: "none", background: "rgba(229,57,53,0.08)",
-                        color: CB.red, cursor: "pointer", fontSize: 12, fontWeight: 600, fontFamily: "inherit",
-                      }}>{icons.trash({ size: 13, color: CB.red })}</button>
-                    </div>
                     );
                   })}
                 </div>
@@ -1796,15 +2170,10 @@
                   <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} type="number" value={newAuth.authorized_units} onChange={e => setNewAuth(p => ({ ...p, authorized_units: e.target.value }))} placeholder="0" />
                 </div>
                 {perms.viewRates && (
-                <div style={{ flex: "0 0 100px" }}>
-                  <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: isWorksheet ? CB.amber : CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>
-                    {isWorksheet ? "Rate *" : "Rate"}
-                  </label>
-                  <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13, borderColor: isWorksheet ? `${CB.amber}40` : CB.border }}
-                    type="number" step="0.01" value={newAuth.rate_per_unit}
-                    onChange={e => setNewAuth(p => ({ ...p, rate_per_unit: e.target.value }))}
-                    placeholder={newAuthRule ? (isWorksheet ? `≤${newAuthRule.max_rate || "?"}` : `$${newAuthRule.rate || "?"}`) : "$0.00"} />
-                </div>
+                  <div style={{ flex: "0 0 100px" }}>
+                    <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: isWorksheet ? CB.amber : CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>{isWorksheet ? "Rate *" : "Rate"}</label>
+                    <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13, borderColor: isWorksheet ? `${CB.amber}40` : CB.border }} type="number" step="0.01" value={newAuth.rate_per_unit} onChange={e => setNewAuth(p => ({ ...p, rate_per_unit: e.target.value }))} placeholder={newAuthRule ? (isWorksheet ? `≤${newAuthRule.max_rate || "?"}` : `$${newAuthRule.rate || "?"}`) : "$0.00"} />
+                  </div>
                 )}
                 <div style={{ flex: "0 0 130px" }}>
                   <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>Start Date</label>
@@ -1814,20 +2183,14 @@
                   <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>End Date</label>
                   <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} type="date" value={newAuth.end_date} onChange={e => setNewAuth(p => ({ ...p, end_date: e.target.value }))} />
                 </div>
-                <button onClick={addAuth} style={{
-                  padding: "9px 16px", borderRadius: 10, border: `2px dashed ${CB.blue}`,
-                  background: `${CB.blue}08`, color: CB.blue, fontSize: 13, fontWeight: 700,
-                  cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap", marginBottom: 16,
-                  display: "flex", alignItems: "center", gap: 6, transition: "all 0.15s",
-                }}
-                  onMouseEnter={e => { e.currentTarget.style.background = `${CB.blue}15`; e.currentTarget.style.borderStyle = "solid"; }}
-                  onMouseLeave={e => { e.currentTarget.style.background = `${CB.blue}08`; e.currentTarget.style.borderStyle = "dashed"; }}
-                >{icons.plus({ size: 14, color: CB.blue })} Add Auth</button>
+                <button onClick={addAuth} style={{ padding: "9px 16px", borderRadius: 10, border: `2px dashed ${CB.blue}`, background: `${CB.blue}08`, color: CB.blue, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap", marginBottom: 16, display: "flex", alignItems: "center", gap: 6, transition: "all 0.15s" }}>
+                  {icons.plus({ size: 14, color: CB.blue })} Add Auth
+                </button>
               </div>
               {perms.viewRates && isWorksheet && (
                 <div style={{ fontSize: 12, color: CB.amber, fontWeight: 500, marginTop: -8, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
                   {icons.alertTriangle({ size: 13, color: CB.amber })}
-                  Worksheet service — rate is person-specific (max ${newAuthRule?.max_rate?.toFixed(2) || "N/A"}/unit). Enter the rate from the support coordinator's worksheet.
+                  Worksheet service — rate is person-specific (max ${newAuthRule?.max_rate?.toFixed(2) || "N/A"}/unit). Enter rate from SC worksheet.
                 </div>
               )}
               {perms.viewRates && newAuthRule && !isWorksheet && newAuthRule.rate && (
@@ -1838,10 +2201,15 @@
             </div>
           )}
 
-          {/* Documents section */}
-          {editing && <DocumentsSection entityType="client" entityId={editing.id} orgId={orgId} entityData={editing} />}
+          {/* ─── DOCUMENTS ─── */}
+          {tab === "documents" && editing && (
+            <div style={{ animation: "fadeIn 0.2s ease" }}>
+              <DocumentsSection entityType="client" entityId={editing.id} orgId={orgId} entityData={editing} />
+            </div>
+          )}
 
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 16 }}>
+          {/* Footer actions */}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 24, paddingTop: 16, borderTop: `1px solid ${CB.border}` }}>
             <SecondaryButton onClick={onClose}>Cancel</SecondaryButton>
             <PrimaryButton onClick={handleSave} loading={saving}>{icons.save({ size: 16 })} {editing ? "Update" : "Add Client"}</PrimaryButton>
           </div>
