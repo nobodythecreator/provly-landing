@@ -631,7 +631,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.4.5</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.4.6</span>
               </div>
             </div>
             {isMobile && (
@@ -14234,7 +14234,16 @@
       }
 
       function ensureSpace(neededHeight) {
-        const available = PAGE.h - MARGIN.bottom - yFromTop(cursorY);
+        // v19.4.6 — formula was inverted in v19.4 kernel; the old code computed
+        // `cursorY - MARGIN.bottom`, which grows as the cursor moves DOWN the
+        // page, so `available < neededHeight` was almost never true and
+        // newPage() never fired. Result: content silently clipped at the page
+        // bottom (visible on Pablo's Daily Service Log v19.4.5 — 7 entries
+        // shown as "Page 1 of 1" with Wednesday's row cut off mid-line). We
+        // now compute available pdf-lib y-units between the cursor and the
+        // bottom margin: when cursorY is at the top, available ≈ 626; when
+        // near the bottom margin, available approaches 0.
+        const available = yFromTop(cursorY) - MARGIN.bottom;
         if (available < neededHeight) newPage();
       }
 
@@ -14366,8 +14375,9 @@
       // space; if not enough remains on the current page, advances to the next
       // page first. Use to keep table headers, signature pairs, or short
       // metadata cards from getting orphaned at the bottom of a page.
+      // v19.4.6 — formula corrected (same inversion bug as ensureSpace had).
       function keepTogether(estimatedHeight) {
-        const available = PAGE.h - MARGIN.bottom - yFromTop(cursorY);
+        const available = yFromTop(cursorY) - MARGIN.bottom;
         if (available < estimatedHeight) newPage();
       }
 
@@ -14532,11 +14542,16 @@
         m.is_active !== false && !m.end_date && m.service_delivery_contexts
       );
 
+      // v19.4.6 — defensive trim on PID at display time. The trim() in
+      // ClientForm.handleSave only runs on new writes; rows saved before
+      // v19.4.5 still carry trailing whitespace (visible on Pablo Vidalez's
+      // record as "080442017 "). Trim on read so old data renders cleanly
+      // until each record is re-saved.
+      const personPid = ((person.identification_number || person.dspd_pid || "") + "").trim();
+
       const doc = await createHopeHavenPDF({
         title: "Face Sheet",
-        // v19.4.5 — prefer identification_number (current schema) but fall back
-        // to legacy dspd_pid if older orgs still write that column.
-        subtitle: `${person.first_name || ""} ${person.last_name || ""}  ·  PID ${person.identification_number || person.dspd_pid || person.id?.slice(0, 8) || "—"}`,
+        subtitle: `${person.first_name || ""} ${person.last_name || ""}  ·  PID ${personPid || person.id?.slice(0, 8) || "—"}`,
       });
 
       const formatDate = (d) => d ? new Date(d.includes && d.includes("T") ? d : d + "T00:00:00").toLocaleDateString("en-US") : "—";
@@ -14546,7 +14561,7 @@
       doc.fieldRow([
         { label: "Full Name",   value: `${person.first_name || ""} ${person.last_name || ""}`.trim() },
         { label: "Date of Birth", value: formatDate(person.date_of_birth) },
-        { label: "DSPD PID",    value: person.identification_number || person.dspd_pid || "—" },
+        { label: "DSPD PID",    value: personPid || "—" },
       ]);
       doc.fieldRow([
         { label: "Gender",       value: person.gender || "—" },
@@ -14554,7 +14569,11 @@
         { label: "Admission Date", value: formatDate(person.admission_date) },
       ]);
       doc.fieldRow([
-        { label: "Address", value: [person.address_line1, person.city, person.state, person.zip].filter(Boolean).join(", ") || "—" },
+        // v19.4.6 — read `address` (what ClientForm writes) first, fall back
+        // to `address_line1` if a future schema split has both columns. Pablo's
+        // v19.4.5 face sheet rendered as "UT, 84081" because the generator was
+        // reading the wrong column and dropping the street + city silently.
+        { label: "Address", value: [person.address || person.address_line1, person.city, person.state, person.zip].filter(Boolean).join(", ") || "—" },
       ]);
       doc.fieldRow([
         { label: "Primary Phone", value: person.phone || "—" },
@@ -14891,6 +14910,10 @@
           .filter(Boolean);
       };
 
+      // v19.4.6 — defensive trim on PID at display (see Face Sheet for the
+      // full rationale). Old rows saved pre-v19.4.5 carry trailing whitespace.
+      const personPid = ((person.identification_number || person.dspd_pid || "") + "").trim();
+
       // ── BUILD PDF ─────────────────────────────────────────
       const doc = await createHopeHavenPDF({
         title: "Daily Service Log",
@@ -14901,7 +14924,7 @@
       doc.sectionTitle("Client & Reporting Period");
       doc.fieldRow([
         { label: "Client",     value: `${person.first_name || ""} ${person.last_name || ""}`.trim() || "—" },
-        { label: "DSPD PID",   value: person.identification_number || person.dspd_pid || "—" },
+        { label: "DSPD PID",   value: personPid || "—" },
         { label: "Medicaid #", value: person.medicaid_number || "—" },
       ]);
       doc.fieldRow([
@@ -14995,7 +15018,11 @@
             metaParts.push(staffStr);
           }
           if (ctx) metaParts.push(ctx);
-          if (codeName) metaParts.push(codeName);
+          // v19.4.6 — only render the service-code definition name when it
+          // adds new information. Hope Haven's RHS context is literally named
+          // "Residential Habilitation Supports", which equals the code name,
+          // so without this guard the meta line repeats it twice.
+          if (codeName && codeName !== ctx) metaParts.push(codeName);
           metaParts.push(gpsLabel);
           if (n.status && n.status !== "submitted" && n.status !== "approved") {
             metaParts.push(`[${n.status}]`);
