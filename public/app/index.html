@@ -631,7 +631,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.4.6</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.4.7</span>
               </div>
             </div>
             {isMobile && (
@@ -14249,7 +14249,15 @@
 
       // ── PRIMITIVES ─────────────────────────────────────────────
       function sectionTitle(text, opts = {}) {
-        ensureSpace(34);
+        // v19.4.7 — reserve enough space to keep the title bar paired with at
+        // least one line of follow-up content. Previously asked for just 34pt
+        // (its own height), which let titles strand at the bottom of a page
+        // with their content on the next page (Pablo's v19.4.6 Face Sheet:
+        // page 1 ended on "ACKNOWLEDGEMENT" with the body + signatures
+        // pushed to page 2). 80pt covers the title bar + a fieldRow or
+        // paragraph line, which is enough to prevent every orphaning case
+        // we've seen in the catalog.
+        ensureSpace(opts.tightTop ? 34 : 80);
         cursorY += 6;
         page.drawRectangle({
           x: MARGIN.left, y: yFromTop(cursorY + 14), width: CONTENT.w, height: 18, color: navy,
@@ -14556,6 +14564,22 @@
 
       const formatDate = (d) => d ? new Date(d.includes && d.includes("T") ? d : d + "T00:00:00").toLocaleDateString("en-US") : "—";
 
+      // v19.4.7 — schema fallback for fields that may live as scalar columns
+      // OR inside the medical_info jsonb mirror, depending on which schema
+      // version this org is running. We try the scalar first (older schema),
+      // then peek into medical_info (newer jsonb-mirror schema). Callers
+      // never have to think about it.
+      // Also fixes a real bug: medicaid_id was being read but the actual
+      // column is medicaid_number (visible on Pablo's v19.4.6 Face Sheet
+      // showing "—" for Medicaid ID despite the column being populated).
+      const mi = (person.medical_info && typeof person.medical_info === "object") ? person.medical_info : {};
+      const personGender    = person.gender || mi.gender || "";
+      const personEmail     = person.email || mi.email || "";
+      const personMedicaid  = person.medicaid_number || person.medicaid_id || mi.medicaid_number || "";
+      const personAllergies = person.allergies || mi.allergies || "";
+      const personDietary   = person.dietary_restrictions || mi.dietary_restrictions || "";
+      const personLanguage  = person.primary_language || mi.primary_language || "";
+
       // ── PERSON INFORMATION ─────────────────────────────
       doc.sectionTitle("Person Information");
       doc.fieldRow([
@@ -14564,8 +14588,8 @@
         { label: "DSPD PID",    value: personPid || "—" },
       ]);
       doc.fieldRow([
-        { label: "Gender",       value: person.gender || "—" },
-        { label: "Medicaid ID",  value: person.medicaid_id || "—" },
+        { label: "Gender",       value: personGender || "—" },
+        { label: "Medicaid #",   value: personMedicaid || "—" },
         { label: "Admission Date", value: formatDate(person.admission_date) },
       ]);
       doc.fieldRow([
@@ -14577,7 +14601,7 @@
       ]);
       doc.fieldRow([
         { label: "Primary Phone", value: person.phone || "—" },
-        { label: "Email",         value: person.email || "—" },
+        { label: "Email",         value: personEmail || "—" },
       ]);
 
       // ── DIAGNOSES & SUPPORT NEEDS ──────────────────────
@@ -14608,14 +14632,19 @@
           { label: "Secondary Diagnoses", value: person.secondary_diagnoses },
         ]);
       }
-      if (person.allergies) {
+      if (personAllergies) {
         doc.fieldRow([
-          { label: "Allergies", value: person.allergies },
+          { label: "Allergies", value: personAllergies },
         ]);
       }
-      if (person.dietary_restrictions) {
+      if (personDietary) {
         doc.fieldRow([
-          { label: "Dietary Restrictions", value: person.dietary_restrictions },
+          { label: "Dietary Restrictions", value: personDietary },
+        ]);
+      }
+      if (personLanguage) {
+        doc.fieldRow([
+          { label: "Primary Language", value: personLanguage },
         ]);
       }
 
@@ -14695,7 +14724,12 @@
       }
 
       // ── ACKNOWLEDGEMENT / SIGNATURE BLOCK ──────────────
+      // v19.4.7 — keepTogether glues the title + attestation + both signature
+      // blocks (≈170pt total) so the closing block always lands on a single
+      // page. Previously the title could ride to a new page on its own, or
+      // the second signature could be split off below the first.
       doc.spacer(16);
+      doc.keepTogether(180);
       doc.sectionTitle("Acknowledgement");
       doc.paragraph(
         "I acknowledge that the information on this Face Sheet has been reviewed and is accurate to the best of my knowledge. Updates will be made promptly when changes occur.",
@@ -14913,6 +14947,9 @@
       // v19.4.6 — defensive trim on PID at display (see Face Sheet for the
       // full rationale). Old rows saved pre-v19.4.5 carry trailing whitespace.
       const personPid = ((person.identification_number || person.dspd_pid || "") + "").trim();
+      // v19.4.7 — schema fallback for medicaid (scalar OR medical_info jsonb)
+      const _mi = (person.medical_info && typeof person.medical_info === "object") ? person.medical_info : {};
+      const personMedicaid = person.medicaid_number || person.medicaid_id || _mi.medicaid_number || "";
 
       // ── BUILD PDF ─────────────────────────────────────────
       const doc = await createHopeHavenPDF({
@@ -14925,7 +14962,7 @@
       doc.fieldRow([
         { label: "Client",     value: `${person.first_name || ""} ${person.last_name || ""}`.trim() || "—" },
         { label: "DSPD PID",   value: personPid || "—" },
-        { label: "Medicaid #", value: person.medicaid_number || "—" },
+        { label: "Medicaid #", value: personMedicaid || "—" },
       ]);
       doc.fieldRow([
         { label: "Period Start", value: formatDateShort(periodStart) },
@@ -15089,7 +15126,12 @@
       }
 
       // ── SIGNATURES ────────────────────────────────────────
+      // v19.4.7 — see Face Sheet for keepTogether rationale. The Daily
+      // Service Log has the additional risk of landing right after the
+      // hours-per-code table, which can leave 100–200pt of mixed space; we
+      // pin the close-out so it never splits across pages.
       doc.spacer(10);
+      doc.keepTogether(180);
       doc.sectionTitle("Acknowledgement");
       doc.paragraph(
         "I attest that the services documented above were provided as described, and that the times, units, and narratives accurately reflect the support delivered to this person during the reporting period.",
