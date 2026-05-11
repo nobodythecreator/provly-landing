@@ -13,7 +13,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
-  <!-- v19.6.0: training_topic_definitions now tenant-scoped (each provider's training program is their own) -->
+  <!-- v19.6.1: in-app training topic editor (Training → Topic Definitions) -->
   <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@pdf-lib/fontkit@1.1.1/dist/fontkit.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
@@ -706,7 +706,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.6.0</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.6.1</span>
               </div>
             </div>
             {isMobile && (
@@ -2209,6 +2209,8 @@
     };
 
     function TrainingPage() {
+      const { orgId } = useAuth();
+      const { addToast } = useToast();
       const [tab, setTab] = useState("bystaff");
       const [completions, setCompletions] = useState([]);
       const [topics, setTopics] = useState([]);
@@ -2217,6 +2219,11 @@
       const [loading, setLoading] = useState(true);
       const [formOpen, setFormOpen] = useState(false);
       const [selectedStaff, setSelectedStaff] = useState(null);
+
+      // v19.6.1 — topic CRUD state
+      const [topicEditing, setTopicEditing] = useState(null);
+      const [topicFormOpen, setTopicFormOpen] = useState(false);
+      const [showArchived, setShowArchived] = useState(false);
 
       // v19.3 — training decks + competency state
       const [decks, setDecks] = useState([]);
@@ -2237,7 +2244,18 @@
         setLoading(true);
         const [compRes, topicRes, staffRes] = await Promise.all([
           supabase.from("staff_trainings").select("id, staff_id, training_topic_id, completed_at, expires_at, certificate_url, staff(first_name, last_name), training_topic_definitions(topic_name, category)").order("completed_at", { ascending: false }).limit(200),
-          supabase.from("training_topic_definitions").select("id, topic_name, category, deadline_days, renewal_months, requires_certification").order("category, topic_name"),
+          // v19.6.1 — include is_active for soft-delete filtering. If the column
+          // doesn't exist yet (pre-migration), retry without it so the page
+          // still renders.
+          (async () => {
+            const r = await supabase.from("training_topic_definitions").select("id, topic_name, category, deadline_days, renewal_months, requires_certification, is_active").order("category, topic_name");
+            if (r.error && /column .*is_active.* does not exist/i.test(r.error.message || "")) {
+              const fallback = await supabase.from("training_topic_definitions").select("id, topic_name, category, deadline_days, renewal_months, requires_certification").order("category, topic_name");
+              if (!fallback.error) fallback.data = (fallback.data || []).map(t => ({ ...t, is_active: true }));
+              return fallback;
+            }
+            return r;
+          })(),
           supabase.from("staff").select("id, first_name, last_name, role, hire_date, is_active").eq("is_active", true).order("last_name"),
         ]);
         if (!compRes.error) { setCompletions(compRes.data || []); setAllTrainings(compRes.data || []); }
@@ -2449,56 +2467,157 @@
             <div style={{ animation: "fadeIn 0.3s ease" }}>
               {loading ? (
                 <div style={{ display: "flex", justifyContent: "center", padding: 48 }}><Spinner size={24} /></div>
-              ) : topics.length === 0 ? (
-                <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>No training topics found</div>
               ) : (() => {
-                // Group topics by category
-                const grouped = {};
-                topics.forEach(t => {
-                  const cat = t.category || "uncategorized";
-                  if (!grouped[cat]) grouped[cat] = [];
-                  grouped[cat].push(t);
-                });
-                // Sort categories by meta order
-                const sortedCats = Object.keys(grouped).sort((a, b) => {
-                  return (getCategoryMeta(a).order || 99) - (getCategoryMeta(b).order || 99);
-                });
+                // v19.6.1 — filter by archived toggle. Archived topics (is_active=false)
+                // hidden by default. The toggle reveals them, dimmed, with Unarchive
+                // actions instead of Archive — so retired topics can come back without
+                // requiring DBA access.
+                const visibleTopics = topics.filter(t => showArchived ? !t.is_active : t.is_active !== false);
+                const totalActive = topics.filter(t => t.is_active !== false).length;
+                const totalArchived = topics.filter(t => t.is_active === false).length;
+
+                const handleArchive = async (topic) => {
+                  if (!window.confirm(`Archive "${topic.topic_name}"?\n\nIt will be hidden from "Log Training" dropdowns. Historical staff training records will still resolve correctly.`)) return;
+                  const { error } = await supabase.from("training_topic_definitions").update({ is_active: false }).eq("id", topic.id);
+                  if (error) {
+                    if (/column .*is_active.* does not exist/i.test(error.message || "")) {
+                      addToast("Run the v19.6.1 migration first (adds is_active column)", "error");
+                    } else {
+                      addToast(`Archive failed: ${error.message}`, "error");
+                    }
+                    return;
+                  }
+                  addToast(`Archived "${topic.topic_name}"`, "success");
+                  loadAll();
+                };
+
+                const handleUnarchive = async (topic) => {
+                  const { error } = await supabase.from("training_topic_definitions").update({ is_active: true }).eq("id", topic.id);
+                  if (error) return addToast(`Restore failed: ${error.message}`, "error");
+                  addToast(`Restored "${topic.topic_name}"`, "success");
+                  loadAll();
+                };
+
                 return (
                   <div>
-                    <div style={{ marginBottom: 14, fontSize: 13, color: CB.textMid }}>
-                      <strong style={{ color: CB.navy }}>{topics.length}</strong> total topics across <strong style={{ color: CB.navy }}>{sortedCats.length}</strong> {sortedCats.length === 1 ? "category" : "categories"}
+                    {/* Tab header: counts + actions */}
+                    <div style={{
+                      display: "flex", alignItems: "center", justifyContent: "space-between",
+                      gap: 12, marginBottom: 14, flexWrap: "wrap",
+                    }}>
+                      <div style={{ fontSize: 13, color: CB.textMid }}>
+                        <strong style={{ color: CB.navy }}>{totalActive}</strong> active {totalActive === 1 ? "topic" : "topics"}
+                        {totalArchived > 0 && <span style={{ color: CB.textLight }}> · {totalArchived} archived</span>}
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                        {totalArchived > 0 && (
+                          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: CB.textMid, cursor: "pointer" }}>
+                            <input type="checkbox" checked={showArchived} onChange={e => setShowArchived(e.target.checked)} />
+                            Show archived
+                          </label>
+                        )}
+                        <PrimaryButton onClick={() => { setTopicEditing(null); setTopicFormOpen(true); }}>{icons.plus({ size: 15 })} New Topic</PrimaryButton>
+                      </div>
                     </div>
-                    {sortedCats.map((cat, i) => {
-                      const meta = getCategoryMeta(cat);
-                      const list = grouped[cat];
+
+                    {visibleTopics.length === 0 ? (
+                      <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>
+                        {showArchived ? "No archived topics." : "No training topics yet. Click 'New Topic' to define your first one."}
+                      </div>
+                    ) : (() => {
+                      // Group filtered topics by category
+                      const grouped = {};
+                      visibleTopics.forEach(t => {
+                        const cat = t.category || "uncategorized";
+                        if (!grouped[cat]) grouped[cat] = [];
+                        grouped[cat].push(t);
+                      });
+                      const sortedCats = Object.keys(grouped).sort((a, b) => {
+                        return (getCategoryMeta(a).order || 99) - (getCategoryMeta(b).order || 99);
+                      });
                       return (
-                        <CollapsibleTimeGroup key={cat} label={meta.label} count={list.length} defaultOpen={i < 2} accentColor={meta.color}>
-                          {meta.description && <div style={{ fontSize: 12, color: CB.textLight, fontStyle: "italic", marginBottom: 10 }}>{meta.description}</div>}
-                          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                            {list.map(t => (
-                              <div key={t.id} style={{
-                                display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
-                                padding: "10px 14px", borderRadius: 10, background: CB.cream,
-                                border: `1px solid ${CB.border}`, flexWrap: "wrap",
-                              }}>
-                                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                                  <span style={{ fontSize: 14, fontWeight: 600, color: CB.navy }}>{t.topic_name}</span>
-                                  {t.requires_certification && <Badge text="Cert Required" color={CB.red} />}
+                        <div>
+                          {sortedCats.map((cat, i) => {
+                            const meta = getCategoryMeta(cat);
+                            const list = grouped[cat];
+                            return (
+                              <CollapsibleTimeGroup key={cat} label={meta.label} count={list.length} defaultOpen={i < 2} accentColor={meta.color}>
+                                {meta.description && <div style={{ fontSize: 12, color: CB.textLight, fontStyle: "italic", marginBottom: 10 }}>{meta.description}</div>}
+                                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                  {list.map(t => {
+                                    const archived = t.is_active === false;
+                                    return (
+                                      <div key={t.id} style={{
+                                        display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+                                        padding: "10px 14px", borderRadius: 10,
+                                        background: archived ? "transparent" : CB.cream,
+                                        border: `1px solid ${CB.border}`, flexWrap: "wrap",
+                                        opacity: archived ? 0.55 : 1,
+                                      }}>
+                                        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", minWidth: 0, flex: 1 }}>
+                                          <span style={{ fontSize: 14, fontWeight: 600, color: CB.navy }}>{t.topic_name}</span>
+                                          {t.requires_certification && <Badge text="Cert Required" color={CB.red} />}
+                                          {archived && <Badge text="Archived" color={CB.textLight} />}
+                                        </div>
+                                        <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12, color: CB.textMid }}>
+                                          {t.deadline_days && <span>Due within <strong>{t.deadline_days}d</strong></span>}
+                                          {t.renewal_months && <span>Renew every <strong>{t.renewal_months}mo</strong></span>}
+                                          {!t.deadline_days && !t.renewal_months && <span style={{ fontStyle: "italic" }}>One-time</span>}
+                                          <div style={{ display: "flex", gap: 6, marginLeft: 6 }}>
+                                            <button
+                                              onClick={() => { setTopicEditing(t); setTopicFormOpen(true); }}
+                                              style={{
+                                                padding: "4px 10px", borderRadius: 6, border: `1px solid ${CB.border}`,
+                                                background: CB.white, color: CB.textMid, fontWeight: 600, fontSize: 11,
+                                                fontFamily: "inherit", cursor: "pointer",
+                                              }}
+                                              onMouseEnter={e => { e.currentTarget.style.borderColor = CB.navy; e.currentTarget.style.color = CB.navy; }}
+                                              onMouseLeave={e => { e.currentTarget.style.borderColor = CB.border; e.currentTarget.style.color = CB.textMid; }}
+                                            >Edit</button>
+                                            {archived ? (
+                                              <button
+                                                onClick={() => handleUnarchive(t)}
+                                                style={{
+                                                  padding: "4px 10px", borderRadius: 6, border: `1px solid ${CB.border}`,
+                                                  background: CB.white, color: CB.teal, fontWeight: 600, fontSize: 11,
+                                                  fontFamily: "inherit", cursor: "pointer",
+                                                }}
+                                              >Restore</button>
+                                            ) : (
+                                              <button
+                                                onClick={() => handleArchive(t)}
+                                                style={{
+                                                  padding: "4px 10px", borderRadius: 6, border: `1px solid ${CB.border}`,
+                                                  background: CB.white, color: CB.textMid, fontWeight: 600, fontSize: 11,
+                                                  fontFamily: "inherit", cursor: "pointer",
+                                                }}
+                                                onMouseEnter={e => { e.currentTarget.style.borderColor = CB.red; e.currentTarget.style.color = CB.red; }}
+                                                onMouseLeave={e => { e.currentTarget.style.borderColor = CB.border; e.currentTarget.style.color = CB.textMid; }}
+                                              >Archive</button>
+                                            )}
+                                          </div>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
                                 </div>
-                                <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12, color: CB.textMid }}>
-                                  {t.deadline_days && <span>Due within <strong>{t.deadline_days}d</strong></span>}
-                                  {t.renewal_months && <span>Renew every <strong>{t.renewal_months}mo</strong></span>}
-                                  {!t.deadline_days && !t.renewal_months && <span style={{ fontStyle: "italic" }}>One-time</span>}
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </CollapsibleTimeGroup>
+                              </CollapsibleTimeGroup>
+                            );
+                          })}
+                        </div>
                       );
-                    })}
+                    })()}
                   </div>
                 );
               })()}
+              <TrainingTopicForm
+                open={topicFormOpen}
+                onClose={() => setTopicFormOpen(false)}
+                onSaved={loadAll}
+                editing={topicEditing}
+                existingCategories={Array.from(new Set(topics.map(t => t.category).filter(Boolean))).sort()}
+                orgId={orgId}
+              />
             </div>
           )}
           {/* v19.3 — TRAINING DECKS tab */}
@@ -2638,6 +2757,210 @@
 
           <TrainingLogForm open={formOpen} onClose={() => setFormOpen(false)} onSaved={loadAll} />
         </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // v19.6.1 — TRAINING TOPIC FORM
+    // CRUD modal for training_topic_definitions. Required: topic_name.
+    // Optional: category (dropdown of existing + inline "+ New category"),
+    // deadline_days, renewal_months, requires_certification.
+    // Category UX deliberately funnels toward reuse — "Add new" is a small
+    // affordance, not the default path. Prevents the taxonomy from drifting
+    // into Medication/Medications/Med Admin chaos.
+    // ═══════════════════════════════════════════════════════════════
+    function TrainingTopicForm({ open, onClose, onSaved, editing, existingCategories, orgId }) {
+      const { addToast } = useToast();
+      const [saving, setSaving] = useState(false);
+      const [addingCategory, setAddingCategory] = useState(false);
+      const [newCategory, setNewCategory] = useState("");
+      const [form, setForm] = useState({
+        topic_name: "",
+        category: "",
+        deadline_days: "",
+        renewal_months: "",
+        requires_certification: false,
+      });
+
+      useEffect(() => {
+        if (!open) return;
+        if (editing) {
+          setForm({
+            topic_name: editing.topic_name || "",
+            category: editing.category || "",
+            deadline_days: editing.deadline_days != null ? String(editing.deadline_days) : "",
+            renewal_months: editing.renewal_months != null ? String(editing.renewal_months) : "",
+            requires_certification: !!editing.requires_certification,
+          });
+        } else {
+          setForm({
+            topic_name: "",
+            category: existingCategories[0] || "",
+            deadline_days: "",
+            renewal_months: "",
+            requires_certification: false,
+          });
+        }
+        setAddingCategory(false);
+        setNewCategory("");
+      }, [open, editing]);
+
+      const set = (key, val) => setForm(f => ({ ...f, [key]: val }));
+
+      const canSave = form.topic_name.trim().length > 0 && form.category.trim().length > 0;
+
+      const handleSave = async () => {
+        if (!canSave) return;
+        setSaving(true);
+        try {
+          const payload = {
+            topic_name: form.topic_name.trim(),
+            category: form.category.trim(),
+            deadline_days: form.deadline_days === "" ? null : Number(form.deadline_days),
+            renewal_months: form.renewal_months === "" ? null : Number(form.renewal_months),
+            requires_certification: form.requires_certification,
+          };
+          if (editing) {
+            const { error } = await supabase.from("training_topic_definitions").update(payload).eq("id", editing.id);
+            if (error) throw error;
+            addToast(`Updated "${payload.topic_name}"`, "success");
+          } else {
+            // New topics need org_id (NOT NULL after v19.6.0 migration). is_active
+            // defaults to true at the column level, so we don't have to send it.
+            const { error } = await supabase.from("training_topic_definitions").insert({ ...payload, org_id: orgId });
+            if (error) throw error;
+            addToast(`Added "${payload.topic_name}"`, "success");
+          }
+          onSaved && onSaved();
+          onClose();
+        } catch (err) {
+          // Surface common pre-migration failure modes with a clear message.
+          if (/column .*org_id.* (does not exist|of relation)/i.test(err.message || "")) {
+            addToast("Run the v19.6.0 migration first (adds org_id to training_topic_definitions)", "error");
+          } else if (/null value in column .*org_id/i.test(err.message || "")) {
+            addToast("Org context missing — try signing out and back in", "error");
+          } else {
+            addToast(`Save failed: ${err.message || "unknown error"}`, "error");
+          }
+        }
+        setSaving(false);
+      };
+
+      const fs = {
+        width: "100%", padding: "10px 14px", borderRadius: 10,
+        border: `1px solid ${CB.border}`, fontSize: 14, fontFamily: "inherit",
+        background: CB.white, color: CB.navy, boxSizing: "border-box",
+      };
+      const label = { fontSize: 12, fontWeight: 600, color: CB.textMid, display: "block", marginBottom: 4 };
+
+      return (
+        <Modal open={open} onClose={onClose} title={editing ? "Edit Training Topic" : "New Training Topic"} width={560}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <div>
+              <label style={label}>Topic Name *</label>
+              <input style={fs} value={form.topic_name} onChange={e => set("topic_name", e.target.value)} placeholder="e.g. Medication Administration" />
+            </div>
+
+            <div>
+              <label style={label}>Category *</label>
+              {addingCategory ? (
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input
+                    style={fs} value={newCategory} autoFocus
+                    onChange={e => setNewCategory(e.target.value)}
+                    placeholder="e.g. Safety & Emergency"
+                  />
+                  <button
+                    onClick={() => {
+                      if (newCategory.trim()) {
+                        set("category", newCategory.trim());
+                        setAddingCategory(false);
+                      }
+                    }}
+                    style={{
+                      padding: "10px 16px", borderRadius: 8, border: "none",
+                      background: CB.teal, color: CB.white, fontWeight: 600, fontSize: 13,
+                      fontFamily: "inherit", cursor: "pointer", flexShrink: 0,
+                    }}
+                  >Use</button>
+                  <button
+                    onClick={() => { setAddingCategory(false); setNewCategory(""); }}
+                    style={{
+                      padding: "10px 14px", borderRadius: 8, border: `1px solid ${CB.border}`,
+                      background: CB.white, color: CB.textMid, fontWeight: 600, fontSize: 13,
+                      fontFamily: "inherit", cursor: "pointer", flexShrink: 0,
+                    }}
+                  >Cancel</button>
+                </div>
+              ) : (
+                <div style={{ display: "flex", gap: 8 }}>
+                  <select style={{ ...fs, flex: 1 }} value={form.category} onChange={e => set("category", e.target.value)}>
+                    {existingCategories.length === 0 && <option value="">(no categories yet — add one)</option>}
+                    {existingCategories.map(c => <option key={c} value={c}>{c}</option>)}
+                    {/* If editing a topic with a category not in the list (rare race), preserve it */}
+                    {form.category && !existingCategories.includes(form.category) && (
+                      <option value={form.category}>{form.category}</option>
+                    )}
+                  </select>
+                  <button
+                    onClick={() => setAddingCategory(true)}
+                    style={{
+                      padding: "10px 14px", borderRadius: 8, border: `1px solid ${CB.border}`,
+                      background: CB.white, color: CB.textMid, fontWeight: 600, fontSize: 13,
+                      fontFamily: "inherit", cursor: "pointer", flexShrink: 0,
+                    }}
+                  >+ New</button>
+                </div>
+              )}
+              <div style={{ fontSize: 11, color: CB.textLight, marginTop: 4 }}>
+                Prefer reusing an existing category. New categories should be rare.
+              </div>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div>
+                <label style={label}>Deadline (days from hire)</label>
+                <input style={fs} type="number" min="0" value={form.deadline_days} onChange={e => set("deadline_days", e.target.value)} placeholder="e.g. 30" />
+                <div style={{ fontSize: 11, color: CB.textLight, marginTop: 4 }}>Blank = no fixed deadline</div>
+              </div>
+              <div>
+                <label style={label}>Renewal (months)</label>
+                <input style={fs} type="number" min="0" value={form.renewal_months} onChange={e => set("renewal_months", e.target.value)} placeholder="e.g. 12" />
+                <div style={{ fontSize: 11, color: CB.textLight, marginTop: 4 }}>Blank = one-time, no expiration</div>
+              </div>
+            </div>
+
+            <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.cream, cursor: "pointer" }}>
+              <input type="checkbox" checked={form.requires_certification} onChange={e => set("requires_certification", e.target.checked)} />
+              <span style={{ fontSize: 13, color: CB.navy, fontWeight: 600 }}>Requires certification</span>
+              <span style={{ fontSize: 12, color: CB.textMid }}>— upload a cert file when logging completion (e.g. CPR card, MAR cert)</span>
+            </label>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, paddingTop: 8, borderTop: `1px solid ${CB.border}` }}>
+              <button
+                onClick={onClose}
+                disabled={saving}
+                style={{
+                  padding: "10px 18px", borderRadius: 8, border: `1px solid ${CB.border}`,
+                  background: CB.white, color: CB.textMid, fontWeight: 600, fontSize: 13,
+                  fontFamily: "inherit", cursor: saving ? "wait" : "pointer",
+                  opacity: saving ? 0.6 : 1,
+                }}
+              >Cancel</button>
+              <button
+                onClick={handleSave}
+                disabled={saving || !canSave}
+                style={{
+                  padding: "10px 22px", borderRadius: 8, border: "none",
+                  background: canSave ? CB.teal : CB.textLight,
+                  color: CB.white, fontWeight: 600, fontSize: 13,
+                  fontFamily: "inherit", cursor: saving ? "wait" : (canSave ? "pointer" : "not-allowed"),
+                  opacity: saving ? 0.6 : 1,
+                }}
+              >{saving ? "Saving…" : (editing ? "Save changes" : "Create topic")}</button>
+            </div>
+          </div>
+        </Modal>
       );
     }
 
