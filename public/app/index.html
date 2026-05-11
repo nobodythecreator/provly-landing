@@ -13,7 +13,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
-  <!-- v19.5.1: optional identifier fields no longer inherit Hope Haven defaults -->
+  <!-- v19.5.2: tenant logo upload + PDF header embedding -->
   <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@pdf-lib/fontkit@1.1.1/dist/fontkit.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
@@ -258,7 +258,7 @@
       const signOut = () => supabase.auth.signOut();
 
       return (
-        <AuthContext.Provider value={{ user, session, loading, signIn, signOut, orgId, staffProfile, role, permissions, navItems, enforcement, brand }}>
+        <AuthContext.Provider value={{ user, session, loading, signIn, signOut, orgId, staffProfile, role, permissions, navItems, enforcement, brand, refetchBrand: fetchOrgId }}>
           {children}
         </AuthContext.Provider>
       );
@@ -706,7 +706,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.5.1</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.5.2</span>
               </div>
             </div>
             {isMobile && (
@@ -13959,9 +13959,10 @@
       const [tab, setTab] = useState("org");
       const { isMobile } = useMobile();
 
-      // Defines the left-side settings nav. Easy to add Branding, Billing, API Keys, etc later.
+      // Defines the left-side settings nav. Easy to add Billing, API Keys, etc later.
       const SETTINGS_SECTIONS = [
         { key: "org",         label: "Org Structure",          icon: icons.dashboard, desc: "Programs, sites, and reporting hierarchy" },
+        { key: "branding",    label: "Branding",               icon: icons.image    || icons.fileText, desc: "Logo for PDFs and audit forms" },
         { key: "enforcement", label: "Compliance Enforcement", icon: icons.shield,    desc: "Role permissions and training rules" },
       ];
 
@@ -14008,6 +14009,7 @@
             {/* Active section content */}
             <div style={{ minWidth: 0 }}>
               {tab === "org" && <OrgUnitsPageEmbedded />}
+              {tab === "branding" && <BrandingSettings />}
               {tab === "enforcement" && <EnforcementSettings />}
             </div>
           </div>
@@ -14018,6 +14020,209 @@
     // Wrapper: render OrgUnitsPage without its own PageHeader since SettingsPage provides one
     function OrgUnitsPageEmbedded() {
       return <OrgUnitsPage hideHeader />;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // v19.5.2 — BRANDING SETTINGS
+    // Upload a logo (PNG/JPG, ≤2MB) that renders on every PDF header.
+    // Storage bucket: `org_logos` — path `{org_id}/logo.{ext}`. Public
+    // read (logos aren't sensitive — they appear on docs that leave
+    // the building). Writes scoped to authenticated users via RLS.
+    // Read-only display of the other branding fields (legal_name,
+    // address, phone, etc) — these populate via SQL today; an in-app
+    // editor for them is a future v19.5.x.
+    // ═══════════════════════════════════════════════════════════════
+    function BrandingSettings() {
+      const { orgId, brand, refetchBrand } = useAuth();
+      const { addToast } = useToast();
+      const [uploading, setUploading] = useState(false);
+      const [removing, setRemoving] = useState(false);
+      const fileInputRef = useRef(null);
+
+      const MAX_BYTES = 2 * 1024 * 1024; // 2MB
+      const ACCEPTED = ["image/png", "image/jpeg"];
+
+      const handlePick = () => {
+        if (fileInputRef.current) fileInputRef.current.click();
+      };
+
+      const handleFile = async (e) => {
+        const file = e.target.files && e.target.files[0];
+        // Always clear the input so picking the same file twice in a row still fires onChange
+        if (fileInputRef.current) fileInputRef.current.value = "";
+        if (!file) return;
+        if (!ACCEPTED.includes(file.type)) {
+          addToast("Logo must be PNG or JPG", "error");
+          return;
+        }
+        if (file.size > MAX_BYTES) {
+          addToast(`Logo must be ≤ 2MB (this file is ${(file.size / 1024 / 1024).toFixed(1)}MB)`, "error");
+          return;
+        }
+        setUploading(true);
+        try {
+          const ext = file.type === "image/png" ? "png" : "jpg";
+          // Stable filename per org. Overwriting is intentional — only one
+          // active logo per org. Cache-busting via the upserted URL's query.
+          const path = `${orgId}/logo.${ext}`;
+          const { error: upErr } = await supabase.storage
+            .from("org_logos")
+            .upload(path, file, { upsert: true, contentType: file.type, cacheControl: "3600" });
+          if (upErr) throw upErr;
+          // Public URL — the bucket is configured for public read so PDFs
+          // can fetch the bytes without auth headers during generation.
+          const { data: pub } = supabase.storage.from("org_logos").getPublicUrl(path);
+          // Append a cache-buster so subsequent fetches see the new image
+          // immediately rather than the previously-cached one.
+          const url = `${pub.publicUrl}?v=${Date.now()}`;
+          const { error: dbErr } = await supabase
+            .from("organizations")
+            .update({ logo_url: url })
+            .eq("id", orgId);
+          if (dbErr) throw dbErr;
+          await refetchBrand();
+          addToast("Logo uploaded — generate a PDF to see it on the header", "success");
+        } catch (err) {
+          addToast(`Upload failed: ${err.message || "unknown error"}`, "error");
+        }
+        setUploading(false);
+      };
+
+      const handleRemove = async () => {
+        if (!brand.logoUrl) return;
+        if (!window.confirm("Remove the logo from all future PDFs?")) return;
+        setRemoving(true);
+        try {
+          // Best-effort delete of both possible extensions. Errors ignored —
+          // the database column clear is what actually disables the logo.
+          await supabase.storage.from("org_logos").remove([`${orgId}/logo.png`, `${orgId}/logo.jpg`]).catch(() => {});
+          const { error: dbErr } = await supabase
+            .from("organizations")
+            .update({ logo_url: null })
+            .eq("id", orgId);
+          if (dbErr) throw dbErr;
+          await refetchBrand();
+          addToast("Logo removed", "success");
+        } catch (err) {
+          addToast(`Remove failed: ${err.message || "unknown error"}`, "error");
+        }
+        setRemoving(false);
+      };
+
+      const card = {
+        background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`,
+        boxShadow: CB.cardShadow, padding: 24, marginBottom: 16,
+      };
+      const label = { fontSize: 11, fontWeight: 700, color: CB.textLight, letterSpacing: 0.4, textTransform: "uppercase", marginBottom: 4 };
+      const value = { fontSize: 14, color: CB.navy, fontWeight: 500 };
+
+      return (
+        <div>
+          {/* Logo card */}
+          <div style={card}>
+            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+              <div style={{ flex: 1, minWidth: 220 }}>
+                <h3 style={{ fontSize: 16, fontWeight: 700, color: CB.navy, margin: "0 0 4px" }}>Organization Logo</h3>
+                <p style={{ fontSize: 13, color: CB.textMid, margin: "0 0 12px", lineHeight: 1.5 }}>
+                  Renders on the top-left of every PDF header. PNG or JPG, up to 2MB.
+                  Square or horizontal logos work best — they're scaled to a maximum height of ~½ inch.
+                </p>
+              </div>
+            </div>
+
+            <div style={{
+              display: "flex", alignItems: "center", gap: 20, padding: 16,
+              border: `1px dashed ${CB.border}`, borderRadius: 10, background: CB.cream,
+              marginBottom: 16,
+            }}>
+              {/* Preview */}
+              <div style={{
+                width: 96, height: 96, borderRadius: 10, background: CB.white,
+                border: `1px solid ${CB.border}`, display: "flex", alignItems: "center",
+                justifyContent: "center", overflow: "hidden", flexShrink: 0,
+              }}>
+                {brand.logoUrl ? (
+                  <img src={brand.logoUrl} alt="Logo preview" style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} />
+                ) : (
+                  <div style={{ fontSize: 10, color: CB.textLight, textAlign: "center", padding: 8 }}>No logo<br/>uploaded</div>
+                )}
+              </div>
+              {/* Actions */}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, color: CB.textMid, marginBottom: 10 }}>
+                  {brand.logoUrl
+                    ? "This logo will appear on every PDF generated from this point forward. Previously generated PDFs are not retroactively updated."
+                    : "Without a logo, PDF headers render the organization name as text only."}
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button
+                    onClick={handlePick}
+                    disabled={uploading || removing}
+                    style={{
+                      padding: "9px 16px", borderRadius: 8, border: "none",
+                      background: CB.teal, color: CB.white, fontWeight: 600, fontSize: 13,
+                      fontFamily: "inherit", cursor: uploading ? "wait" : "pointer",
+                      opacity: uploading || removing ? 0.6 : 1,
+                    }}
+                  >
+                    {uploading ? "Uploading…" : (brand.logoUrl ? "Replace logo" : "Upload logo")}
+                  </button>
+                  {brand.logoUrl && (
+                    <button
+                      onClick={handleRemove}
+                      disabled={uploading || removing}
+                      style={{
+                        padding: "9px 16px", borderRadius: 8, border: `1px solid ${CB.border}`,
+                        background: CB.white, color: CB.textMid, fontWeight: 600, fontSize: 13,
+                        fontFamily: "inherit", cursor: removing ? "wait" : "pointer",
+                        opacity: uploading || removing ? 0.6 : 1,
+                      }}
+                    >
+                      {removing ? "Removing…" : "Remove"}
+                    </button>
+                  )}
+                </div>
+                <input
+                  ref={fileInputRef} type="file" accept="image/png,image/jpeg"
+                  onChange={handleFile} style={{ display: "none" }}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Read-only branding values card */}
+          <div style={card}>
+            <h3 style={{ fontSize: 16, fontWeight: 700, color: CB.navy, margin: "0 0 4px" }}>Branding Details</h3>
+            <p style={{ fontSize: 13, color: CB.textMid, margin: "0 0 16px" }}>
+              These values appear on every PDF and in the dashboard subtitle. To change them, update the <code style={{ background: CB.cream, padding: "1px 6px", borderRadius: 4, fontSize: 12 }}>organizations</code> row in Supabase — an in-app editor is coming in a future release.
+            </p>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+              <div><div style={label}>Legal Name</div><div style={value}>{brand.orgName || "—"}</div></div>
+              <div><div style={label}>Display Name</div><div style={value}>{brand.orgDisplayName || "—"}</div></div>
+              <div style={{ gridColumn: "1 / -1" }}><div style={label}>Address</div><div style={value}>{brand.orgAddress || "—"}</div></div>
+              <div><div style={label}>Phone</div><div style={value}>{brand.orgPhone || "—"}</div></div>
+              <div><div style={label}>Email</div><div style={value}>{brand.orgEmail || "—"}</div></div>
+              <div><div style={label}>Contract Number</div><div style={value}>{brand.orgContractNumber || "—"}</div></div>
+              <div><div style={label}>Award Number</div><div style={value}>{brand.orgContractAwardNumber || <span style={{ color: CB.textLight }}>Not set</span>}</div></div>
+              <div><div style={label}>FEIN</div><div style={value}>{brand.orgFEIN || <span style={{ color: CB.textLight }}>Not set</span>}</div></div>
+              <div>
+                <div style={label}>Primary Color</div>
+                <div style={{ ...value, display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ width: 16, height: 16, borderRadius: 4, background: `#${brand.navyHex}`, border: `1px solid ${CB.border}` }} />
+                  #{brand.navyHex}
+                </div>
+              </div>
+              <div>
+                <div style={label}>Accent Color</div>
+                <div style={{ ...value, display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ width: 16, height: 16, borderRadius: 4, background: `#${brand.tealHex}`, border: `1px solid ${CB.border}` }} />
+                  #{brand.tealHex}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -14278,6 +14483,39 @@
       const border = rgb(0.88, 0.90, 0.93);
       const cream = rgb(0.97, 0.98, 0.99);
 
+      // v19.5.2 — fetch and embed the tenant logo ONCE per document. Drawn on
+      // every page in drawHeader below. If anything goes wrong — missing URL,
+      // 404, CORS, malformed image, unsupported format — we silently fall back
+      // to text-only header. PDFs must always render; a broken logo is not an
+      // acceptable failure mode mid-audit.
+      let logoImage = null;
+      let logoW = 0, logoH = 0;
+      if (brand.logoUrl) {
+        try {
+          const resp = await fetch(brand.logoUrl, { cache: "force-cache" });
+          if (resp.ok) {
+            const bytes = await resp.arrayBuffer();
+            const ct = (resp.headers.get("content-type") || "").toLowerCase();
+            const url = brand.logoUrl.toLowerCase();
+            const isJpg = ct.includes("jpeg") || ct.includes("jpg")
+                       || url.endsWith(".jpg") || url.endsWith(".jpeg");
+            logoImage = isJpg
+              ? await pdfDoc.embedJpg(bytes)
+              : await pdfDoc.embedPng(bytes);
+            // Scale to a max height of 36pt (~half an inch). Aspect ratio
+            // preserved. Logos taller than wide stay legible; logos wider than
+            // tall don't crowd the org name text — drawHeader shifts text right
+            // by (logoW + 12pt gap) when a logo is present.
+            const maxH = 36;
+            const scale = logoImage.height > maxH ? maxH / logoImage.height : 1;
+            logoW = logoImage.width * scale;
+            logoH = logoImage.height * scale;
+          }
+        } catch (_) {
+          logoImage = null;
+        }
+      }
+
       // State per render — current page, cursor (y position growing downward), page size
       const PAGE = { w: 612, h: 792 }; // US Letter
       const MARGIN = { top: 96, bottom: 64, left: 56, right: 56 };
@@ -14303,12 +14541,25 @@
       function drawHeader() {
         // Top accent bar
         page.drawRectangle({ x: 0, y: PAGE.h - 8, width: PAGE.w, height: 8, color: teal });
+        // v19.5.2 — if a logo embedded successfully, draw it at MARGIN.left
+        // vertically centered in the text stack (org name @ 36, address @ 50,
+        // identifier @ 62 → middle ≈ 49). All subsequent left-aligned text
+        // shifts right by (logoW + 12pt) to leave room.
+        const textLeft = MARGIN.left + (logoImage ? logoW + 12 : 0);
+        if (logoImage) {
+          page.drawImage(logoImage, {
+            x: MARGIN.left,
+            y: yFromTop(49) - logoH / 2,
+            width: logoW,
+            height: logoH,
+          });
+        }
         // Org name + identifier (left)
         page.drawText((brand.orgName || "").toUpperCase(), {
-          x: MARGIN.left, y: yFromTop(36), size: 11, font: fontBold, color: navy,
+          x: textLeft, y: yFromTop(36), size: 11, font: fontBold, color: navy,
         });
         page.drawText(`${brand.orgAddress || ""}  ·  ${brand.orgPhone || ""}`, {
-          x: MARGIN.left, y: yFromTop(50), size: 8, font: fontRegular, color: textMid,
+          x: textLeft, y: yFromTop(50), size: 8, font: fontRegular, color: textMid,
         });
         // v19.5 — identifier line shows whatever the tenant has. Contract is
         // the primary state-side identifier (DHHS91172 for Hope Haven). Award
@@ -14320,7 +14571,7 @@
         if (brand.orgFEIN)                idParts.push(`FEIN: ${brand.orgFEIN}`);
         if (idParts.length) {
           page.drawText(idParts.join("  ·  "), {
-            x: MARGIN.left, y: yFromTop(62), size: 8, font: fontRegular, color: textLight,
+            x: textLeft, y: yFromTop(62), size: 8, font: fontRegular, color: textLight,
           });
         }
         // Document title (right)
