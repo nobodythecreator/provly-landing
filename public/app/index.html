@@ -13,7 +13,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
-  <!-- v19.7.5: RBAC cleanup — align roles to DB enum, define compliance_director and supervisor properly -->
+  <!-- v19.7.6: mobile EVV GPS UX — browser-specific help modal when location is blocked -->
   <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@pdf-lib/fontkit@1.1.1/dist/fontkit.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
@@ -1094,7 +1094,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.7.5</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.7.6</span>
               </div>
             </div>
             {isMobile && (
@@ -7109,6 +7109,176 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // v19.7.6 — GPS error interpretation + browser-specific help
+    // EVV clock-in legally requires GPS. When the browser blocks location,
+    // the raw error ("User denied Geolocation") is useless to a DSP in the
+    // field. These helpers translate the error into plain language and give
+    // step-by-step re-enable instructions for the user's actual browser.
+    // ═══════════════════════════════════════════════════════════════
+
+    // Detect the browser/platform so we can give precise instructions.
+    // iOS is special: every browser there uses WebKit, but Chrome/Firefox
+    // wrap it with their own permission layer, so the fix differs.
+    function detectBrowserPlatform() {
+      const ua = navigator.userAgent || "";
+      const isIOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+      const isAndroid = /Android/.test(ua);
+      // On iOS, Chrome identifies as "CriOS", Firefox as "FxiOS", Edge as "EdgiOS"
+      const isChromeIOS = /CriOS/.test(ua);
+      const isFirefoxIOS = /FxiOS/.test(ua);
+      const isSafariIOS = isIOS && !isChromeIOS && !isFirefoxIOS && /Safari/.test(ua);
+      const isChrome = /Chrome/.test(ua) && !/Edg/.test(ua) && !isChromeIOS;
+      const isFirefox = /Firefox/.test(ua) && !isFirefoxIOS;
+      const isSafariDesktop = /Safari/.test(ua) && !/Chrome/.test(ua) && !isIOS;
+      if (isChromeIOS) return "chrome-ios";
+      if (isFirefoxIOS) return "firefox-ios";
+      if (isSafariIOS) return "safari-ios";
+      if (isAndroid && isChrome) return "chrome-android";
+      if (isAndroid) return "android-other";
+      if (isChrome) return "chrome-desktop";
+      if (isFirefox) return "firefox-desktop";
+      if (isSafariDesktop) return "safari-desktop";
+      return "unknown";
+    }
+
+    // Map a geolocation error code to a short, human explanation + whether
+    // it's a permission problem (which has fix steps) or something else.
+    function interpretGpsError(err) {
+      // GeolocationPositionError codes: 1=PERMISSION_DENIED, 2=POSITION_UNAVAILABLE, 3=TIMEOUT
+      const code = err && typeof err.code === "number" ? err.code : null;
+      const msg = (err && err.message) || "";
+      if (code === 1 || /denied|permission/i.test(msg)) {
+        return {
+          kind: "permission",
+          short: "Location access is blocked",
+          detail: "Provly needs your location to clock in (required for EVV billing). Your browser is currently blocking it.",
+          showHelp: true,
+        };
+      }
+      if (code === 2 || /unavailable/i.test(msg)) {
+        return {
+          kind: "unavailable",
+          short: "Can't get a GPS signal",
+          detail: "Your device couldn't determine its location. Move to a spot with better signal (near a window or outside) and try again.",
+          showHelp: false,
+        };
+      }
+      if (code === 3 || /timeout/i.test(msg)) {
+        return {
+          kind: "timeout",
+          short: "Location took too long",
+          detail: "Getting a GPS fix timed out. Make sure location is on, then try again — it's often faster on the second attempt.",
+          showHelp: false,
+        };
+      }
+      if (/not supported/i.test(msg)) {
+        return {
+          kind: "unsupported",
+          short: "This browser can't do GPS",
+          detail: "Your browser doesn't support location. Try Safari (iPhone) or Chrome (Android) instead.",
+          showHelp: false,
+        };
+      }
+      return {
+        kind: "other",
+        short: "Couldn't capture location",
+        detail: msg || "Something went wrong getting your location. Try again.",
+        showHelp: true,
+      };
+    }
+
+    // Step-by-step instructions per browser/platform for re-enabling location.
+    function gpsFixInstructions(platform) {
+      switch (platform) {
+        case "safari-ios":
+          return {
+            title: "Enable location in Safari (iPhone)",
+            steps: [
+              "Tap the \u201cAA\u201d (or page settings) icon on the left of the address bar.",
+              "Tap \u201cWebsite Settings.\u201d",
+              "Set \u201cLocation\u201d to \u201cAllow.\u201d",
+              "Close this dialog and tap Clock In again \u2014 tap \u201cAllow\u201d when the prompt appears.",
+            ],
+            fallback: "Still stuck? Settings \u2192 Privacy & Security \u2192 Location Services \u2192 make sure it\u2019s ON, then find Safari Websites and set to \u201cWhile Using.\u201d",
+          };
+        case "chrome-ios":
+          return {
+            title: "Enable location in Chrome (iPhone)",
+            steps: [
+              "Chrome on iPhone needs iOS permission first: open Settings \u2192 Chrome \u2192 Location \u2192 set to \u201cWhile Using the App.\u201d",
+              "Back in Chrome, tap the \u201c\u2026\u201d menu \u2192 the lock/settings icon by the address bar.",
+              "Set Location for getprovly.com to \u201cAllow.\u201d",
+              "If it still fails, the most reliable fix on iPhone is to use Safari instead of Chrome.",
+            ],
+            fallback: "Quickest path on iPhone: open getprovly.com in Safari and clock in there. Safari\u2019s location handling is more reliable on iOS.",
+          };
+        case "firefox-ios":
+          return {
+            title: "Enable location in Firefox (iPhone)",
+            steps: [
+              "Open Settings \u2192 Firefox \u2192 Location \u2192 \u201cWhile Using the App.\u201d",
+              "Reload getprovly.com and try Clock In again.",
+              "If it still fails, use Safari instead \u2014 it\u2019s the most reliable browser for location on iPhone.",
+            ],
+            fallback: "Quickest path on iPhone: open getprovly.com in Safari and clock in there.",
+          };
+        case "chrome-android":
+          return {
+            title: "Enable location in Chrome (Android)",
+            steps: [
+              "Tap the lock icon (or \u201c\u24d8\u201d) to the left of getprovly.com in the address bar.",
+              "Tap \u201cPermissions\u201d \u2192 \u201cLocation\u201d \u2192 \u201cAllow.\u201d",
+              "Also check Android Settings \u2192 Location is ON, and Chrome has location permission.",
+              "Reload the page and tap Clock In again.",
+            ],
+            fallback: "Still stuck? Android Settings \u2192 Apps \u2192 Chrome \u2192 Permissions \u2192 Location \u2192 Allow.",
+          };
+        case "chrome-desktop":
+          return {
+            title: "Enable location in Chrome",
+            steps: [
+              "Click the location/lock icon to the left of getprovly.com in the address bar.",
+              "Set \u201cLocation\u201d to \u201cAllow.\u201d",
+              "Reload the page and click Clock In again.",
+            ],
+            fallback: "Also check your computer\u2019s system location services are enabled for your browser.",
+          };
+        case "firefox-desktop":
+          return {
+            title: "Enable location in Firefox",
+            steps: [
+              "Click the lock icon to the left of getprovly.com in the address bar.",
+              "Clear the \u201cBlocked\u201d location permission, or set it to \u201cAllow.\u201d",
+              "Reload the page and click Clock In again.",
+            ],
+            fallback: "Also check your computer\u2019s system location services are enabled.",
+          };
+        case "safari-desktop":
+          return {
+            title: "Enable location in Safari (Mac)",
+            steps: [
+              "Safari menu \u2192 Settings \u2192 Websites \u2192 Location.",
+              "Find getprovly.com and set it to \u201cAllow.\u201d",
+              "Also check System Settings \u2192 Privacy & Security \u2192 Location Services is ON for Safari.",
+              "Reload the page and click Clock In again.",
+            ],
+            fallback: "macOS may need a restart of Safari after changing Location Services.",
+          };
+        default:
+          return {
+            title: "Enable location for getprovly.com",
+            steps: [
+              "Look for a location or lock icon near your browser\u2019s address bar.",
+              "Set location permission for getprovly.com to \u201cAllow.\u201d",
+              "Make sure your device\u2019s system location services are turned on.",
+              "Reload the page and try Clock In again.",
+            ],
+            fallback: "On a phone, Safari (iPhone) or Chrome (Android) tend to be the most reliable for location.",
+          };
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // MODULE 5: EVV CLOCK IN / OUT — GPS-based with geofence
     // ═══════════════════════════════════════════════════════════════
     function EVVPage() {
@@ -7128,6 +7298,9 @@
       const [editingEVV, setEditingEVV] = useState(false);
       const [evvEditForm, setEvvEditForm] = useState({});
       const [savingEVV, setSavingEVV] = useState(false);
+      // v19.7.6 — GPS error help modal. When location is denied, instead of
+      // a dead-end red toast, we surface a modal with browser-specific steps.
+      const [gpsHelp, setGpsHelp] = useState(null); // null | { context: "in"|"out", error: {...} }
       const [clientEvvAuths, setClientEvvAuths] = useState([]);
       const [clientContexts, setClientContexts] = useState([]); // v19.2 — contexts the picked client is a member of
       // v19.3 — competency data
@@ -7368,7 +7541,20 @@
           setShowClockIn(false);
           loadAll();
         } catch (e) {
-          addToast(e.message || "Clock-in failed", "error");
+          // v19.7.6 — distinguish GPS errors (which have a code) from other
+          // failures. GPS permission errors open the help modal; other GPS
+          // errors get a clearer toast; non-GPS errors keep the raw message.
+          const isGpsError = (e && typeof e.code === "number") || /geolocation|gps|location|denied|timeout|unavailable/i.test(e.message || "");
+          if (isGpsError) {
+            const info = interpretGpsError(e);
+            if (info.showHelp) {
+              setGpsHelp({ context: "in", error: info });
+            } else {
+              addToast(info.short + " \u2014 " + info.detail, "error");
+            }
+          } else {
+            addToast(e.message || "Clock-in failed", "error");
+          }
         }
         setClockingIn(false);
         setGpsStatus(null);
@@ -7401,7 +7587,18 @@
           }
           loadAll();
         } catch (e) {
-          addToast(e.message || "Clock-out failed", "error");
+          // v19.7.6 — same GPS interpretation as clock-in
+          const isGpsError = (e && typeof e.code === "number") || /geolocation|gps|location|denied|timeout|unavailable/i.test(e.message || "");
+          if (isGpsError) {
+            const info = interpretGpsError(e);
+            if (info.showHelp) {
+              setGpsHelp({ context: "out", error: info });
+            } else {
+              addToast(info.short + " \u2014 " + info.detail, "error");
+            }
+          } else {
+            addToast(e.message || "Clock-out failed", "error");
+          }
         }
         setClockingOut(null);
         setGpsStatus(null);
@@ -7735,6 +7932,72 @@
               </PrimaryButton>
             </div>
           </Modal>
+
+          {/* v19.7.6 — GPS Help Modal: browser-specific location fix steps */}
+          {gpsHelp && (() => {
+            const platform = detectBrowserPlatform();
+            const fix = gpsFixInstructions(platform);
+            return (
+              <Modal open={true} onClose={() => setGpsHelp(null)} title={gpsHelp.error.short} subtitle={gpsHelp.error.detail}>
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{
+                    padding: "12px 16px", borderRadius: 10, background: "rgba(229,57,53,0.06)",
+                    border: "1px solid rgba(229,57,53,0.18)", marginBottom: 18,
+                    display: "flex", gap: 10, alignItems: "flex-start",
+                  }}>
+                    {icons.alertTriangle ? icons.alertTriangle({ size: 18, color: CB.red }) : null}
+                    <div style={{ fontSize: 13, color: CB.text, lineHeight: 1.5 }}>
+                      EVV billing requires a GPS location at clock-{gpsHelp.context === "out" ? "out" : "in"}. Follow the steps below to enable location, then try again.
+                    </div>
+                  </div>
+
+                  <div style={{ fontSize: 14, fontWeight: 700, color: CB.navy, marginBottom: 12 }}>{fix.title}</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
+                    {fix.steps.map((step, i) => (
+                      <div key={i} style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                        <div style={{
+                          flexShrink: 0, width: 22, height: 22, borderRadius: 11,
+                          background: CB.blue, color: CB.white, fontSize: 12, fontWeight: 700,
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                        }}>{i + 1}</div>
+                        <div style={{ fontSize: 13, color: CB.text, lineHeight: 1.5, paddingTop: 1 }}>{step}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {fix.fallback && (
+                    <div style={{
+                      padding: "10px 14px", borderRadius: 10, background: CB.cream,
+                      border: `1px solid ${CB.border}`, fontSize: 12, color: CB.textMid, lineHeight: 1.5,
+                    }}>
+                      <strong style={{ color: CB.textMid }}>Tip: </strong>{fix.fallback}
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 12 }}>
+                  <SecondaryButton onClick={() => setGpsHelp(null)}>Close</SecondaryButton>
+                  <PrimaryButton
+                    color={CB.blue}
+                    onClick={() => {
+                      const ctx = gpsHelp.context;
+                      setGpsHelp(null);
+                      // Re-attempt the action the user was trying to do.
+                      if (ctx === "out") {
+                        const active = sessions.find(s => !s.clock_out_at);
+                        if (active) handleClockOut(active.id);
+                        else addToast("No active session to clock out", "error");
+                      } else {
+                        handleClockIn();
+                      }
+                    }}
+                  >
+                    {icons.crosshair ? icons.crosshair({ size: 16 }) : null} Try Again
+                  </PrimaryButton>
+                </div>
+              </Modal>
+            );
+          })()}
         </div>
       );
     }
