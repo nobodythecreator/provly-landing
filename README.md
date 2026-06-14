@@ -2,7 +2,7 @@
 
 **We Got Compliance. You Got Care.**
 
-The only compliance platform built specifically for DSPD providers. A product of Hope Haven Services Inc.
+The only compliance platform built specifically for DSPD providers by a Provider. 
 
 ---
 
