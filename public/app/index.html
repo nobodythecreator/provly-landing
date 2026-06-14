@@ -1936,7 +1936,7 @@
 
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 8, flexWrap: "wrap" }}>
             <SecondaryButton onClick={onClose}>Close</SecondaryButton>
-            {onViewFull && <SecondaryButton onClick={() => { onClose(); onViewFull(staff.id); }}>{icons.externalLink ? icons.externalLink({ size: 14 }) : "↗"} View Full Profile</SecondaryButton>}
+            {onViewFull && <SecondaryButton onClick={() => { onClose(); onViewFull(staff.id); }}>{icons.arrowRight ? icons.arrowRight({ size: 14 }) : "↗"} View Full Profile</SecondaryButton>}
             <PrimaryButton onClick={() => { onClose(); onEdit(staff); }}>{icons.edit({ size: 15 })} Edit</PrimaryButton>
           </div>
         </Modal>
@@ -2480,7 +2480,7 @@
 
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 8, flexWrap: "wrap" }}>
             <SecondaryButton onClick={onClose}>Close</SecondaryButton>
-            {onViewFull && <SecondaryButton onClick={() => { onClose(); onViewFull(client.id); }}>{icons.externalLink ? icons.externalLink({ size: 14 }) : "↗"} View Full Profile</SecondaryButton>}
+            {onViewFull && <SecondaryButton onClick={() => { onClose(); onViewFull(client.id); }}>{icons.arrowRight ? icons.arrowRight({ size: 14 }) : "↗"} View Full Profile</SecondaryButton>}
             <PrimaryButton onClick={() => { onClose(); onEdit(client); }}>{icons.edit({ size: 15 })} Edit</PrimaryButton>
           </div>
         </Modal>
@@ -15166,7 +15166,7 @@
                 cursor: busy === "portal" ? "wait" : "pointer", fontFamily: "inherit",
                 display: "inline-flex", alignItems: "center", gap: 8, opacity: busy === "portal" ? 0.7 : 1,
               }}>
-                {icons.externalLink({ size: 15, color: CB.white })}
+                {icons.arrowRight({ size: 15, color: CB.white })}
                 {busy === "portal" ? "Opening…" : "Manage billing & invoices"}
               </button>
             )}
