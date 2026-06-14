@@ -13,6 +13,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <!-- v19.8: Stripe subscription billing (TEST mode) — Settings → Subscription, trial banner, soft tier limits, checkout/portal via edge functions -->
   <!-- v19.7.6: mobile EVV GPS UX — browser-specific help modal when location is blocked -->
   <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@pdf-lib/fontkit@1.1.1/dist/fontkit.umd.min.js"></script>
@@ -78,6 +79,67 @@
     );
 
     // ═══════════════════════════════════════════════════════════════
+    // v19.8 — STRIPE BILLING (TEST MODE)
+    // ═══════════════════════════════════════════════════════════════
+    // Supabase edge functions are served from <project>.supabase.co/functions/v1.
+    const FUNCTIONS_BASE = "https://zsrnqbmzgypldraifjho.supabase.co/functions/v1";
+
+    // Tier metadata. TEST-mode price IDs — swap for live ids at go-live (that
+    // plus the secret-key swap is the ONLY code change at the flip). cap =
+    // max "users" = active staff + active clients. Enterprise = contact sales.
+    const TIER_META = {
+      starter:    { name: "Starter",    price: 99,   cap: 10,   priceId: "price_1TZcoKGwLlvZ0hAZhJ42EdWc" },
+      growth:     { name: "Growth",     price: 299,  cap: 50,   priceId: "price_1TZcpaGwLlvZ0hAZ49guorUW" },
+      scale:      { name: "Scale",      price: 599,  cap: 250,  priceId: "price_1TZcqYGwLlvZ0hAZ4hb39WfW" },
+      enterprise: { name: "Enterprise", price: null, cap: 1000, priceId: null },
+    };
+    const TIER_ORDER = ["starter", "growth", "scale", "enterprise"];
+
+    // Status pill styling for the 4-value subscription_status enum.
+    const SUB_STATUS_META = {
+      trial:    { label: "Trial",     color: "#1A73E8" },
+      active:   { label: "Active",    color: "#2E7D32" },
+      past_due: { label: "Past Due",  color: "#F57F17" },
+      canceled: { label: "Canceled",  color: "#E53935" },
+    };
+
+    // Call a billing edge function with the signed-in user's JWT.
+    async function callBillingFn(path, body) {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetch(`${FUNCTIONS_BASE}/${path}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session?.access_token ?? ""}`,
+        },
+        body: JSON.stringify(body),
+      });
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(out.error || `Request failed (${res.status})`);
+      return out;
+    }
+
+    // Soft tier-limit advisory — NON-BLOCKING. Called after a successful
+    // staff/client create. Never blocks the save; just nudges to upgrade when
+    // the org is at/over its plan's user cap.
+    async function checkTierSoftLimit(orgId, addToast) {
+      try {
+        const { data: org } = await supabase.from("organizations")
+          .select("subscription_tier").eq("id", orgId).maybeSingle();
+        const meta = TIER_META[org?.subscription_tier];
+        if (!meta || !meta.cap) return;
+        const [staffRes, clientRes] = await Promise.all([
+          supabase.from("staff").select("id", { count: "exact", head: true }).eq("is_active", true),
+          supabase.from("persons").select("id", { count: "exact", head: true }).eq("is_active", true),
+        ]);
+        const used = (staffRes.count || 0) + (clientRes.count || 0);
+        if (used >= meta.cap) {
+          addToast(`You're at ${used}/${meta.cap} users on the ${meta.name} plan. Upgrade in Settings \u2192 Subscription to add more.`, "warning");
+        }
+      } catch (_) { /* advisory only — never block a save */ }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // AUTH CONTEXT
     // ═══════════════════════════════════════════════════════════════
     const AuthContext = createContext(null);
@@ -113,6 +175,7 @@
     const ROLE_PERMISSIONS = {
       // Owner — final authority. Sees and does everything.
       owner: {
+        viewSubscription: true, manageSubscription: true,
         viewRates: true, viewBilling: true, viewCompliance: true,
         viewAllClients: true, viewAllStaff: true,
         editStaff: true, editClients: true,
@@ -122,6 +185,7 @@
       // Admin — office manager / executive admin. Runs operations.
       // Same as owner except cannot change other users' roles.
       admin: {
+        viewSubscription: true, manageSubscription: false,
         viewRates: true, viewBilling: true, viewCompliance: true,
         viewAllClients: true, viewAllStaff: true,
         editStaff: true, editClients: true,
@@ -134,6 +198,7 @@
       // territory) or manage roles. Currently held by Siamon at Hope
       // Haven; will become an executive with equity as the org grows.
       compliance_director: {
+        viewSubscription: true, manageSubscription: false,
         viewRates: true, viewBilling: true, viewCompliance: true,
         viewAllClients: true, viewAllStaff: true,
         editStaff: false, editClients: true,
@@ -145,6 +210,7 @@
       // house manager. Mid-trust operational role; does NOT see rates
       // or billing (financial info reserved for management).
       supervisor: {
+        viewSubscription: false, manageSubscription: false,
         viewRates: false, viewBilling: false, viewCompliance: true,
         viewAllClients: true, viewAllStaff: true,
         editStaff: false, editClients: true,
@@ -156,6 +222,7 @@
       // completes the margin capture of RHS + BC services. Sees all
       // clients for medical oversight, can edit medical fields.
       rn: {
+        viewSubscription: false, manageSubscription: false,
         viewRates: false, viewBilling: false, viewCompliance: true,
         viewAllClients: true, viewAllStaff: false,
         editStaff: false, editClients: true,
@@ -167,6 +234,7 @@
       // and clients on their schedule. No financial, no compliance,
       // no audit, no reports. Minimal trust surface.
       dsp: {
+        viewSubscription: false, manageSubscription: false,
         viewRates: false, viewBilling: false, viewCompliance: false,
         viewAllClients: false, viewAllStaff: false,
         editStaff: false, editClients: false,
@@ -215,6 +283,9 @@
       // "Hope Haven Services Inc." (the DEFAULT_BRAND) before the real
       // tenant's chrome renders.
       const [brandReady, setBrandReady] = useState(false);
+      // v19.8 — billing/subscription columns from the organizations row.
+      // Null until hydrated (or if the billing columns aren't present yet).
+      const [subscription, setSubscription] = useState(null);
 
       const fetchOrgId = async () => {
         // v19.5 dev override — `?org=<uuid>` lets you preview another tenant's
@@ -302,6 +373,14 @@
           } catch (_) {
             // Branding columns don't exist yet — DEFAULT_BRAND stays active.
           }
+          // v19.8 — load subscription/billing columns in their own select so a
+          // missing column never breaks branding/enforcement above.
+          try {
+            const { data: sub } = await supabase.from("organizations")
+              .select("subscription_status, subscription_tier, trial_ends_at, stripe_customer_id, stripe_subscription_id")
+              .eq("id", resolvedOrgId).maybeSingle();
+            if (sub) setSubscription(sub);
+          } catch (_) { /* billing columns absent — leave subscription null */ }
         } finally {
           // v19.7.4 — release the brand-gate regardless of how we exited.
           // Even on error / missing-org / pre-migration paths, App must
@@ -364,7 +443,7 @@
       const signOut = () => supabase.auth.signOut();
 
       return (
-        <AuthContext.Provider value={{ user, session, loading, brandReady, signIn, signOut, orgId, staffProfile, role, permissions, navItems, enforcement, brand, refetchBrand: fetchOrgId }}>
+        <AuthContext.Provider value={{ user, session, loading, brandReady, signIn, signOut, orgId, staffProfile, role, permissions, navItems, enforcement, brand, refetchBrand: fetchOrgId, subscription, refetchSubscription: fetchOrgId }}>
           {children}
         </AuthContext.Provider>
       );
@@ -1094,7 +1173,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.7.6</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.8</span>
               </div>
             </div>
             {isMobile && (
@@ -1716,6 +1795,7 @@
           }
         } else {
           addToast(editing ? "Staff member updated" : "Staff member added", "success");
+          if (!editing) checkTierSoftLimit(orgId, addToast); // v19.8 soft cap nudge
           onSaved();
           onClose();
         }
@@ -2093,6 +2173,7 @@
           addToast(result.error.message, "error");
         } else {
           addToast(editing ? "Client updated" : "Client added", "success");
+          if (!editing) checkTierSoftLimit(orgId, addToast); // v19.8 soft cap nudge
           onSaved();
           onClose();
         }
@@ -14932,17 +15013,252 @@
     // ═══════════════════════════════════════════════════════════════
     // v19.3 — SETTINGS PAGE
     // Wraps Org Structure as a tab and adds Compliance Enforcement.
+    // ═══════════════════════════════════════════════════════════════
+    // v19.8 — TRIAL / BILLING BANNER
+    // Renders across the top of the app when the trial is ending (≤7 days),
+    // or when billing needs attention (past_due / canceled).
+    // ═══════════════════════════════════════════════════════════════
+    function TrialBanner({ subscription, onUpgrade }) {
+      if (!subscription) return null;
+      const status = subscription.subscription_status;
+      const trialEnds = subscription.trial_ends_at ? new Date(subscription.trial_ends_at) : null;
+      const daysLeft = trialEnds ? Math.ceil((trialEnds - new Date()) / 86400000) : null;
+
+      let show = false, bg = CB.blue, msg = "", cta = "View plans";
+      if (status === "trial" && daysLeft !== null && daysLeft <= 7) {
+        show = true;
+        if (daysLeft <= 0) { bg = CB.red; msg = "Your free trial has ended. Choose a plan to keep full access."; cta = "Choose a plan"; }
+        else { bg = CB.amber; msg = `Your free trial ends in ${daysLeft} day${daysLeft === 1 ? "" : "s"}. Pick a plan to avoid interruption.`; cta = "Choose a plan"; }
+      } else if (status === "past_due") {
+        show = true; bg = CB.amber; msg = "A payment didn't go through. Update your billing to avoid losing access."; cta = "Fix billing";
+      } else if (status === "canceled") {
+        show = true; bg = CB.red; msg = "Your subscription is canceled. Reactivate to restore full access."; cta = "Reactivate";
+      }
+      if (!show) return null;
+
+      return (
+        <div style={{
+          background: bg, color: CB.white, borderRadius: 10, padding: "12px 18px",
+          marginBottom: 20, display: "flex", alignItems: "center", justifyContent: "space-between",
+          gap: 14, flexWrap: "wrap", boxShadow: "0 2px 12px rgba(10,30,51,0.12)",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 14, fontWeight: 600 }}>
+            {icons.alertTriangle({ size: 18, color: CB.white })}
+            <span>{msg}</span>
+          </div>
+          <button onClick={onUpgrade} style={{
+            background: CB.white, color: bg, border: "none", borderRadius: 8,
+            padding: "8px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer",
+            fontFamily: "inherit", whiteSpace: "nowrap",
+          }}>{cta}</button>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // v19.8 — SUBSCRIPTION SETTINGS
+    // Owner/admin/compliance_director can VIEW (viewSubscription). Only owner
+    // can act (manageSubscription) — subscribe, upgrade, open the billing
+    // portal. Soft tier limits: usage meter turns amber/red over cap, never
+    // blocks. Checkout + portal go through the Supabase edge functions.
+    // ═══════════════════════════════════════════════════════════════
+    function SubscriptionSettings() {
+      const { orgId, subscription, permissions, refetchSubscription } = useAuth();
+      const { addToast } = useToast();
+      const { isMobile } = useMobile();
+      const [usage, setUsage] = useState(null);
+      const [busy, setBusy] = useState(null); // tier key or "portal" while a request is in flight
+
+      const canManage = !!permissions.manageSubscription;
+
+      useEffect(() => {
+        let cancelled = false;
+        (async () => {
+          try {
+            const [staffRes, clientRes] = await Promise.all([
+              supabase.from("staff").select("id", { count: "exact", head: true }).eq("is_active", true),
+              supabase.from("persons").select("id", { count: "exact", head: true }).eq("is_active", true),
+            ]);
+            if (!cancelled) setUsage({ staff: staffRes.count || 0, clients: clientRes.count || 0 });
+          } catch (_) { if (!cancelled) setUsage({ staff: 0, clients: 0 }); }
+        })();
+        return () => { cancelled = true; };
+      }, [orgId]);
+
+      const tierKey = subscription?.subscription_tier;
+      const status = subscription?.subscription_status;
+      const meta = TIER_META[tierKey];
+      const statusMeta = SUB_STATUS_META[status] || { label: status || "—", color: CB.textLight };
+      const trialEnds = subscription?.trial_ends_at ? new Date(subscription.trial_ends_at) : null;
+      const daysLeft = trialEnds ? Math.ceil((trialEnds - new Date()) / 86400000) : null;
+
+      const used = usage ? usage.staff + usage.clients : null;
+      const cap = meta?.cap || null;
+      const pct = (used !== null && cap) ? Math.min(100, Math.round((used / cap) * 100)) : 0;
+      const over = (used !== null && cap) ? used >= cap : false;
+      const meterColor = over ? CB.red : pct >= 80 ? CB.amber : CB.teal;
+
+      const handleSubscribe = async (key) => {
+        if (!canManage) return addToast("Only the account owner can change billing.", "error");
+        const t = TIER_META[key];
+        if (!t?.priceId) return;
+        setBusy(key);
+        try {
+          const origin = window.location.origin;
+          const { url } = await callBillingFn("create-checkout-session", {
+            orgId,
+            priceId: t.priceId,
+            successUrl: `${origin}/app?checkout=success`,
+            cancelUrl: `${origin}/app?checkout=cancel`,
+          });
+          if (url) window.location.href = url;
+          else throw new Error("No checkout URL returned");
+        } catch (err) {
+          addToast(err.message || "Could not start checkout", "error");
+          setBusy(null);
+        }
+      };
+
+      const handlePortal = async () => {
+        if (!canManage) return addToast("Only the account owner can change billing.", "error");
+        setBusy("portal");
+        try {
+          const { url } = await callBillingFn("create-portal-session", {
+            orgId, returnUrl: `${window.location.origin}/app`,
+          });
+          if (url) window.location.href = url;
+          else throw new Error("No portal URL returned");
+        } catch (err) {
+          addToast(err.message || "Could not open billing portal", "error");
+          setBusy(null);
+        }
+      };
+
+      const card = { background: CB.white, border: `1px solid ${CB.border}`, borderRadius: 12, padding: 20, boxShadow: CB.cardShadow };
+
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+
+          {/* Current plan + status */}
+          <div style={card}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, letterSpacing: 0.5, textTransform: "uppercase" }}>Current plan</div>
+                <div style={{ fontSize: 26, fontWeight: 800, color: CB.navy, marginTop: 2 }}>
+                  {meta ? meta.name : "—"}
+                  {meta?.price ? <span style={{ fontSize: 15, fontWeight: 600, color: CB.textMid }}> · ${meta.price}/mo</span> : null}
+                </div>
+              </div>
+              <span style={{
+                background: `${statusMeta.color}18`, color: statusMeta.color,
+                fontSize: 13, fontWeight: 700, padding: "6px 14px", borderRadius: 999,
+              }}>{statusMeta.label}</span>
+            </div>
+            {status === "trial" && daysLeft !== null && (
+              <div style={{ marginTop: 12, fontSize: 13, color: daysLeft <= 7 ? CB.amber : CB.textMid, fontWeight: 600 }}>
+                {daysLeft <= 0 ? "Trial ended" : `${daysLeft} day${daysLeft === 1 ? "" : "s"} left in your free trial`}
+              </div>
+            )}
+            {subscription?.stripe_customer_id && canManage && (
+              <button onClick={handlePortal} disabled={busy === "portal"} style={{
+                marginTop: 16, background: CB.navy, color: CB.white, border: "none",
+                borderRadius: 9, padding: "10px 18px", fontSize: 13, fontWeight: 700,
+                cursor: busy === "portal" ? "wait" : "pointer", fontFamily: "inherit",
+                display: "inline-flex", alignItems: "center", gap: 8, opacity: busy === "portal" ? 0.7 : 1,
+              }}>
+                {icons.externalLink({ size: 15, color: CB.white })}
+                {busy === "portal" ? "Opening…" : "Manage billing & invoices"}
+              </button>
+            )}
+          </div>
+
+          {/* Usage meter */}
+          <div style={card}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: CB.navy }}>Usage</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: meterColor }}>
+                {used === null ? "…" : `${used}${cap ? ` / ${cap}` : ""} users`}
+              </div>
+            </div>
+            <div style={{ height: 10, background: CB.border, borderRadius: 999, overflow: "hidden" }}>
+              <div style={{ width: `${pct}%`, height: "100%", background: meterColor, transition: "width 0.3s" }} />
+            </div>
+            <div style={{ marginTop: 8, fontSize: 12, color: CB.textMid }}>
+              {usage ? `${usage.staff} active staff + ${usage.clients} active clients` : "Counting…"}
+              {over && <span style={{ color: CB.red, fontWeight: 700 }}> · over plan limit — upgrade to add more</span>}
+            </div>
+          </div>
+
+          {/* Plan grid */}
+          <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2, 1fr)", gap: 14 }}>
+            {TIER_ORDER.map(key => {
+              const t = TIER_META[key];
+              const isCurrent = key === tierKey && (status === "active" || status === "trial");
+              return (
+                <div key={key} style={{
+                  ...card,
+                  border: isCurrent ? `2px solid ${CB.teal}` : `1px solid ${CB.border}`,
+                  display: "flex", flexDirection: "column", gap: 10,
+                }}>
+                  <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+                    <div style={{ fontSize: 17, fontWeight: 800, color: CB.navy }}>{t.name}</div>
+                    {isCurrent && <span style={{ fontSize: 11, fontWeight: 700, color: CB.teal }}>CURRENT</span>}
+                  </div>
+                  <div style={{ fontSize: 22, fontWeight: 800, color: CB.navy }}>
+                    {t.price ? <>${t.price}<span style={{ fontSize: 13, fontWeight: 600, color: CB.textMid }}>/mo</span></> : <span style={{ fontSize: 16 }}>Contact sales</span>}
+                  </div>
+                  <div style={{ fontSize: 13, color: CB.textMid }}>Up to {t.cap.toLocaleString()} users</div>
+                  {key === "enterprise" ? (
+                    <a href="mailto:sales@getprovly.com?subject=Provly%20Enterprise" style={{
+                      marginTop: "auto", textAlign: "center", textDecoration: "none",
+                      background: CB.cream, color: CB.navy, border: `1px solid ${CB.border}`,
+                      borderRadius: 9, padding: "10px 0", fontSize: 13, fontWeight: 700,
+                    }}>Contact sales</a>
+                  ) : isCurrent ? (
+                    <button disabled style={{
+                      marginTop: "auto", background: CB.cream, color: CB.textLight,
+                      border: `1px solid ${CB.border}`, borderRadius: 9, padding: "10px 0",
+                      fontSize: 13, fontWeight: 700, cursor: "default", fontFamily: "inherit",
+                    }}>Current plan</button>
+                  ) : (
+                    <button onClick={() => handleSubscribe(key)} disabled={!canManage || busy === key} style={{
+                      marginTop: "auto", background: canManage ? CB.teal : CB.border,
+                      color: canManage ? CB.white : CB.textLight, border: "none", borderRadius: 9,
+                      padding: "10px 0", fontSize: 13, fontWeight: 700,
+                      cursor: !canManage ? "not-allowed" : busy === key ? "wait" : "pointer",
+                      fontFamily: "inherit", opacity: busy === key ? 0.7 : 1,
+                    }}>
+                      {busy === key ? "Starting…" : (status === "trial" || !tierKey) ? "Choose plan" : "Switch plan"}
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {!canManage && (
+            <div style={{ fontSize: 12, color: CB.textLight, display: "flex", alignItems: "center", gap: 6 }}>
+              {icons.lock({ size: 13, color: CB.textLight })}
+              You can view billing but only the account owner can make changes.
+            </div>
+          )}
+        </div>
+      );
+    }
+
     // Future tabs (Branding, Billing, API keys) will land here too.
     // ═══════════════════════════════════════════════════════════════
-    function SettingsPage() {
-      const [tab, setTab] = useState("org");
+    function SettingsPage({ initialTab }) {
+      const [tab, setTab] = useState(initialTab || "org");
       const { isMobile } = useMobile();
+      const { permissions } = useAuth();
 
       // Defines the left-side settings nav. Easy to add Billing, API Keys, etc later.
       const SETTINGS_SECTIONS = [
         { key: "org",         label: "Org Structure",          icon: icons.dashboard, desc: "Programs, sites, and reporting hierarchy" },
         { key: "branding",    label: "Branding",               icon: icons.image    || icons.fileText, desc: "Logo for PDFs and audit forms" },
         { key: "enforcement", label: "Compliance Enforcement", icon: icons.shield,    desc: "Role permissions and training rules" },
+        ...(permissions.viewSubscription ? [{ key: "subscription", label: "Subscription", icon: icons.dollar, desc: "Plan, billing, and usage" }] : []),
       ];
 
       const NavItem = ({ section }) => {
@@ -14990,6 +15306,7 @@
               {tab === "org" && <OrgUnitsPageEmbedded />}
               {tab === "branding" && <BrandingSettings />}
               {tab === "enforcement" && <EnforcementSettings />}
+              {tab === "subscription" && permissions.viewSubscription && <SubscriptionSettings />}
             </div>
           </div>
         </div>
@@ -16897,6 +17214,27 @@
       const [pageContext, setPageContext] = useState(null);
       const { isMobile } = useMobile();
       const [sidebarOpen, setSidebarOpen] = useState(false);
+      const { subscription, refetchSubscription } = useAuth();
+      const { addToast } = useToast();
+
+      // v19.8 — handle the return from Stripe Checkout (?checkout=success|cancel).
+      // Toast, refetch subscription, then strip the params so a refresh doesn't
+      // re-fire the toast.
+      useEffect(() => {
+        const params = new URLSearchParams(window.location.search);
+        const c = params.get("checkout");
+        if (!c) return;
+        if (c === "success") {
+          addToast("Subscription updated — welcome aboard!", "success");
+          if (refetchSubscription) refetchSubscription();
+        } else if (c === "cancel") {
+          addToast("Checkout canceled — no changes made.", "warning");
+        }
+        params.delete("checkout");
+        params.delete("session_id");
+        const qs = params.toString();
+        window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
+      }, []);
 
       // Navigation helper — accepts optional context (e.g. { type: "staff", id } for profile pages)
       const navigate = (target, context = null) => {
@@ -16927,7 +17265,7 @@
           case "ai": return <AIPage />;
           case "messages": return <MessagingPage />;
           case "migration": return <MigrationPage />;
-          case "settings": return <SettingsPage />;
+          case "settings": return <SettingsPage initialTab={pageContext?.tab} />;
           case "staff-profile":
             return pageContext?.id
               ? <StaffProfilePage staffId={pageContext.id} onNavigate={navigate} onBack={() => navigate("staff")} />
@@ -16969,6 +17307,7 @@
             maxWidth: isMobile ? "100vw" : `calc(100vw - ${CB.sidebarW}px)`,
             overflowX: "hidden",
           }}>
+            <TrialBanner subscription={subscription} onUpgrade={() => navigate("settings", { tab: "subscription" })} />
             {renderPage()}
           </main>
         </div>
