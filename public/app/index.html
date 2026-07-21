@@ -1752,9 +1752,17 @@
       const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
 
       const handleSave = async () => {
-        if (!form.first_name || !form.last_name) return addToast("First and last name are required", "error");
-        if (!form.hire_date) return addToast("Hire date is required", "error");
-        if (!form.date_of_birth) return addToast("Date of birth is required", "error");
+        // v19.9 (EVV hardening) — trim whitespace on all string fields before
+        // validate/compare/save, mirroring ClientForm's v19.4.5 fix. Trailing
+        // spaces in staff names corrupt the EVV CSV export and break
+        // exact-match joins in reports.
+        const clean = { ...form };
+        Object.keys(clean).forEach(k => {
+          if (typeof clean[k] === "string") clean[k] = clean[k].trim();
+        });
+        if (!clean.first_name || !clean.last_name) return addToast("First and last name are required", "error");
+        if (!clean.hire_date) return addToast("Hire date is required", "error");
+        if (!clean.date_of_birth) return addToast("Date of birth is required", "error");
         setSaving(true);
 
         let result;
@@ -1762,11 +1770,14 @@
           // Build diff payload — only send fields that actually changed.
           // This avoids triggering RLS/CHECK constraints on unchanged columns
           // (e.g. role enum mismatches when role wasn't even modified).
+          // Note: comparing trimmed values against stored ones also means a
+          // save on a legacy record whose stored name has stray whitespace
+          // will register as a change and heal it in place.
           const diff = {};
           const fields = ["first_name", "last_name", "email", "phone", "role", "hire_date", "date_of_birth", "is_active"];
           fields.forEach(k => {
             const before = editing[k] ?? (k === "is_active" ? true : "");
-            const after = form[k] ?? (k === "is_active" ? true : "");
+            const after = clean[k] ?? (k === "is_active" ? true : "");
             if (before !== after) {
               diff[k] = (after === "" && (k === "email" || k === "phone")) ? null : after;
             }
@@ -1779,7 +1790,7 @@
           }
           result = await supabase.from("staff").update(diff).eq("id", editing.id);
         } else {
-          const payload = { ...form, org_id: orgId };
+          const payload = { ...clean, org_id: orgId };
           if (!payload.email) delete payload.email;
           if (!payload.phone) delete payload.phone;
           result = await supabase.from("staff").insert(payload);
@@ -1936,7 +1947,7 @@
 
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 8, flexWrap: "wrap" }}>
             <SecondaryButton onClick={onClose}>Close</SecondaryButton>
-            {onViewFull && <SecondaryButton onClick={() => { onClose(); onViewFull(staff.id); }}>{icons.arrowRight ? icons.arrowRight({ size: 14 }) : "↗"} View Full Profile</SecondaryButton>}
+            {onViewFull && <SecondaryButton onClick={() => { onClose(); onViewFull(staff.id); }}>{icons.externalLink ? icons.externalLink({ size: 14 }) : "↗"} View Full Profile</SecondaryButton>}
             <PrimaryButton onClick={() => { onClose(); onEdit(staff); }}>{icons.edit({ size: 15 })} Edit</PrimaryButton>
           </div>
         </Modal>
@@ -2122,7 +2133,13 @@
       };
 
       const handleSave = async () => {
-        if (!form.first_name || !form.last_name) return addToast("First and last name are required", "error");
+        if (!form.first_name?.trim() || !form.last_name?.trim()) return addToast("First and last name are required", "error");
+        // v19.9 (EVV hardening) — medicaid_number is required and must be 9–10
+        // digits. UEVV rejects sessions without a valid member Medicaid ID, so
+        // enforce at intake rather than discovering it at submission time.
+        const ma = (form.medicaid_number || "").trim();
+        if (!ma) return addToast("Medicaid number is required", "error");
+        if (!/^\d{9,10}$/.test(ma)) return addToast("Medicaid number must be 9–10 digits (numbers only, no spaces or dashes)", "error");
         setSaving(true);
         const payload = { ...form };
         // v19.4.5 — trim leading/trailing whitespace on every string field before save
@@ -2193,8 +2210,8 @@
             <FormField label="Date of Birth" half>
               <input style={fieldStyle} type="date" value={form.date_of_birth} onChange={e => set("date_of_birth", e.target.value)} />
             </FormField>
-            <FormField label="Medicaid Number" half>
-              <input style={fieldStyle} value={form.medicaid_number} onChange={e => set("medicaid_number", e.target.value)} placeholder="Medicaid ID" />
+            <FormField label="Medicaid Number" required half>
+              <input style={fieldStyle} value={form.medicaid_number} onChange={e => set("medicaid_number", e.target.value)} placeholder="9–10 digit Medicaid ID" inputMode="numeric" maxLength={10} />
             </FormField>
           </FormRow>
           <FormRow>
@@ -2480,7 +2497,7 @@
 
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 8, flexWrap: "wrap" }}>
             <SecondaryButton onClick={onClose}>Close</SecondaryButton>
-            {onViewFull && <SecondaryButton onClick={() => { onClose(); onViewFull(client.id); }}>{icons.arrowRight ? icons.arrowRight({ size: 14 }) : "↗"} View Full Profile</SecondaryButton>}
+            {onViewFull && <SecondaryButton onClick={() => { onClose(); onViewFull(client.id); }}>{icons.externalLink ? icons.externalLink({ size: 14 }) : "↗"} View Full Profile</SecondaryButton>}
             <PrimaryButton onClick={() => { onClose(); onEdit(client); }}>{icons.edit({ size: 15 })} Edit</PrimaryButton>
           </div>
         </Modal>
@@ -7388,6 +7405,18 @@
       const [decks, setDecks] = useState([]);
       const [deckSvcCodes, setDeckSvcCodes] = useState([]);
       const [deckCompletions, setDeckCompletions] = useState([]);
+      // v19.9 (EVV hardening) — open sessions fetched independently of the
+      // recent-50 list so a missed clock-out from weeks ago can't scroll out
+      // of the Active Sessions banner.
+      const [openSessions, setOpenSessions] = useState([]);
+      // v19.9 — Utah EVV pre-submission validation. Month defaults to the
+      // previous calendar month (submissions cover completed months).
+      const [subMonth, setSubMonth] = useState(() => {
+        const d = new Date(); d.setMonth(d.getMonth() - 1);
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      });
+      const [valRunning, setValRunning] = useState(false);
+      const [valResults, setValResults] = useState(null);
 
       useEffect(() => { loadAll(); }, []);
 
@@ -7406,6 +7435,13 @@
           supabase.from("service_code_definitions").select("id, code, name, evv_required").order("code"),
         ]);
         if (!sessRes.error) setSessions(sessRes.data || []);
+        // v19.9 — open sessions regardless of recency (see openSessions note)
+        const openRes = await supabase.from("evv_sessions")
+          .select("id, clock_in_at, clock_out_at, staff(first_name, last_name), persons(first_name, last_name), service_code_definitions(code)")
+          .is("clock_out_at", null)
+          .order("clock_in_at", { ascending: true })
+          .limit(25);
+        if (!openRes.error) setOpenSessions(openRes.data || []);
         setStaffList(staffRes.data || []);
         setClients(clientRes.data || []);
         setServiceCodes((scRes.data || []).filter(sc => sc.evv_required));
@@ -7685,8 +7721,61 @@
         setGpsStatus(null);
       };
 
-      const activeSessions = sessions.filter(s => !s.clock_out_at);
+      // v19.9 — union of the dedicated open-sessions query and any open rows
+      // in the recent list (dedup by id, oldest first so stale ones surface).
+      const activeSessions = useMemo(() => {
+        const map = new Map();
+        sessions.filter(s => !s.clock_out_at).forEach(s => map.set(s.id, s));
+        openSessions.forEach(s => map.set(s.id, s));
+        return [...map.values()].sort((a, b) => new Date(a.clock_in_at) - new Date(b.clock_in_at));
+      }, [sessions, openSessions]);
       const completedSessions = sessions.filter(s => s.clock_out_at);
+
+      // v19.9 (EVV hardening) — hours a session has been open; ≥12h is the
+      // "probably a missed clock-out" threshold surfaced in the banner.
+      const hoursOpen = (s) => (Date.now() - new Date(s.clock_in_at)) / 3600000;
+
+      // v19.9 — Utah EVV pre-submission validation. Runs the checks the state
+      // system will reject on, against every session in the selected month:
+      //   1. duration > 24h            (implausible visit; likely a late clock-out)
+      //   2. still open (no clock-out) (cannot be submitted at all)
+      //   3. member Medicaid ID missing or not 9–10 digits
+      //   4. missing GPS on clock-in, or on clock-out for completed sessions
+      const MEDICAID_RE = /^\d{9,10}$/;
+      const runValidation = async () => {
+        setValRunning(true);
+        try {
+          const [y, m] = subMonth.split("-").map(Number);
+          const start = new Date(y, m - 1, 1);           // local time — Utah ops
+          const end = new Date(y, m, 1);
+          const { data, error } = await supabase.from("evv_sessions")
+            .select("id, clock_in_at, clock_out_at, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, staff(first_name, last_name), persons(id, first_name, last_name, medicaid_number), service_code_definitions(code)")
+            .gte("clock_in_at", start.toISOString())
+            .lt("clock_in_at", end.toISOString())
+            .order("clock_in_at", { ascending: true })
+            .limit(2000);
+          if (error) throw error;
+          const rows = data || [];
+          const over24 = [], open = [], badMedicaid = [], noGps = [];
+          const seenPersons = new Set(); // one Medicaid flag per client, not per session
+          rows.forEach(r => {
+            if (!r.clock_out_at) open.push(r);
+            else if (new Date(r.clock_out_at) - new Date(r.clock_in_at) > 24 * 3600000) over24.push(r);
+            const ma = (r.persons?.medicaid_number || "").trim();
+            if (!MEDICAID_RE.test(ma)) {
+              const pid = r.persons?.id || "?";
+              if (!seenPersons.has(pid)) { seenPersons.add(pid); badMedicaid.push(r); }
+            }
+            const hasIn = r.clock_in_lat != null && r.clock_in_lng != null;
+            const hasOut = r.clock_out_lat != null && r.clock_out_lng != null;
+            if (!hasIn || (r.clock_out_at && !hasOut)) noGps.push(r);
+          });
+          setValResults({ total: rows.length, over24, open, badMedicaid, noGps, ranAt: new Date() });
+        } catch (err) {
+          addToast(`Validation failed: ${err.message || "unknown error"}`, "error");
+        }
+        setValRunning(false);
+      };
 
       const formatTime = (iso) => {
         if (!iso) return "—";
@@ -7791,8 +7880,18 @@
               </div>
               {activeSessions.map(s => (
                 <div key={s.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 0" }}>
-                  <span style={{ fontSize: 13, color: CB.text }}>
-                    {s.staff?.first_name} {s.staff?.last_name} → {s.persons?.first_name} {s.persons?.last_name} ({s.service_code_definitions?.code}) — clocked in {formatTime(s.clock_in_at)}
+                  <span style={{ fontSize: 13, color: CB.text, display: "inline-flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    {s.staff?.first_name} {s.staff?.last_name} → {s.persons?.first_name} {s.persons?.last_name} ({s.service_code_definitions?.code}) — clocked in {formatTime(s.clock_in_at)}{hoursOpen(s) >= 24 ? ` on ${formatDate(s.clock_in_at)}` : ""}
+                    {/* v19.9 — duration guard: flag sessions open ≥12h as probable missed clock-outs */}
+                    {hoursOpen(s) >= 12 && (
+                      <span style={{
+                        fontSize: 11, fontWeight: 800, padding: "3px 8px", borderRadius: 6,
+                        background: `${hoursOpen(s) >= 24 ? CB.red : CB.amber}15`,
+                        color: hoursOpen(s) >= 24 ? CB.red : CB.amber,
+                      }}>
+                        ⚠ open {Math.floor(hoursOpen(s))}h — missed clock-out?
+                      </span>
+                    )}
                   </span>
                   <button onClick={() => handleClockOut(s.id)} disabled={clockingOut === s.id} style={{
                     display: "flex", alignItems: "center", gap: 6, padding: "7px 14px",
@@ -7805,6 +7904,64 @@
               ))}
             </div>
           )}
+
+          {/* v19.9 — Utah EVV Submission pre-flight (validation runs the checks
+              the state system rejects on, before you export/submit a month) */}
+          <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, padding: 20, marginBottom: 20 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+              <div style={{ flex: 1, minWidth: 220 }}>
+                <div style={{ fontSize: 15, fontWeight: 800, color: CB.navy }}>Utah EVV Submission — Pre-flight</div>
+                <div style={{ fontSize: 12, color: CB.textMid }}>Validate a month's sessions before export. Checks: open sessions, &gt;24h durations, Medicaid IDs, missing GPS.</div>
+              </div>
+              <input type="month" style={{ ...fieldStyle, width: 170 }} value={subMonth} onChange={e => { setSubMonth(e.target.value); setValResults(null); }} />
+              <PrimaryButton onClick={runValidation} disabled={valRunning || !subMonth} color={CB.teal}>
+                {valRunning ? <Spinner size={14} color={CB.white} /> : icons.checkCircle({ size: 15 })} Run Validation
+              </PrimaryButton>
+            </div>
+            {valResults && (() => {
+              const label = (r) => `${formatDate(r.clock_in_at)} — ${r.staff ? `${r.staff.first_name} ${r.staff.last_name}` : "?"} → ${r.persons ? `${r.persons.first_name} ${r.persons.last_name}` : "?"} (${r.service_code_definitions?.code || "?"})`;
+              const groups = [
+                { key: "open", title: "Open sessions (no clock-out)", desc: "Cannot be submitted — clock out or correct the record.", rows: valResults.open, color: CB.red },
+                { key: "over24", title: "Sessions longer than 24 hours", desc: "Implausible duration — verify and correct the clock-out time.", rows: valResults.over24, color: CB.red },
+                { key: "badMedicaid", title: "Missing / invalid Medicaid number", desc: "Member ID must be 9–10 digits. One row per affected client — fix on the client profile.", rows: valResults.badMedicaid, color: CB.amber },
+                { key: "noGps", title: "Missing GPS coordinates", desc: "No location on clock-in, or on clock-out for a completed session.", rows: valResults.noGps, color: CB.amber },
+              ];
+              const issueCount = groups.reduce((n, g) => n + g.rows.length, 0);
+              return (
+                <div style={{ marginTop: 16 }}>
+                  {issueCount === 0 ? (
+                    <div style={{ padding: "12px 16px", borderRadius: 10, background: `${CB.green}10`, border: `1px solid ${CB.green}30`, fontSize: 13, fontWeight: 700, color: CB.green }}>
+                      ✓ All {valResults.total} session{valResults.total === 1 ? "" : "s"} passed pre-flight for {subMonth}. Ready to export.
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 13, fontWeight: 700, color: CB.navy, marginBottom: 10 }}>
+                      {valResults.total} session{valResults.total === 1 ? "" : "s"} scanned · {issueCount} issue{issueCount === 1 ? "" : "s"} found
+                    </div>
+                  )}
+                  {groups.filter(g => g.rows.length > 0).map(g => (
+                    <div key={g.key} style={{ marginTop: 10, padding: "12px 16px", borderRadius: 10, background: `${g.color}08`, border: `1px solid ${g.color}25` }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                        <Badge text={String(g.rows.length)} color={g.color} />
+                        <span style={{ fontSize: 13, fontWeight: 800, color: CB.navy }}>{g.title}</span>
+                      </div>
+                      <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 6 }}>{g.desc}</div>
+                      {g.rows.slice(0, 8).map(r => (
+                        <div key={r.id} style={{ fontSize: 12.5, color: CB.text, padding: "3px 0" }}>
+                          {label(r)}
+                          {g.key === "badMedicaid" && (
+                            <span style={{ color: g.color, fontWeight: 700 }}> — MA: {r.persons?.medicaid_number ? `"${r.persons.medicaid_number}"` : "missing"}</span>
+                          )}
+                        </div>
+                      ))}
+                      {g.rows.length > 8 && (
+                        <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, paddingTop: 4 }}>+ {g.rows.length - 8} more</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
+          </div>
 
           <DataTable columns={columns} data={sessions} loading={loading} emptyMessage="No EVV sessions recorded" onRowClick={openEVVDetail} />
 
@@ -15166,7 +15323,7 @@
                 cursor: busy === "portal" ? "wait" : "pointer", fontFamily: "inherit",
                 display: "inline-flex", alignItems: "center", gap: 8, opacity: busy === "portal" ? 0.7 : 1,
               }}>
-                {icons.arrowRight({ size: 15, color: CB.white })}
+                {icons.externalLink({ size: 15, color: CB.white })}
                 {busy === "portal" ? "Opening…" : "Manage billing & invoices"}
               </button>
             )}
