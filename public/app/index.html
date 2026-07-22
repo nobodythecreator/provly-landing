@@ -1173,7 +1173,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.8</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.9.1</span>
               </div>
             </div>
             {isMobile && (
@@ -7412,7 +7412,9 @@
       // v19.9 — Utah EVV pre-submission validation. Month defaults to the
       // previous calendar month (submissions cover completed months).
       const [subMonth, setSubMonth] = useState(() => {
-        const d = new Date(); d.setMonth(d.getMonth() - 1);
+        const d = new Date();
+        d.setDate(1); // v19.9.1 — avoid end-of-month overflow (Mar 31 → skips Feb)
+        d.setMonth(d.getMonth() - 1);
         return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
       });
       const [valRunning, setValRunning] = useState(false);
@@ -7440,8 +7442,9 @@
           .select("id, clock_in_at, clock_out_at, staff(first_name, last_name), persons(first_name, last_name), service_code_definitions(code)")
           .is("clock_out_at", null)
           .order("clock_in_at", { ascending: true })
-          .limit(25);
+          .limit(200); // v19.9.1 — raised from 25 (Greptile: open sessions beyond cap vanished from banner)
         if (!openRes.error) setOpenSessions(openRes.data || []);
+        else setOpenSessions([]); // v19.9.1 — never keep stale open rows; a stale clock-out could overwrite a real clock_out_at
         setStaffList(staffRes.data || []);
         setClients(clientRes.data || []);
         setServiceCodes((scRes.data || []).filter(sc => sc.evv_required));
@@ -7746,14 +7749,28 @@
         setValRunning(true);
         try {
           const [y, m] = subMonth.split("-").map(Number);
-          const start = new Date(y, m - 1, 1);           // local time — Utah ops
-          const end = new Date(y, m, 1);
+          // v19.9.1 — anchor month boundaries to America/Denver (Utah EVV),
+          // not the operator's browser timezone. Probe the zone's UTC offset
+          // at noon UTC on the 1st (handles MST/MDT), fall back to -7.
+          const mtOffset = (yy, mm) => {
+            try {
+              const tz = new Intl.DateTimeFormat("en-US", { timeZone: "America/Denver", timeZoneName: "shortOffset" })
+                .formatToParts(new Date(Date.UTC(yy, mm - 1, 1, 12)))
+                .find(p => p.type === "timeZoneName").value; // e.g. "GMT-6"
+              const n = Number(tz.replace("GMT", ""));
+              return Number.isFinite(n) && n !== 0 ? n : -7;
+            } catch (_) { return -7; }
+          };
+          const nextY = m === 12 ? y + 1 : y;
+          const nextM = m === 12 ? 1 : m + 1;
+          const start = new Date(Date.UTC(y, m - 1, 1) - mtOffset(y, m) * 3600000);
+          const end = new Date(Date.UTC(nextY, nextM - 1, 1) - mtOffset(nextY, nextM) * 3600000);
           const { data, error } = await supabase.from("evv_sessions")
             .select("id, clock_in_at, clock_out_at, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, staff(first_name, last_name), persons(id, first_name, last_name, medicaid_number), service_code_definitions(code)")
             .gte("clock_in_at", start.toISOString())
             .lt("clock_in_at", end.toISOString())
             .order("clock_in_at", { ascending: true })
-            .limit(2000);
+            .limit(5000); // v19.9.1 — raised from 2000; truncation is surfaced in results rather than silently passing
           if (error) throw error;
           const rows = data || [];
           const over24 = [], open = [], badMedicaid = [], noGps = [];
@@ -7770,7 +7787,7 @@
             const hasOut = r.clock_out_lat != null && r.clock_out_lng != null;
             if (!hasIn || (r.clock_out_at && !hasOut)) noGps.push(r);
           });
-          setValResults({ total: rows.length, over24, open, badMedicaid, noGps, ranAt: new Date() });
+          setValResults({ total: rows.length, truncated: rows.length >= 5000, over24, open, badMedicaid, noGps, ranAt: new Date() });
         } catch (err) {
           addToast(`Validation failed: ${err.message || "unknown error"}`, "error");
         }
@@ -7929,7 +7946,12 @@
               const issueCount = groups.reduce((n, g) => n + g.rows.length, 0);
               return (
                 <div style={{ marginTop: 16 }}>
-                  {issueCount === 0 ? (
+                  {valResults.truncated && (
+                    <div style={{ padding: "12px 16px", borderRadius: 10, background: `${CB.red}10`, border: `1px solid ${CB.red}30`, fontSize: 13, fontWeight: 700, color: CB.red, marginBottom: 10 }}>
+                      Scan hit the 5,000-session cap — results are incomplete. Do not treat this month as validated.
+                    </div>
+                  )}
+                  {issueCount === 0 && !valResults.truncated ? (
                     <div style={{ padding: "12px 16px", borderRadius: 10, background: `${CB.green}10`, border: `1px solid ${CB.green}30`, fontSize: 13, fontWeight: 700, color: CB.green }}>
                       ✓ All {valResults.total} session{valResults.total === 1 ? "" : "s"} passed pre-flight for {subMonth}. Ready to export.
                     </div>
@@ -15323,7 +15345,7 @@
                 cursor: busy === "portal" ? "wait" : "pointer", fontFamily: "inherit",
                 display: "inline-flex", alignItems: "center", gap: 8, opacity: busy === "portal" ? 0.7 : 1,
               }}>
-                {icons.externalLink({ size: 15, color: CB.white })}
+                {icons.externalLink ? icons.externalLink({ size: 15, color: CB.white }) : "↗"}
                 {busy === "portal" ? "Opening…" : "Manage billing & invoices"}
               </button>
             )}
