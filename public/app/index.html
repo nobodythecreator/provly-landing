@@ -1173,7 +1173,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.9.1</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.10</span>
               </div>
             </div>
             {isMobile && (
@@ -7381,7 +7381,7 @@
     // ═══════════════════════════════════════════════════════════════
     function EVVPage() {
       const { addToast } = useToast();
-      const { orgId, enforcement } = useAuth();
+      const { orgId, enforcement, brand } = useAuth(); // v19.10 — brand for export filename
       const [sessions, setSessions] = useState([]);
       const [loading, setLoading] = useState(true);
       const [staffList, setStaffList] = useState([]);
@@ -7419,6 +7419,7 @@
       });
       const [valRunning, setValRunning] = useState(false);
       const [valResults, setValResults] = useState(null);
+      const [exporting, setExporting] = useState(false); // v19.10 — Utah CSV export in flight
 
       useEffect(() => { loadAll(); }, []);
 
@@ -7745,34 +7746,39 @@
       //   3. member Medicaid ID missing or not 9–10 digits
       //   4. missing GPS on clock-in, or on clock-out for completed sessions
       const MEDICAID_RE = /^\d{9,10}$/;
+      // v19.10 — shared month-scoped fetch for pre-flight validation and the
+      // Utah CSV export, so both operate on identical data. Boundaries are
+      // anchored to America/Denver (Utah EVV), not the operator's browser
+      // timezone. Offset probed at noon UTC on the 1st (handles MST/MDT),
+      // fall back to -7. Callers must handle the 5000-row truncation case.
+      const fetchSubMonthSessions = async () => {
+        const [y, m] = subMonth.split("-").map(Number);
+        const mtOffset = (yy, mm) => {
+          try {
+            const tz = new Intl.DateTimeFormat("en-US", { timeZone: "America/Denver", timeZoneName: "shortOffset" })
+              .formatToParts(new Date(Date.UTC(yy, mm - 1, 1, 12)))
+              .find(p => p.type === "timeZoneName").value; // e.g. "GMT-6"
+            const n = Number(tz.replace("GMT", ""));
+            return Number.isFinite(n) && n !== 0 ? n : -7;
+          } catch (_) { return -7; }
+        };
+        const nextY = m === 12 ? y + 1 : y;
+        const nextM = m === 12 ? 1 : m + 1;
+        const start = new Date(Date.UTC(y, m - 1, 1) - mtOffset(y, m) * 3600000);
+        const end = new Date(Date.UTC(nextY, nextM - 1, 1) - mtOffset(nextY, nextM) * 3600000);
+        const { data, error } = await supabase.from("evv_sessions")
+          .select("id, clock_in_at, clock_out_at, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, staff(first_name, last_name), persons(id, first_name, last_name, medicaid_number), service_code_definitions(code, name)")
+          .gte("clock_in_at", start.toISOString())
+          .lt("clock_in_at", end.toISOString())
+          .order("clock_in_at", { ascending: true })
+          .limit(5000);
+        if (error) throw error;
+        return data || [];
+      };
       const runValidation = async () => {
         setValRunning(true);
         try {
-          const [y, m] = subMonth.split("-").map(Number);
-          // v19.9.1 — anchor month boundaries to America/Denver (Utah EVV),
-          // not the operator's browser timezone. Probe the zone's UTC offset
-          // at noon UTC on the 1st (handles MST/MDT), fall back to -7.
-          const mtOffset = (yy, mm) => {
-            try {
-              const tz = new Intl.DateTimeFormat("en-US", { timeZone: "America/Denver", timeZoneName: "shortOffset" })
-                .formatToParts(new Date(Date.UTC(yy, mm - 1, 1, 12)))
-                .find(p => p.type === "timeZoneName").value; // e.g. "GMT-6"
-              const n = Number(tz.replace("GMT", ""));
-              return Number.isFinite(n) && n !== 0 ? n : -7;
-            } catch (_) { return -7; }
-          };
-          const nextY = m === 12 ? y + 1 : y;
-          const nextM = m === 12 ? 1 : m + 1;
-          const start = new Date(Date.UTC(y, m - 1, 1) - mtOffset(y, m) * 3600000);
-          const end = new Date(Date.UTC(nextY, nextM - 1, 1) - mtOffset(nextY, nextM) * 3600000);
-          const { data, error } = await supabase.from("evv_sessions")
-            .select("id, clock_in_at, clock_out_at, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, staff(first_name, last_name), persons(id, first_name, last_name, medicaid_number), service_code_definitions(code)")
-            .gte("clock_in_at", start.toISOString())
-            .lt("clock_in_at", end.toISOString())
-            .order("clock_in_at", { ascending: true })
-            .limit(5000); // v19.9.1 — raised from 2000; truncation is surfaced in results rather than silently passing
-          if (error) throw error;
-          const rows = data || [];
+          const rows = await fetchSubMonthSessions();
           const over24 = [], open = [], badMedicaid = [], noGps = [];
           const seenPersons = new Set(); // one Medicaid flag per client, not per session
           rows.forEach(r => {
@@ -7792,6 +7798,86 @@
           addToast(`Validation failed: ${err.message || "unknown error"}`, "error");
         }
         setValRunning(false);
+      };
+
+      // v19.10 (Item A) — Utah EVV CSV export. Header text, column order, and
+      // value formats replicate Hope Haven's May 2026 submission accepted by
+      // the state: M/D/YYYY dates and h:mm:ss AM/PM times in Mountain Time,
+      // blank address columns with 6-decimal GPS carrying location, Batch_id
+      // = YYYYMM, sequential Record_id, Provider ID from PRISM, vendor
+      // "Provly". Member ID written verbatim to preserve leading zeros.
+      const UTAH_EVV_HEADER = "Member ID (req),First name (req),Middle initial,Last name (req),Service code (req),Service description,Provider ID (req),Employee Performing Service (req),Begin date (req),Begin time (req),Begin address (req),Begin Apt/Suite/Floor,Begin City (req),Begin State,Begin Zip,Begin Geo Latitude,Begin Geo Longitude,End date (req),End time (req),End Address1,End Address2,End City,End State,End Zip,End Geo Latitude,End Geo Longitude,Orig_receipt_id (req if CORRECTION),Batch_id (req),Record_id (req),EVV Vendor (req)";
+      const UTAH_PROVIDER_ID = "4356953"; // PRISM provider ID
+      const EVV_VENDOR_NAME = "Provly";
+      const SERVICE_DESC_FALLBACK = { SLN: "Supported Living Natural", SLH: "Supported Living Hourly" };
+      const exportUtahCsv = async () => {
+        setExporting(true);
+        try {
+          const rows = await fetchSubMonthSessions();
+          if (rows.length >= 5000) { addToast("Month hits the 5,000-session cap — export blocked to prevent a partial submission", "error"); setExporting(false); return; }
+          if (rows.length === 0) { addToast("No EVV sessions found for the selected month", "error"); setExporting(false); return; }
+          const completed = rows.filter(r => r.clock_out_at);
+          const openCount = rows.length - completed.length;
+          const badMa = completed.filter(r => !MEDICAID_RE.test((r.persons?.medicaid_number || "").trim()));
+          if (badMa.length > 0) {
+            addToast(`Export blocked: ${badMa.length} session(s) have a missing/invalid client Medicaid number. Fix the client profile(s), then re-export — submitting without them would under-report the month.`, "error");
+            setExporting(false); return;
+          }
+          if (openCount > 0 && !window.confirm(`${openCount} open session(s) (no clock-out) cannot be submitted and will be EXCLUDED from this export. Continue?`)) { setExporting(false); return; }
+          const mtDate = new Intl.DateTimeFormat("en-US", { timeZone: "America/Denver", year: "numeric", month: "numeric", day: "numeric" });
+          const mtTime = new Intl.DateTimeFormat("en-US", { timeZone: "America/Denver", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true });
+          // Newer ICU inserts a narrow no-break space (U+202F) before AM/PM —
+          // normalize to a plain space to match the accepted submission.
+          const fixSp = (s) => s.replace(/[\u202f\u00a0]/g, " ");
+          const esc = (v) => {
+            const s = String(v ?? "");
+            const needsQuote = s.includes(",") || s.includes('"') || s.includes("\n");
+            return needsQuote ? '"' + s.split('"').join('""') + '"' : s;
+          };
+          const gps = (v) => (v == null ? "" : Number(v).toFixed(6));
+          const [y, m] = subMonth.split("-").map(Number);
+          const batchId = `${y}${String(m).padStart(2, "0")}`;
+          const lines = [UTAH_EVV_HEADER];
+          completed.forEach((r, i) => {
+            const inD = new Date(r.clock_in_at), outD = new Date(r.clock_out_at);
+            lines.push([
+              (r.persons?.medicaid_number || "").trim(),
+              r.persons?.first_name || "",
+              "",
+              r.persons?.last_name || "",
+              r.service_code_definitions?.code || "",
+              r.service_code_definitions?.name || SERVICE_DESC_FALLBACK[r.service_code_definitions?.code] || "",
+              UTAH_PROVIDER_ID,
+              `${r.staff?.first_name || ""} ${r.staff?.last_name || ""}`.trim(),
+              fixSp(mtDate.format(inD)),
+              fixSp(mtTime.format(inD)),
+              "", "", "", "", "",
+              gps(r.clock_in_lat),
+              gps(r.clock_in_lng),
+              fixSp(mtDate.format(outD)),
+              fixSp(mtTime.format(outD)),
+              "", "", "", "", "",
+              gps(r.clock_out_lat),
+              gps(r.clock_out_lng),
+              "",
+              batchId,
+              String(i + 1),
+              EVV_VENDOR_NAME,
+            ].map(esc).join(","));
+          });
+          const csv = lines.join("\r\n");
+          const monthName = new Date(y, m - 1, 1).toLocaleString("en-US", { month: "long" }).toLowerCase();
+          const slug = ((brand?.orgName || "provider").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "")) || "provider";
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+          a.download = `${slug}_${monthName}_${y}_evv.csv`;
+          a.click();
+          URL.revokeObjectURL(a.href);
+          addToast(`Exported ${completed.length} session(s) — batch ${batchId}${openCount > 0 ? ` (${openCount} open session(s) excluded)` : ""}`, "success");
+        } catch (err) {
+          addToast(`Export failed: ${err.message || "unknown error"}`, "error");
+        }
+        setExporting(false);
       };
 
       const formatTime = (iso) => {
@@ -7928,11 +8014,14 @@
             <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
               <div style={{ flex: 1, minWidth: 220 }}>
                 <div style={{ fontSize: 15, fontWeight: 800, color: CB.navy }}>Utah EVV Submission — Pre-flight</div>
-                <div style={{ fontSize: 12, color: CB.textMid }}>Validate a month's sessions before export. Checks: open sessions, &gt;24h durations, Medicaid IDs, missing GPS.</div>
+                <div style={{ fontSize: 12, color: CB.textMid }}>Validate, then export a month's sessions for state submission. Dates/times export in Mountain Time.</div>
               </div>
               <input type="month" style={{ ...fieldStyle, width: 170 }} value={subMonth} onChange={e => { setSubMonth(e.target.value); setValResults(null); }} />
               <PrimaryButton onClick={runValidation} disabled={valRunning || !subMonth} color={CB.teal}>
                 {valRunning ? <Spinner size={14} color={CB.white} /> : icons.checkCircle({ size: 15 })} Run Validation
+              </PrimaryButton>
+              <PrimaryButton onClick={exportUtahCsv} disabled={exporting || !subMonth} color={CB.navy}>
+                {exporting ? <Spinner size={14} color={CB.white} /> : icons.save({ size: 15 })} Export Utah CSV
               </PrimaryButton>
             </div>
             {valResults && (() => {
