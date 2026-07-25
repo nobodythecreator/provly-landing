@@ -1173,7 +1173,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.10</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.10.2</span>
               </div>
             </div>
             {isMobile && (
@@ -7381,7 +7381,7 @@
     // ═══════════════════════════════════════════════════════════════
     function EVVPage() {
       const { addToast } = useToast();
-      const { orgId, enforcement, brand } = useAuth(); // v19.10 — brand for export filename
+      const { orgId, enforcement, brand, staffProfile, user } = useAuth(); // v19.10 brand for filename; v19.10.1 identity for edit audit
       const [sessions, setSessions] = useState([]);
       const [loading, setLoading] = useState(true);
       const [staffList, setStaffList] = useState([]);
@@ -7420,6 +7420,62 @@
       const [valRunning, setValRunning] = useState(false);
       const [valResults, setValResults] = useState(null);
       const [exporting, setExporting] = useState(false); // v19.10 — Utah CSV export in flight
+      // v19.10.1 — manual edit audit trail for the session open in the detail modal
+      const [editLog, setEditLog] = useState([]);
+
+      // v19.10.1 — Mountain Time <-> datetime-local conversion.
+      //
+      // The previous edit form sliced the raw UTC ISO string into a
+      // datetime-local input, which reads its value as LOCAL time. That
+      // displayed UTC wall-clock labelled as local (a 3:05 PM MDT clock-out
+      // rendered as 9:05 PM) and, on save, ran it back through
+      // new Date(...).toISOString() — shifting the stored timestamp by the
+      // offset on EVERY save, even when the operator changed nothing.
+      // EVV timestamps are the record of care; silently moving them by six
+      // hours is a data-integrity failure, so both directions are now
+      // explicitly anchored to America/Denver.
+      const MT_TZ = "America/Denver";
+      const mtParts = (d) => {
+        const out = {};
+        new Intl.DateTimeFormat("en-US", {
+          timeZone: MT_TZ, year: "numeric", month: "2-digit", day: "2-digit",
+          hour: "2-digit", minute: "2-digit", hour12: false,
+        }).formatToParts(d).forEach(p => { out[p.type] = p.value; });
+        if (out.hour === "24") out.hour = "00"; // some ICU builds report midnight as 24
+        return out;
+      };
+      // UTC ISO -> "YYYY-MM-DDTHH:mm" as it reads on a Utah wall clock
+      const isoToMTInput = (iso) => {
+        if (!iso) return "";
+        const p = mtParts(new Date(iso));
+        return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
+      };
+      // "YYYY-MM-DDTHH:mm" entered as Utah wall time -> UTC ISO.
+      // Guesses the instant, then corrects against what that instant actually
+      // renders as in MT. Two passes settle it, including across a DST edge.
+      const mtInputToIso = (s) => {
+        if (!s) return null;
+        const [dPart, tPart = "00:00"] = s.split("T");
+        const [Y, M, D] = dPart.split("-").map(Number);
+        const [h, mi] = tPart.split(":").map(Number);
+        const target = Date.UTC(Y, M - 1, D, h, mi);
+        let guess = target;
+        for (let i = 0; i < 3; i++) {
+          const p = mtParts(new Date(guess));
+          const rendered = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute);
+          const drift = target - rendered;
+          if (drift === 0) break;
+          guess += drift;
+        }
+        return new Date(guess).toISOString();
+      };
+      // exceptions is jsonb — it may hold a plain string or a structured value.
+      // Render structured values as formatted JSON rather than "[object Object]".
+      const exceptionsToText = (v) => {
+        if (v == null) return "";
+        if (typeof v === "string") return v;
+        try { return JSON.stringify(v, null, 2); } catch (_) { return String(v); }
+      };
 
       useEffect(() => { loadAll(); }, []);
 
@@ -7767,7 +7823,7 @@
         const start = new Date(Date.UTC(y, m - 1, 1) - mtOffset(y, m) * 3600000);
         const end = new Date(Date.UTC(nextY, nextM - 1, 1) - mtOffset(nextY, nextM) * 3600000);
         const { data, error } = await supabase.from("evv_sessions")
-          .select("id, clock_in_at, clock_out_at, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, staff(first_name, last_name), persons(id, first_name, last_name, medicaid_number), service_code_definitions(code, name)")
+          .select("id, clock_in_at, clock_out_at, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, geofence_valid, exceptions, staff(first_name, last_name), persons(id, first_name, last_name, medicaid_number), service_code_definitions(code, name)")
           .gte("clock_in_at", start.toISOString())
           .lt("clock_in_at", end.toISOString())
           .order("clock_in_at", { ascending: true })
@@ -7821,6 +7877,14 @@
           const badMa = completed.filter(r => !MEDICAID_RE.test((r.persons?.medicaid_number || "").trim()));
           if (badMa.length > 0) {
             addToast(`Export blocked: ${badMa.length} session(s) have a missing/invalid client Medicaid number. Fix the client profile(s), then re-export — submitting without them would under-report the month.`, "error");
+            setExporting(false); return;
+          }
+          // v19.10.1 — a session longer than 24h is a missed clock-out, not a
+          // real visit. June 2026 exported one at 54h before this gate existed.
+          // Pre-flight flagged it; the export did not stop it. It does now.
+          const over24 = completed.filter(r => new Date(r.clock_out_at) - new Date(r.clock_in_at) > 24 * 3600000);
+          if (over24.length > 0) {
+            addToast(`Export blocked: ${over24.length} session(s) exceed 24 hours — almost certainly missed clock-outs. Run validation, click the flagged session, and correct its clock-out time before exporting.`, "error");
             setExporting(false); return;
           }
           if (openCount > 0 && !window.confirm(`${openCount} open session(s) (no clock-out) cannot be submitted and will be EXCLUDED from this export. Continue?`)) { setExporting(false); return; }
@@ -7895,20 +7959,100 @@
         setViewing(session);
         setEditingEVV(false);
         setEvvEditForm({
-          clock_in_at: session.clock_in_at?.slice(0, 16) || "",
-          clock_out_at: session.clock_out_at?.slice(0, 16) || "",
-          exceptions: session.exceptions || "",
+          // v19.10.1 — render stored UTC as Mountain wall time (see isoToMTInput)
+          clock_in_at: isoToMTInput(session.clock_in_at),
+          clock_out_at: isoToMTInput(session.clock_out_at),
+          exceptions: exceptionsToText(session.exceptions),
+          reason: "",
         });
+        // v19.10.1 — load this session's manual-edit history. Absent/!migrated
+        // table is not an error worth surfacing; the panel simply stays empty.
+        setEditLog([]);
+        supabase.from("evv_edit_log")
+          .select("id, field, old_value, new_value, reason, edited_by_name, edited_at")
+          .eq("session_id", session.id)
+          .order("edited_at", { ascending: false })
+          .limit(50)
+          .then(({ data, error }) => { if (!error) setEditLog(data || []); });
       };
 
       const saveEVVEdit = async () => {
-        setSavingEVV(true);
+        // v19.10.1 — EVV records are the evidence of service delivery. A manual
+        // correction must say who, when, what changed, and why, so a corrected
+        // visit is distinguishable from one captured live at the point of care.
+        const reason = (evvEditForm.reason || "").trim();
+
+        // v19.10.2 — detect a clock-out change at the WALL-CLOCK string level,
+        // before any timezone conversion. The input holds the stored instant
+        // rendered in MT (isoToMTInput); comparing the current input against
+        // that same rendering of the original tells us whether the operator
+        // actually edited the field. Crucially, when it's unchanged we keep the
+        // ORIGINAL ISO verbatim and never call mtInputToIso — so a no-op save
+        // can't shift the instant, and the DST fall-back ambiguity (a wall time
+        // that maps to two real UTC instants) is only ever reachable when the
+        // operator genuinely typed a new time.
+        const origOutInput = isoToMTInput(viewing.clock_out_at);
+        const curOutInput = evvEditForm.clock_out_at || "";
+        const outChanged = curOutInput !== origOutInput;
+        const prevOutIso = viewing.clock_out_at ? new Date(viewing.clock_out_at).toISOString() : null;
+        const nextOutIso = outChanged ? (curOutInput ? mtInputToIso(curOutInput) : null) : prevOutIso;
+
+        const prevExcText = exceptionsToText(viewing.exceptions);
+        const nextExcText = evvEditForm.exceptions ?? "";
+        const excChanged = nextExcText !== prevExcText;
+
+        if (!outChanged && !excChanged) { setEditingEVV(false); return addToast("No changes to save", "info"); }
+        if (!reason) return addToast("A reason is required for any manual EVV correction", "error");
+
+        // v19.10.2 — DST guardrails on an edited clock-out. Spring-forward
+        // creates a nonexistent wall-clock hour; fall-back creates a repeated
+        // one. In both cases the round-trip through mtInputToIso won't reproduce
+        // what the operator typed. Rather than silently persist a shifted or
+        // ambiguous instant, refuse the save and ask them to pick an
+        // unambiguous minute (e.g. avoid the 1–2am DST hour).
+        if (outChanged && nextOutIso && isoToMTInput(nextOutIso) !== curOutInput) {
+          return addToast("That clock-out time is ambiguous or invalid on a daylight-saving transition. Enter a time outside the 1:00–3:00 AM DST window.", "error");
+        }
+
         const updates = {};
-        if (evvEditForm.clock_out_at) updates.clock_out_at = new Date(evvEditForm.clock_out_at).toISOString();
-        if (evvEditForm.exceptions !== undefined) updates.exceptions = evvEditForm.exceptions || null;
+        if (outChanged) updates.clock_out_at = nextOutIso;
+        if (excChanged) {
+          // Preserve structured exceptions where the operator supplied JSON;
+          // otherwise store the note as a plain string (valid jsonb either way).
+          let parsed = nextExcText === "" ? null : nextExcText;
+          if (nextExcText !== "") { try { parsed = JSON.parse(nextExcText); } catch (_) { parsed = nextExcText; } }
+          updates.exceptions = parsed;
+        }
+
+        const who = staffProfile ? `${staffProfile.first_name || ""} ${staffProfile.last_name || ""}`.trim() : (user?.email || null);
+        const entries = [];
+        if (outChanged) entries.push({ org_id: orgId, session_id: viewing.id, field: "clock_out_at", old_value: prevOutIso, new_value: nextOutIso, reason, edited_by_staff_id: staffProfile?.id || null, edited_by_name: who });
+        if (excChanged) entries.push({ org_id: orgId, session_id: viewing.id, field: "exceptions", old_value: prevExcText || null, new_value: nextExcText || null, reason, edited_by_staff_id: staffProfile?.id || null, edited_by_name: who });
+
+        setSavingEVV(true);
+        // v19.10.2 — AUDIT FIRST. The audit row and the correction are two
+        // separate writes (no shared transaction from the client). If we
+        // updated the session first and the audit insert then failed, we'd be
+        // left with an unlogged correction — the exact thing this feature
+        // exists to prevent. So we insert the audit entries first: if that
+        // fails, nothing is corrected and we stop. If the subsequent session
+        // update fails, we're left with a logged-but-unapplied entry (a
+        // harmless orphan / over-log), which is strictly safer than the
+        // reverse. A future hardening can fold both into one Postgres RPC for
+        // true atomicity.
+        const { data: logRows, error: logErr } = await supabase.from("evv_edit_log").insert(entries).select("id");
+        if (logErr) { setSavingEVV(false); return addToast(`Could not record the audit entry, so the correction was not applied: ${logErr.message}`, "error"); }
+
         const { error } = await supabase.from("evv_sessions").update(updates).eq("id", viewing.id);
         setSavingEVV(false);
-        if (error) return addToast(error.message, "error");
+        if (error) {
+          // Roll back the just-written audit rows so they don't linger as a
+          // record of a change that never landed. Best-effort — if this cleanup
+          // itself fails, the orphan is annotated by the toast for follow-up.
+          const ids = (logRows || []).map(r => r.id);
+          if (ids.length) await supabase.from("evv_edit_log").delete().in("id", ids);
+          return addToast(`The correction failed to save and was not applied: ${error.message}`, "error");
+        }
         addToast("EVV session updated", "success");
         setViewing(null);
         loadAll();
@@ -8057,7 +8201,8 @@
                       </div>
                       <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 6 }}>{g.desc}</div>
                       {g.rows.slice(0, 8).map(r => (
-                        <div key={r.id} style={{ fontSize: 12.5, color: CB.text, padding: "3px 0" }}>
+                        <div key={r.id} onClick={() => openEVVDetail(r)} title="Open this session to correct it"
+                          style={{ fontSize: 12.5, color: CB.text, padding: "3px 0", cursor: "pointer", textDecoration: "underline", textDecorationColor: `${g.color}60`, textUnderlineOffset: 3 }}>
                           {label(r)}
                           {g.key === "badMedicaid" && (
                             <span style={{ color: g.color, fontWeight: 700 }}> — MA: {r.persons?.medicaid_number ? `"${r.persons.medicaid_number}"` : "missing"}</span>
@@ -8101,7 +8246,10 @@
                   <div style={{ padding: 14, background: CB.cream, borderRadius: 10, border: `1px solid ${CB.border}` }}>
                     <div style={{ fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 4 }}>Clock Out</div>
                     {editingEVV ? (
-                      <input type="datetime-local" style={{ ...fieldStyle, padding: "8px 10px", fontSize: 13 }} value={evvEditForm.clock_out_at} onChange={e => setEvvEditForm(p => ({ ...p, clock_out_at: e.target.value }))} />
+                      <>
+                        <input type="datetime-local" style={{ ...fieldStyle, padding: "8px 10px", fontSize: 13 }} value={evvEditForm.clock_out_at} onChange={e => setEvvEditForm(p => ({ ...p, clock_out_at: e.target.value }))} />
+                        <div style={{ fontSize: 11, color: CB.textMid, marginTop: 4 }}>Mountain Time (Utah)</div>
+                      </>
                     ) : (
                       <>
                         <div style={{ fontSize: 15, fontWeight: 700, color: viewing.clock_out_at ? CB.navy : CB.amber }}>{viewing.clock_out_at ? formatTime(viewing.clock_out_at) : "Still active"}</div>
@@ -8155,11 +8303,47 @@
                       onChange={e => setEvvEditForm(p => ({ ...p, exceptions: e.target.value }))}
                       placeholder="Note any EVV exceptions (missed clock-out, GPS failure, etc.)" />
                   ) : (
-                    <div style={{ padding: "12px 16px", borderRadius: 10, background: CB.cream, border: `1px solid ${CB.border}`, fontSize: 13, color: viewing.exceptions ? CB.text : CB.textLight }}>
-                      {viewing.exceptions || "No exceptions noted"}
+                    <div style={{ padding: "12px 16px", borderRadius: 10, background: CB.cream, border: `1px solid ${CB.border}`, fontSize: 13, color: viewing.exceptions ? CB.text : CB.textLight, whiteSpace: "pre-wrap" }}>
+                      {exceptionsToText(viewing.exceptions) || "No exceptions noted"}
                     </div>
                   )}
                 </div>
+
+                {/* v19.10.1 — required justification for any manual correction */}
+                {editingEVV && (
+                  <div style={{ marginBottom: 16, padding: "14px 16px", borderRadius: 10, background: `${CB.amber}08`, border: `1px solid ${CB.amber}30` }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: CB.navy, marginBottom: 6 }}>
+                      Reason for correction <span style={{ color: CB.red }}>*</span>
+                    </div>
+                    <input style={fieldStyle} value={evvEditForm.reason || ""}
+                      onChange={e => setEvvEditForm(p => ({ ...p, reason: e.target.value }))}
+                      placeholder="e.g. Staff forgot to clock out; actual end time confirmed with supervisor" />
+                    <div style={{ fontSize: 11, color: CB.textMid, marginTop: 6 }}>
+                      Recorded in the EVV audit trail with your name and the original value. Required by EVV recordkeeping — a corrected visit must be traceable.
+                    </div>
+                  </div>
+                )}
+
+                {/* v19.10.1 — manual edit history for this session */}
+                {!editingEVV && editLog.length > 0 && (
+                  <div style={{ marginBottom: 16 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 8 }}>Manual Edit History</div>
+                    {editLog.map(e => (
+                      <div key={e.id} style={{ padding: "10px 14px", borderRadius: 10, background: CB.cream, border: `1px solid ${CB.border}`, marginBottom: 8 }}>
+                        <div style={{ fontSize: 12.5, color: CB.navy, fontWeight: 700 }}>
+                          {e.field === "clock_out_at" ? "Clock-out time" : e.field} changed
+                          {e.field === "clock_out_at" && e.old_value && e.new_value && (
+                            <span style={{ fontWeight: 600, color: CB.textMid }}> — {formatTime(e.old_value)} → {formatTime(e.new_value)}</span>
+                          )}
+                        </div>
+                        <div style={{ fontSize: 12, color: CB.text, marginTop: 3 }}>{e.reason}</div>
+                        <div style={{ fontSize: 11, color: CB.textLight, marginTop: 3 }}>
+                          {e.edited_by_name || "Unknown user"} · {formatDate(e.edited_at)} {formatTime(e.edited_at)}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
 
                 {editingEVV && (
                   <div style={{ display: "flex", justifyContent: "flex-end", gap: 12 }}>
