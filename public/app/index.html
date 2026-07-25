@@ -1173,7 +1173,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.10.1</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v19.10.2</span>
               </div>
             </div>
             {isMobile && (
@@ -7981,9 +7981,21 @@
         // correction must say who, when, what changed, and why, so a corrected
         // visit is distinguishable from one captured live at the point of care.
         const reason = (evvEditForm.reason || "").trim();
+
+        // v19.10.2 — detect a clock-out change at the WALL-CLOCK string level,
+        // before any timezone conversion. The input holds the stored instant
+        // rendered in MT (isoToMTInput); comparing the current input against
+        // that same rendering of the original tells us whether the operator
+        // actually edited the field. Crucially, when it's unchanged we keep the
+        // ORIGINAL ISO verbatim and never call mtInputToIso — so a no-op save
+        // can't shift the instant, and the DST fall-back ambiguity (a wall time
+        // that maps to two real UTC instants) is only ever reachable when the
+        // operator genuinely typed a new time.
+        const origOutInput = isoToMTInput(viewing.clock_out_at);
+        const curOutInput = evvEditForm.clock_out_at || "";
+        const outChanged = curOutInput !== origOutInput;
         const prevOutIso = viewing.clock_out_at ? new Date(viewing.clock_out_at).toISOString() : null;
-        const nextOutIso = evvEditForm.clock_out_at ? mtInputToIso(evvEditForm.clock_out_at) : null;
-        const outChanged = nextOutIso !== prevOutIso;
+        const nextOutIso = outChanged ? (curOutInput ? mtInputToIso(curOutInput) : null) : prevOutIso;
 
         const prevExcText = exceptionsToText(viewing.exceptions);
         const nextExcText = evvEditForm.exceptions ?? "";
@@ -7992,7 +8004,16 @@
         if (!outChanged && !excChanged) { setEditingEVV(false); return addToast("No changes to save", "info"); }
         if (!reason) return addToast("A reason is required for any manual EVV correction", "error");
 
-        setSavingEVV(true);
+        // v19.10.2 — DST guardrails on an edited clock-out. Spring-forward
+        // creates a nonexistent wall-clock hour; fall-back creates a repeated
+        // one. In both cases the round-trip through mtInputToIso won't reproduce
+        // what the operator typed. Rather than silently persist a shifted or
+        // ambiguous instant, refuse the save and ask them to pick an
+        // unambiguous minute (e.g. avoid the 1–2am DST hour).
+        if (outChanged && nextOutIso && isoToMTInput(nextOutIso) !== curOutInput) {
+          return addToast("That clock-out time is ambiguous or invalid on a daylight-saving transition. Enter a time outside the 1:00–3:00 AM DST window.", "error");
+        }
+
         const updates = {};
         if (outChanged) updates.clock_out_at = nextOutIso;
         if (excChanged) {
@@ -8002,20 +8023,37 @@
           if (nextExcText !== "") { try { parsed = JSON.parse(nextExcText); } catch (_) { parsed = nextExcText; } }
           updates.exceptions = parsed;
         }
-        const { error } = await supabase.from("evv_sessions").update(updates).eq("id", viewing.id);
-        if (error) { setSavingEVV(false); return addToast(error.message, "error"); }
 
-        // Audit rows are written after the update succeeds — one per changed
-        // field. A failure here is surfaced loudly rather than swallowed: an
-        // unlogged correction is exactly what this feature exists to prevent.
         const who = staffProfile ? `${staffProfile.first_name || ""} ${staffProfile.last_name || ""}`.trim() : (user?.email || null);
         const entries = [];
         if (outChanged) entries.push({ org_id: orgId, session_id: viewing.id, field: "clock_out_at", old_value: prevOutIso, new_value: nextOutIso, reason, edited_by_staff_id: staffProfile?.id || null, edited_by_name: who });
         if (excChanged) entries.push({ org_id: orgId, session_id: viewing.id, field: "exceptions", old_value: prevExcText || null, new_value: nextExcText || null, reason, edited_by_staff_id: staffProfile?.id || null, edited_by_name: who });
-        const { error: logErr } = await supabase.from("evv_edit_log").insert(entries);
+
+        setSavingEVV(true);
+        // v19.10.2 — AUDIT FIRST. The audit row and the correction are two
+        // separate writes (no shared transaction from the client). If we
+        // updated the session first and the audit insert then failed, we'd be
+        // left with an unlogged correction — the exact thing this feature
+        // exists to prevent. So we insert the audit entries first: if that
+        // fails, nothing is corrected and we stop. If the subsequent session
+        // update fails, we're left with a logged-but-unapplied entry (a
+        // harmless orphan / over-log), which is strictly safer than the
+        // reverse. A future hardening can fold both into one Postgres RPC for
+        // true atomicity.
+        const { data: logRows, error: logErr } = await supabase.from("evv_edit_log").insert(entries).select("id");
+        if (logErr) { setSavingEVV(false); return addToast(`Could not record the audit entry, so the correction was not applied: ${logErr.message}`, "error"); }
+
+        const { error } = await supabase.from("evv_sessions").update(updates).eq("id", viewing.id);
         setSavingEVV(false);
-        if (logErr) addToast(`Session updated, but the audit entry failed to save: ${logErr.message}. Record this correction manually.`, "error");
-        else addToast("EVV session updated", "success");
+        if (error) {
+          // Roll back the just-written audit rows so they don't linger as a
+          // record of a change that never landed. Best-effort — if this cleanup
+          // itself fails, the orphan is annotated by the toast for follow-up.
+          const ids = (logRows || []).map(r => r.id);
+          if (ids.length) await supabase.from("evv_edit_log").delete().in("id", ids);
+          return addToast(`The correction failed to save and was not applied: ${error.message}`, "error");
+        }
+        addToast("EVV session updated", "success");
         setViewing(null);
         loadAll();
       };
