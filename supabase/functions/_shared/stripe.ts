@@ -17,12 +17,18 @@ export function json(body: unknown, status = 200): Response {
 }
 
 // Map a Stripe price id -> our subscription_tier enum value.
-// TEST-MODE ids. When flipping to live, swap these for the live price_ ids
-// (this is the only code change at go-live besides the keys).
+// Contains BOTH modes: price ids are globally unique across test/live, so
+// coexistence is safe. Live entries serve production (v20.0 flip); test
+// entries are kept so test mode keeps working for development.
 export const PRICE_TO_TIER: Record<string, string> = {
-  "price_1TZcoKGwLlvZ0hAZhJ42EdWc": "starter", // $99/mo
-  "price_1TZcpaGwLlvZ0hAZ49guorUW": "growth",  // $299/mo
-  "price_1TZcqYGwLlvZ0hAZ4hb39WfW": "scale",   // $599/mo
+  // live (v20.0)
+  "price_1TygurK88nWsAJ4x2YH9wKjf": "starter", // $99/mo  (live)
+  "price_1TygupK88nWsAJ4xMNSGxhXV": "growth",  // $299/mo (live)
+  "price_1TyguqK88nWsAJ4xN85JsfDA": "scale",   // $599/mo (live)
+  // test
+  "price_1TZcoKGwLlvZ0hAZhJ42EdWc": "starter", // $99/mo  (test)
+  "price_1TZcpaGwLlvZ0hAZ49guorUW": "growth",  // $299/mo (test)
+  "price_1TZcqYGwLlvZ0hAZ4hb39WfW": "scale",   // $599/mo (test)
 };
 
 // Option B: collapse Stripe's richer subscription statuses down to our 4-value
