@@ -323,16 +323,20 @@
           // the DEFAULT_BRAND values until the SQL is applied.
           try {
             const { data: b } = await supabase.from("organizations")
-              .select("legal_name, display_name, address, phone, email, contract_number, contract_award_number, fein, primary_color_hex, accent_color_hex, logo_url")
+              .select("name, legal_name, display_name, address, phone, email, contract_number, contract_award_number, fein, primary_color_hex, accent_color_hex, logo_url")
               .eq("id", resolvedOrgId).maybeSingle();
             if (b) {
               const next = {
-                orgName:                b.legal_name           || DEFAULT_BRAND.orgName,
-                orgDisplayName:         b.display_name         || b.legal_name || DEFAULT_BRAND.orgDisplayName,
-                orgAddress:             b.address              || DEFAULT_BRAND.orgAddress,
-                orgPhone:               b.phone                || DEFAULT_BRAND.orgPhone,
-                orgEmail:               b.email                || DEFAULT_BRAND.orgEmail,
-                orgContractNumber:      b.contract_number      || DEFAULT_BRAND.orgContractNumber,
+                // v20.0.1 — name fields fall back to the org's own signup
+                // name (organizations.name); identity fields fall back to
+                // EMPTY, never another tenant's values (extends the v19.5.1
+                // null-fallback fix to ALL identity fields).
+                orgName:                b.legal_name           || b.name || DEFAULT_BRAND.orgName,
+                orgDisplayName:         b.display_name         || b.legal_name || b.name || DEFAULT_BRAND.orgDisplayName,
+                orgAddress:             b.address              || "",
+                orgPhone:               b.phone                || "",
+                orgEmail:               b.email                || "",
+                orgContractNumber:      b.contract_number      || "",
                 // v19.5.1 — optional identifiers: NO fallback to DEFAULT_BRAND.
                 // Null on the tenant row must stay null so the conditional
                 // rendering in createBrandedPDF's drawHeader correctly hides
@@ -1173,7 +1177,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.1</span>
               </div>
             </div>
             {isMobile && (
@@ -1484,7 +1488,7 @@
 
       return (
         <div>
-          <PageHeader title="Dashboard" subtitle={`${brand.orgName} — ${brand.orgContractNumber}`}
+          <PageHeader title="Dashboard" subtitle={brand.orgContractNumber ? `${brand.orgName} — ${brand.orgContractNumber}` : brand.orgName}
             action={
               <button onClick={loadDashboard} style={{
                 display: "flex", alignItems: "center", gap: 8, padding: "10px 18px",
@@ -8694,7 +8698,7 @@
 
       return (
         <div>
-          <PageHeader title="Compliance Dashboard" subtitle={`Real-time audit readiness — ${brand.orgContractNumber} SOW compliance scoring`}
+          <PageHeader title="Compliance Dashboard" subtitle={`Real-time audit readiness — ${brand.orgContractNumber ? brand.orgContractNumber + " " : ""}SOW compliance scoring`}
             action={
               <div style={{ display: "flex", gap: 8 }}>
                 <SecondaryButton onClick={() => HopeHavenPDF.insuranceTracker()}>{icons.fileText({ size: 15 })} Insurance Tracker</SecondaryButton>
@@ -10830,7 +10834,7 @@
       return (
         <div>
           {!embedded ? (
-            <PageHeader title="Billing & Claims" subtitle={`Auto-calculated claims from service notes with ${brand.orgContractNumber} rate table rules`}
+            <PageHeader title="Billing & Claims" subtitle={`Auto-calculated claims from service notes with ${brand.orgContractNumber ? brand.orgContractNumber + " " : ""}rate table rules`}
               action={
                 <div style={{ display: "flex", gap: 8 }}>
                   <SecondaryButton onClick={exportCSV}>{icons.barChart({ size: 15 })} Export CSV</SecondaryButton>
@@ -16383,21 +16387,24 @@
     //   -- Policies: allow authenticated read + write to that bucket.
     // ═══════════════════════════════════════════════════════════════
 
-    // v19.5 — DEFAULT_BRAND is the fallback used when:
+    // v20.0.1 — DEFAULT_BRAND is a NEUTRAL fallback used when:
     //   (a) the user isn't logged in (rare; most rendering needs auth)
     //   (b) the organizations row doesn't yet have branding columns
     //       (i.e. the v19.5 migration hasn't been applied)
     // AuthProvider overwrites the active `brand` state from the DB on login.
-    // Values below are Hope Haven's canonical truth set as of the v19.5 cut.
+    // NO tenant's identity may live here — every org's canonical values
+    // (Hope Haven's included) belong on its own organizations row.
+    // v20.0.1 bug fix: new orgs inherited Hope Haven's full identity via
+    // the || fallbacks — same class as the v19.5.1 Award/FEIN leak.
     const DEFAULT_BRAND = {
-      orgName: "Hope Haven Services Inc.",
-      orgDisplayName: "Hope Haven",
-      orgAddress: "4974 W Mellow Way, South Jordan, UT 84009",
-      orgPhone: "801-558-8070",
-      orgEmail: "hopehaven@hopehavenservices.org",
-      orgContractNumber: "DHHS91172",        // state-side identifier (most documents)
-      orgContractAwardNumber: "DHHS A04899", // formal award (audit forms)
-      orgFEIN: "",                            // populate when the real tax ID is known
+      orgName: "Your Organization",
+      orgDisplayName: "Your Organization",
+      orgAddress: "",
+      orgPhone: "",
+      orgEmail: "",
+      orgContractNumber: "",                 // rendered only when present
+      orgContractAwardNumber: null,          // conditional-render (v19.5.1)
+      orgFEIN: null,                         // conditional-render (v19.5.1)
       navyHex: "0A1E33",
       tealHex: "00897B",
       logoUrl: null,
