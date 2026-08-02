@@ -357,25 +357,20 @@
               // brand through. Mutation is safe here: brand loads once per
               // session and the object is never shared across tenants in the
               // same JS realm.
-              if (typeof HopeHavenPDF !== "undefined") {
-                HopeHavenPDF.COMPANY = (next.orgName || "").toUpperCase();
-                HopeHavenPDF.ORG_NAME = next.orgName || "";
-                HopeHavenPDF.ADDRESS = next.orgAddress || "";
-                HopeHavenPDF.PHONE   = next.orgPhone   || "";
-                HopeHavenPDF.EMAIL   = next.orgEmail   || "";
-                HopeHavenPDF.CONTRACT_NUMBER = next.orgContractNumber || "";
-                const hexToRgb = (h) => {
-                  const s = (h || "").replace(/^#/, "");
-                  if (s.length !== 6) return null;
-                  const n = parseInt(s, 16);
-                  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-                };
-                const navy = hexToRgb(next.navyHex); if (navy) HopeHavenPDF.HEADER_COLOR = navy;
-                const teal = hexToRgb(next.tealHex); if (teal) HopeHavenPDF.ACCENT_COLOR = teal;
-              }
+              applyBrandToPDF(next);
+            } else {
+              // v20.0.1 — no branding row came back: positively reset BOTH
+              // the React brand and the legacy singleton so a prior tenant's
+              // identity can never survive an empty hydration.
+              setBrand(DEFAULT_BRAND);
+              applyBrandToPDF(DEFAULT_BRAND);
             }
           } catch (_) {
-            // Branding columns don't exist yet — DEFAULT_BRAND stays active.
+            // Branding load failed (or columns missing pre-migration) —
+            // v20.0.1: positively reset to neutral rather than retaining
+            // whatever tenant hydrated previously in this JS realm.
+            setBrand(DEFAULT_BRAND);
+            applyBrandToPDF(DEFAULT_BRAND);
           }
           // v19.8 — load subscription/billing columns in their own select so a
           // missing column never breaks branding/enforcement above.
@@ -427,12 +422,14 @@
             // first sign-in) before the actual tenant's brand loads.
             setBrandReady(false);
             setBrand(DEFAULT_BRAND);
+            applyBrandToPDF(DEFAULT_BRAND); // v20.0.1 — singleton resets with the gate
             fetchOrgId();
             fetchStaffProfile(session.user.email);
           } else {
             setOrgId(null);
             setStaffProfile(null);
             setBrand(DEFAULT_BRAND);
+            applyBrandToPDF(DEFAULT_BRAND); // v20.0.1 — singleton resets on sign-out
             setBrandReady(true);
           }
         });
@@ -4471,7 +4468,7 @@
           { head: "CHOICE & CONTROL", items: ["Right to participate in planning your own services", "Right to choose your own schedule", "Right to refuse services without fear of retaliation"] },
           { head: "PRIVACY & CONFIDENTIALITY", items: ["Right to privacy in your home", "Right to have personal information kept confidential", "Right to private communication"] },
           { head: "PERSONAL PROPERTY & FINANCES", items: ["Right to own and control your belongings and money", "Right to access your financial records", "Staff may not accept money from you"] },
-          { head: "HOW TO FILE A GRIEVANCE", items: [`Tell any ${this.ORG_NAME} staff member`, `Call ${this.ORG_NAME} at ${this.PHONE}`, "Contact your Support Coordinator", "Contact DHHS Disability Services at 1-800-837-6811", "Contact Adult Protective Services at 1-800-371-7897"] },
+          { head: "HOW TO FILE A GRIEVANCE", items: [`Tell any ${this.ORG_NAME} staff member`, this.PHONE ? `Call ${this.ORG_NAME} at ${this.PHONE}` : null, "Contact your Support Coordinator", "Contact DHHS Disability Services at 1-800-837-6811", "Contact Adult Protective Services at 1-800-371-7897"].filter(Boolean) },
         ];
         sections.forEach(sec => {
           if (y > 240) { doc.addPage(); y = 20; }
@@ -11345,7 +11342,7 @@
 
       const pdfHeader = (doc, title, subtitle) => {
         doc.setFontSize(18); doc.setFont(undefined, "bold"); doc.text(HopeHavenPDF.ORG_NAME, 20, 20);
-        doc.setFontSize(10); doc.setFont(undefined, "normal"); doc.text(`DHHS Contract: ${HopeHavenPDF.CONTRACT_NUMBER}`, 20, 27);
+        if (HopeHavenPDF.CONTRACT_NUMBER) { doc.setFontSize(10); doc.setFont(undefined, "normal"); doc.text(`DHHS Contract: ${HopeHavenPDF.CONTRACT_NUMBER}`, 20, 27); }
         doc.setFontSize(14); doc.setFont(undefined, "bold"); doc.text(title, 20, 38);
         if (subtitle) { doc.setFontSize(10); doc.setFont(undefined, "normal"); doc.text(subtitle, 20, 45); }
         doc.setLineWidth(0.5); doc.line(20, subtitle ? 48 : 42, 190, subtitle ? 48 : 42);
@@ -13495,7 +13492,7 @@
                 sce:       { label: "Support Coordinator",   subject: "Service Update — [Client]",                              body: `Dear [SCE Name],\n\nI am writing to provide an update regarding services for [Client Name].\n\n[Details]\n\nPlease do not hesitate to contact us with questions.\n\nSincerely,\n${brand.orgName}` },
                 physician: { label: "Physician",             subject: "Medical Update — [Client]",                              body: `Dear Dr. [Name],\n\nThis letter is regarding your patient, [Client Name], who receives residential and community support services through ${brand.orgName}.\n\n[Medical details]\n\nPlease contact us at your earliest convenience.\n\nSincerely,\n${brand.orgName}` },
                 family:    { label: "Family / Guardian",     subject: "Monthly Update — [Client]",                              body: `Dear [Family Member],\n\nWe hope this message finds you well. Below is an update on [Client Name]'s services and progress this month.\n\n[Update details]\n\nWarm regards,\n${brand.orgName}` },
-                dspd:      { label: "DSPD / State",          subject: `Provider Communication — ${brand.orgContractNumber}`,    body: `To Whom It May Concern,\n\n${brand.orgName} (DHHS Contract #${brand.orgContractNumber}) is writing regarding:\n\n[Details]\n\nPlease contact us at ${brand.orgEmail} for any questions.\n\nSincerely,\n${brand.orgName}` },
+                dspd:      { label: "DSPD / State",          subject: `Provider Communication — ${brand.orgContractNumber || "[Contract #]"}`,    body: `To Whom It May Concern,\n\n${brand.orgName}${brand.orgContractNumber ? ` (DHHS Contract #${brand.orgContractNumber})` : ""} is writing regarding:\n\n[Details]\n\n${brand.orgEmail ? `Please contact us at ${brand.orgEmail} for any questions.` : "Please contact us with any questions."}\n\nSincerely,\n${brand.orgName}` },
               };
               const loadTemplate = (type) => {
                 const t = templates[type];
@@ -13506,7 +13503,8 @@
                 const { jsPDF } = window.jspdf;
                 const doc = new jsPDF();
                 doc.setFontSize(18); doc.setFont(undefined, "bold"); doc.text(brand.orgName, 20, 20);
-                doc.setFontSize(10); doc.setFont(undefined, "normal"); doc.text(`DHHS Contract: ${brand.orgContractNumber} | ${brand.orgEmail}`, 20, 27);
+                const hdrParts = [brand.orgContractNumber ? `DHHS Contract: ${brand.orgContractNumber}` : "", brand.orgEmail || ""].filter(Boolean);
+                if (hdrParts.length) { doc.setFontSize(10); doc.setFont(undefined, "normal"); doc.text(hdrParts.join(" | "), 20, 27); }
                 doc.setFontSize(8); doc.text("CONFIDENTIAL — This communication may contain Protected Health Information (PHI)", 20, 33);
                 doc.setLineWidth(0.5); doc.line(20, 36, 190, 36);
                 let y = 44;
@@ -13534,7 +13532,7 @@
                 }
               };
               const copyToClipboard = () => {
-                const text = `To: ${secForm.recipient_name} <${secForm.recipient_email}>\nSubject: ${secForm.subject}\n\n${secForm.body}\n\n---\nThis message was composed via Provly Secure Communications.\n${brand.orgName} | ${brand.orgContractNumber}`;
+                const text = `To: ${secForm.recipient_name} <${secForm.recipient_email}>\nSubject: ${secForm.subject}\n\n${secForm.body}\n\n---\nThis message was composed via Provly Secure Communications.\n${[brand.orgName, brand.orgContractNumber].filter(Boolean).join(" | ")}`;
                 navigator.clipboard.writeText(text);
                 addToast("Copied to clipboard", "success");
               };
@@ -16411,6 +16409,29 @@
     };
     // Backwards-compat alias — anything that imported HOPE_HAVEN_BRAND keeps working.
     const HOPE_HAVEN_BRAND = DEFAULT_BRAND;
+
+    // v20.0.1 — apply a brand object to the legacy HopeHavenPDF singleton.
+    // Called on hydration success AND on every reset/empty/error path so the
+    // singleton can never retain a previous tenant's identity (stale-singleton
+    // finding: a failed same-realm branding load previously left the prior
+    // tenant's values in place for jsPDF callers).
+    function applyBrandToPDF(bb) {
+      if (typeof HopeHavenPDF === "undefined" || !bb) return;
+      HopeHavenPDF.COMPANY = (bb.orgName || "").toUpperCase();
+      HopeHavenPDF.ORG_NAME = bb.orgName || "";
+      HopeHavenPDF.ADDRESS = bb.orgAddress || "";
+      HopeHavenPDF.PHONE   = bb.orgPhone   || "";
+      HopeHavenPDF.EMAIL   = bb.orgEmail   || "";
+      HopeHavenPDF.CONTRACT_NUMBER = bb.orgContractNumber || "";
+      const hexToRgb = (h) => {
+        const s = (h || "").replace(/^#/, "");
+        if (s.length !== 6) return null;
+        const n = parseInt(s, 16);
+        return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+      };
+      const navy = hexToRgb(bb.navyHex); if (navy) HopeHavenPDF.HEADER_COLOR = navy;
+      const teal = hexToRgb(bb.tealHex); if (teal) HopeHavenPDF.ACCENT_COLOR = teal;
+    }
 
     // Audit form catalog. Each entry maps a form_type to its renderer + scope.
     // New forms are registered here; the Audit Center renders one card per entry.
