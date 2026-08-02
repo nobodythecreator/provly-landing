@@ -316,14 +316,32 @@
               person_specific: org.enforcement_person_specific || "warn",
             });
           }
+          // v20.0.1 — hydrate the org's base signup name FIRST, in its own
+          // guaranteed-schema query. `name` is original-schema and always
+          // present; it must never be hidden because an OPTIONAL branding
+          // column is missing from a pre-migration install (PostgREST 400s
+          // the whole projection if ANY column is absent).
+          let baseName = "";
+          try {
+            const { data: nameRow } = await supabase.from("organizations")
+              .select("name").eq("id", resolvedOrgId).maybeSingle();
+            baseName = (nameRow && nameRow.name) || "";
+          } catch (_) { /* name unavailable — neutral fallback below */ }
+          // Reset target for failed/empty branding hydration: neutral but
+          // NAMED — tenant isolation holds without hiding the org's own name.
+          const NAMED_DEFAULT = baseName
+            ? { ...DEFAULT_BRAND, orgName: baseName, orgDisplayName: baseName }
+            : DEFAULT_BRAND;
           // v19.5 — load branding columns in a SEPARATE select so a missing
           // column doesn't break enforcement above. PostgREST returns 400 if
           // any column in the projection doesn't exist; isolating these into
           // their own request means pre-migration installs keep working with
-          // the DEFAULT_BRAND values until the SQL is applied.
+          // the fallback values until the SQL is applied. (v20.0.1: this
+          // projection must contain ONLY optional branding columns — never
+          // add guaranteed identity columns here; `name` hydrates above.)
           try {
             const { data: b } = await supabase.from("organizations")
-              .select("name, legal_name, display_name, address, phone, email, contract_number, contract_award_number, fein, primary_color_hex, accent_color_hex, logo_url")
+              .select("legal_name, display_name, address, phone, email, contract_number, contract_award_number, fein, primary_color_hex, accent_color_hex, logo_url")
               .eq("id", resolvedOrgId).maybeSingle();
             if (b) {
               const next = {
@@ -331,8 +349,8 @@
                 // name (organizations.name); identity fields fall back to
                 // EMPTY, never another tenant's values (extends the v19.5.1
                 // null-fallback fix to ALL identity fields).
-                orgName:                b.legal_name           || b.name || DEFAULT_BRAND.orgName,
-                orgDisplayName:         b.display_name         || b.legal_name || b.name || DEFAULT_BRAND.orgDisplayName,
+                orgName:                b.legal_name           || baseName || DEFAULT_BRAND.orgName,
+                orgDisplayName:         b.display_name         || b.legal_name || baseName || DEFAULT_BRAND.orgDisplayName,
                 orgAddress:             b.address              || "",
                 orgPhone:               b.phone                || "",
                 orgEmail:               b.email                || "",
@@ -361,16 +379,18 @@
             } else {
               // v20.0.1 — no branding row came back: positively reset BOTH
               // the React brand and the legacy singleton so a prior tenant's
-              // identity can never survive an empty hydration.
-              setBrand(DEFAULT_BRAND);
-              applyBrandToPDF(DEFAULT_BRAND);
+              // identity can never survive an empty hydration — but keep the
+              // org's own signup name (NAMED_DEFAULT).
+              setBrand(NAMED_DEFAULT);
+              applyBrandToPDF(NAMED_DEFAULT);
             }
           } catch (_) {
             // Branding load failed (or columns missing pre-migration) —
-            // v20.0.1: positively reset to neutral rather than retaining
-            // whatever tenant hydrated previously in this JS realm.
-            setBrand(DEFAULT_BRAND);
-            applyBrandToPDF(DEFAULT_BRAND);
+            // v20.0.1: positively reset rather than retaining whatever tenant
+            // hydrated previously in this JS realm; NAMED_DEFAULT preserves
+            // the org's guaranteed-schema signup name through the reset.
+            setBrand(NAMED_DEFAULT);
+            applyBrandToPDF(NAMED_DEFAULT);
           }
           // v19.8 — load subscription/billing columns in their own select so a
           // missing column never breaks branding/enforcement above.
