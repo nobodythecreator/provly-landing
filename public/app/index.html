@@ -306,7 +306,17 @@
           } catch (_) {}
           if (!resolvedOrgId) {
             const { data, error } = await supabase.rpc('org_id');
-            if (error || !data) return;
+            if (error || !data) {
+              // v20.0.1 — org lookup failed on an explicit refresh: positively
+              // reset brand + singleton rather than leaving a previous
+              // tenant's identity active. brandReady still releases via
+              // finally, so the app renders neutral chrome instead of stale.
+              if (!stale()) {
+                setBrand(DEFAULT_BRAND);
+                applyBrandToPDF(DEFAULT_BRAND);
+              }
+              return;
+            }
             resolvedOrgId = data;
           }
           if (stale()) return;
