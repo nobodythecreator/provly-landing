@@ -288,6 +288,11 @@
       const [subscription, setSubscription] = useState(null);
 
       const fetchOrgId = async () => {
+        // v20.0.1 — stale-response guard: this run owns the epoch it captured;
+        // if another hydration (new sign-in / sign-out) starts meanwhile, every
+        // write below is skipped and the newer run's writes win.
+        const epoch = ++brandFetchEpoch;
+        const stale = () => epoch !== brandFetchEpoch;
         // v19.5 dev override — `?org=<uuid>` lets you preview another tenant's
         // branding without re-authing. Used during the white-label proof test
         // (insert a fake org row, switch via the URL param, regenerate PDFs).
@@ -304,12 +309,13 @@
             if (error || !data) return;
             resolvedOrgId = data;
           }
+          if (stale()) return;
           setOrgId(resolvedOrgId);
           // Try to load enforcement settings — graceful fallback if columns don't exist yet
           const { data: org } = await supabase.from("organizations")
             .select("enforcement_role, enforcement_training, enforcement_person_specific")
             .eq("id", resolvedOrgId).maybeSingle();
-          if (org) {
+          if (org && !stale()) {
             setEnforcement({
               role: org.enforcement_role || "soft",
               training: org.enforcement_training || "warn",
@@ -368,6 +374,7 @@
                 tealHex:                b.accent_color_hex      || DEFAULT_BRAND.tealHex,
                 logoUrl:                b.logo_url              || null,
               };
+              if (stale()) return;
               setBrand(next);
               // Also push values into the legacy HopeHavenPDF singleton so its
               // jsPDF callers (Doc Engine, Secure Comms, the rightsGrievance
@@ -381,6 +388,7 @@
               // the React brand and the legacy singleton so a prior tenant's
               // identity can never survive an empty hydration — but keep the
               // org's own signup name (NAMED_DEFAULT).
+              if (stale()) return;
               setBrand(NAMED_DEFAULT);
               applyBrandToPDF(NAMED_DEFAULT);
             }
@@ -389,6 +397,7 @@
             // v20.0.1: positively reset rather than retaining whatever tenant
             // hydrated previously in this JS realm; NAMED_DEFAULT preserves
             // the org's guaranteed-schema signup name through the reset.
+            if (stale()) return;
             setBrand(NAMED_DEFAULT);
             applyBrandToPDF(NAMED_DEFAULT);
           }
@@ -398,7 +407,7 @@
             const { data: sub } = await supabase.from("organizations")
               .select("subscription_status, subscription_tier, trial_ends_at, stripe_customer_id, stripe_subscription_id")
               .eq("id", resolvedOrgId).maybeSingle();
-            if (sub) setSubscription(sub);
+            if (sub && !stale()) setSubscription(sub);
           } catch (_) { /* billing columns absent — leave subscription null */ }
         } finally {
           // v19.7.4 — release the brand-gate regardless of how we exited.
@@ -408,7 +417,7 @@
           // against is the brief race window between session ready and
           // brand hydrated where AppShell would otherwise show the
           // wrong tenant's chrome.
-          setBrandReady(true);
+          if (!stale()) setBrandReady(true);
         }
       };
 
@@ -446,6 +455,7 @@
             fetchOrgId();
             fetchStaffProfile(session.user.email);
           } else {
+            brandFetchEpoch++; // v20.0.1 — invalidate any in-flight hydration
             setOrgId(null);
             setStaffProfile(null);
             setBrand(DEFAULT_BRAND);
@@ -16452,6 +16462,12 @@
       const navy = hexToRgb(bb.navyHex); if (navy) HopeHavenPDF.HEADER_COLOR = navy;
       const teal = hexToRgb(bb.tealHex); if (teal) HopeHavenPDF.ACCENT_COLOR = teal;
     }
+
+    // v20.0.1 — monotonically increasing hydration token. Each fetchOrgId run
+    // captures the current value; any state write from a run whose token is no
+    // longer current is DROPPED, so a slow branding response from a previous
+    // session can never overwrite the current session's brand (race finding).
+    let brandFetchEpoch = 0;
 
     // Audit form catalog. Each entry maps a form_type to its renderer + scope.
     // New forms are registered here; the Audit Center renders one card per entry.
