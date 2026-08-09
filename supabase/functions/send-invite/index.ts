@@ -96,6 +96,18 @@ Deno.serve(async (req) => {
       .maybeSingle();
     const orgName = org?.display_name || org?.legal_name || org?.name || "your organization";
 
+    // v20.0.3 — supersede semantics: a new invite to an address revokes any
+    // prior PENDING invite for it first, so expired invites never deadlock
+    // re-inviting and "resend" works with no extra UI (the partial unique
+    // index would otherwise block replacements until manual revocation).
+    await admin
+      .from("invites")
+      .update({ revoked_at: new Date().toISOString() })
+      .eq("org_id", callerStaff.org_id)
+      .eq("email", email)
+      .is("accepted_at", null)
+      .is("revoked_at", null);
+
     // Create the invite row (service role; RLS bypassed by design here).
     const { data: invite, error: invErr } = await admin
       .from("invites")
@@ -111,9 +123,10 @@ Deno.serve(async (req) => {
       .single();
 
     if (invErr) {
-      // 23505 = the partial unique index: a pending invite already exists.
+      // 23505 = the partial unique index — only reachable as a race
+      // (concurrent sends), since pending invites are superseded above.
       if ((invErr as { code?: string }).code === "23505") {
-        return json({ error: "A pending invite already exists for that email" }, 409);
+        return json({ error: "An invite for that email was just sent — try again in a moment" }, 409);
       }
       console.error("invite insert failed:", invErr);
       return json({ error: "Could not create invite" }, 500);

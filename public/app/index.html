@@ -1187,6 +1187,62 @@
     }
 
 
+    // v20.0.3 — authenticated invite acceptance. A signed-in user opening
+    // an invite link lands here instead of being silently routed into the
+    // app (previously the "sign in first, then reopen your invite link"
+    // path dead-ended). Calls accept_invite directly; the RPC enforces
+    // email match, expiry, revocation, and single-org membership.
+    function AcceptInvitePage({ token }) {
+      const [status, setStatus] = useState("working"); // working | error
+      const [message, setMessage] = useState("");
+      useEffect(() => {
+        let alive = true;
+        (async () => {
+          try {
+            const { error } = await supabase.rpc("accept_invite", { p_token: token });
+            if (!alive) return;
+            if (error) {
+              setStatus("error");
+              setMessage(error.message || "This invitation could not be accepted.");
+              return;
+            }
+            // The org_id JWT claim was just written server-side; refresh the
+            // session, then hard-reload onto /app so AuthProvider rehydrates
+            // with the new claim from a clean slate.
+            await supabase.auth.refreshSession();
+            window.history.replaceState({}, "", "/app");
+            window.location.reload();
+          } catch (err) {
+            if (alive) {
+              setStatus("error");
+              setMessage(err.message || "Something went wrong. Please try again.");
+            }
+          }
+        })();
+        return () => { alive = false; };
+      }, [token]);
+      return (
+        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: CB.cream, flexDirection: "column", gap: 16, padding: 24 }}>
+          <div style={{ width: 48, height: 48, borderRadius: 14, background: `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            {icons.shield({ size: 24, color: CB.white })}
+          </div>
+          {status === "working" && (
+            <React.Fragment>
+              <Spinner size={22} />
+              <div style={{ fontSize: 15, color: CB.textMid, fontWeight: 500 }}>Accepting your invitation…</div>
+            </React.Fragment>
+          )}
+          {status === "error" && (
+            <div style={{ maxWidth: 440, textAlign: "center" }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: CB.navy, marginBottom: 8 }}>Couldn't accept this invitation</div>
+              <div style={{ fontSize: 14, color: CB.textMid, marginBottom: 20 }}>{message}</div>
+              <a href="/app" style={{ color: CB.teal, fontWeight: 600, textDecoration: "none" }}>Go to the app →</a>
+            </div>
+          )}
+        </div>
+      );
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // SIDEBAR
     // ═══════════════════════════════════════════════════════════════
@@ -18066,6 +18122,7 @@
         return <AppShell />;
       }
 
+      if (user && inviteToken) return <AcceptInvitePage token={inviteToken} />;
       if (!user && inviteToken) return <SignupPage inviteToken={inviteToken} />;
       if (!user && isSignupPath) return <SignupPage />;
       return user ? <AppShell /> : <LoginPage />;
