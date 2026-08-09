@@ -112,8 +112,9 @@ Deno.serve(async (req) => {
     // No cleanup step is load-bearing for the recipient's access — the only
     // honest guarantee available across a non-transactional email boundary.
     // (Requires v20.0.3.2: the pending-unique index is dropped; and
-    // v20.0.3.3: accept_invite enforces newest-pending-wins, so acceptance
-    // correctness never depends on any revocation in this function.)
+    // v20.0.3.3/.4: get_invite + accept_invite enforce newest-pending-wins
+    // under the total order (created_at, id), so acceptance correctness
+    // never depends on any revocation in this function — even on ties.)
 
     // Create the invite row (service role; RLS bypassed by design here).
     const { data: invite, error: invErr } = await admin
@@ -207,20 +208,36 @@ Deno.serve(async (req) => {
     // revocation is hygiene. supabase-js reports failures by RESOLVING with
     // { error } (it does not throw), so both shapes are checked and logged.
     try {
-      const { error: supErr } = await admin
+      // Two updates = strictly-less in the TOTAL order (created_at, id):
+      // (1) strictly older timestamps; (2) tied timestamps with a lower id.
+      // Matches the accept-side guard exactly, so the newest-by-total-order
+      // invite can never be revoked by a peer send — including on ties
+      // (round-7 finding). Still pure hygiene: accept enforces the order.
+      const { error: supErr1 } = await admin
         .from("invites")
         .update({ revoked_at: new Date().toISOString() })
         .eq("org_id", callerStaff.org_id)
         .eq("email", email)
         .is("accepted_at", null)
         .is("revoked_at", null)
-        .lt("created_at", invite.created_at)
-        .neq("id", invite.id);
-      if (supErr) {
-        console.error("post-delivery supersede returned error (harmless — newest-pending-wins enforced at accept):", supErr);
+        .lt("created_at", invite.created_at);
+      if (supErr1) {
+        console.error("supersede pass 1 returned error (harmless — order enforced at accept):", supErr1);
+      }
+      const { error: supErr2 } = await admin
+        .from("invites")
+        .update({ revoked_at: new Date().toISOString() })
+        .eq("org_id", callerStaff.org_id)
+        .eq("email", email)
+        .is("accepted_at", null)
+        .is("revoked_at", null)
+        .eq("created_at", invite.created_at)
+        .lt("id", invite.id);
+      if (supErr2) {
+        console.error("supersede pass 2 returned error (harmless — order enforced at accept):", supErr2);
       }
     } catch (superErr) {
-      console.error("post-delivery supersede threw (harmless — newest-pending-wins enforced at accept):", superErr);
+      console.error("post-delivery supersede threw (harmless — order enforced at accept):", superErr);
     }
 
     return json({ ok: true, inviteId: invite.id, expiresAt: invite.expires_at });

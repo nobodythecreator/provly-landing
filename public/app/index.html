@@ -898,6 +898,25 @@
         if (inviteMode) {
           setSubmitting(true);
           try {
+            // v20.0.3.4 — re-validate at the submit instant so an account is
+            // never created against a link that has meanwhile been
+            // superseded, revoked, or expired (round-7: no account creation
+            // on a deterministically dead link). Only a DEFINITIVE invalid
+            // payload is surfaced into the banner — a transient RPC error
+            // must not flip the form out of join mode or claim the link is
+            // bad when it may be fine. Fails closed either way.
+            const { data: recheck, error: recheckErr } = await supabase.rpc("get_invite", { p_token: inviteToken });
+            if (recheckErr || !recheck || !recheck.valid) {
+              if (!recheckErr && recheck) setInvite(recheck);
+              setSubmitError(
+                recheckErr
+                  ? "Couldn't verify your invitation — check your connection and try again."
+                  : recheck && recheck.reason === "superseded"
+                    ? "A newer invitation was sent to this email. Open the most recent invite email and use that link."
+                    : "This invitation is no longer valid — see the notice above.");
+              setSubmitting(false);
+              return;
+            }
             const { data: authData, error: authErr } = await supabase.auth.signUp({
               email: invite.email,
               password: form.password,
@@ -919,7 +938,14 @@
             const { error: acceptErr } = await supabase.rpc("accept_invite", { p_token: inviteToken });
             if (acceptErr) {
               console.error("accept_invite failed:", acceptErr);
-              setSubmitError(`Account created but joining failed: ${acceptErr.message}. Please contact your administrator.`);
+              // v20.0.3.4 — the one race the submit-instant re-check can't
+              // close (a newer invite landing in between) self-heals: the
+              // account now has a session, so opening the NEWEST link routes
+              // to AcceptInvitePage and joins cleanly. Say exactly that.
+              const superseded = /newer invitation/i.test(acceptErr.message || "");
+              setSubmitError(superseded
+                ? "Your account was created, but a newer invitation replaced this link. Open the most recent invite email and click its link to finish joining."
+                : `Account created but joining failed: ${acceptErr.message}. Please contact your administrator.`);
               setSubmitting(false);
               return;
             }
@@ -1117,10 +1143,13 @@
                   {invite && invite.reason === "expired" ? "This invitation has expired."
                     : invite && invite.reason === "accepted" ? "This invitation was already used."
                     : invite && invite.reason === "revoked" ? "This invitation was revoked."
+                    : invite && invite.reason === "superseded" ? "A newer invitation has been sent — use the most recent invite email."
                     : "This invitation link isn't valid."}
                 </div>
                 <div style={{ fontSize: 13, color: CB.textMid }}>
-                  Ask your administrator to send a new invite, or continue below to create a new organization instead.
+                  {invite && invite.reason === "superseded"
+                    ? "This older link no longer works — check your inbox for the most recent invite email and use that one."
+                    : "Ask your administrator to send a new invite, or continue below to create a new organization instead."}
                 </div>
               </div>
             )}
