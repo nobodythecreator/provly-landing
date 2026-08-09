@@ -96,33 +96,23 @@ Deno.serve(async (req) => {
       .maybeSingle();
     const orgName = org?.display_name || org?.legal_name || org?.name || "your organization";
 
-    // v20.0.3 — supersede semantics WITH restore-on-failure: a new invite
-    // replaces any prior pending one, but if creating or delivering the
-    // replacement fails, the prior invite is restored — the recipient is
-    // never left without a usable link (review finding: revoke-before-
-    // replace stranded recipients when the replacement failed).
-    const { data: priorInvite } = await admin
-      .from("invites")
-      .select("id")
-      .eq("org_id", callerStaff.org_id)
-      .eq("email", email)
-      .is("accepted_at", null)
-      .is("revoked_at", null)
-      .maybeSingle();
-    if (priorInvite) {
-      await admin
-        .from("invites")
-        .update({ revoked_at: new Date().toISOString() })
-        .eq("id", priorInvite.id);
-    }
-    const restorePrior = async () => {
-      if (priorInvite) {
-        await admin
-          .from("invites")
-          .update({ revoked_at: null })
-          .eq("id", priorInvite.id);
-      }
-    };
+    // v20.0.3 — DELIVERY-FIRST supersede. The new invite is created and its
+    // email delivered while any prior pending invite remains untouched and
+    // usable; only after confirmed delivery are older pendings revoked.
+    // Failure residue is therefore SAFE in every branch:
+    //   * insert fails  -> nothing changed; the prior link still works
+    //   * email fails   -> best-effort delete of the undelivered row; even
+    //                      if that also fails, the leftover is inert (never
+    //                      emailed, unguessable token, email-match enforced
+    //                      at accept, ages out at expiry) and the prior link
+    //                      still works
+    //   * post-delivery revoke fails -> the recipient briefly holds two
+    //                      working links; the next successful invite or
+    //                      expiry supersedes them
+    // No cleanup step is load-bearing for the recipient's access — the only
+    // honest guarantee available across a non-transactional email boundary.
+    // (Requires v20.0.3.2: the pending-unique index is dropped; concurrent
+    // duplicates resolve at accept time — first accept wins.)
 
     // Create the invite row (service role; RLS bypassed by design here).
     const { data: invite, error: invErr } = await admin
@@ -139,13 +129,7 @@ Deno.serve(async (req) => {
       .single();
 
     if (invErr) {
-      // Creation failed — put the prior invite back before reporting.
-      await restorePrior();
-      // 23505 = the partial unique index — only reachable as a race
-      // (concurrent sends), since pending invites are superseded above.
-      if ((invErr as { code?: string }).code === "23505") {
-        return json({ error: "An invite for that email was just sent — try again in a moment" }, 409);
-      }
+      // Nothing was changed — the prior invite (if any) is untouched.
       console.error("invite insert failed:", invErr);
       return json({ error: "Could not create invite" }, 500);
     }
@@ -201,11 +185,32 @@ Deno.serve(async (req) => {
         ? await sendRes.text().catch(() => "")
         : "no response (transport failure)";
       console.error("Resend send failed:", sendRes ? sendRes.status : "-", detail);
-      // Honest failure: remove the undelivered row AND restore the prior
-      // invite, so the recipient ALWAYS keeps a usable link.
-      await admin.from("invites").delete().eq("id", invite.id);
-      await restorePrior();
+      // Best-effort hygiene: remove the undelivered row. The prior invite
+      // was never touched, so the recipient's usable link is intact even if
+      // this delete fails (the leftover row is inert — see doctrine above).
+      try {
+        await admin.from("invites").delete().eq("id", invite.id);
+      } catch (delErr) {
+        console.error("undelivered-invite cleanup failed (harmless):", delErr);
+      }
       return json({ error: "Invite email could not be sent" }, 502);
+    }
+
+    // Delivery confirmed — NOW supersede any older pending invites for this
+    // address. Best-effort: if this fails, the recipient temporarily holds
+    // more than one working link, which is harmless and self-heals on the
+    // next successful invite or at expiry.
+    try {
+      await admin
+        .from("invites")
+        .update({ revoked_at: new Date().toISOString() })
+        .eq("org_id", callerStaff.org_id)
+        .eq("email", email)
+        .is("accepted_at", null)
+        .is("revoked_at", null)
+        .neq("id", invite.id);
+    } catch (superErr) {
+      console.error("post-delivery supersede failed (harmless — older links stay valid until expiry):", superErr);
     }
 
     return json({ ok: true, inviteId: invite.id, expiresAt: invite.expires_at });
