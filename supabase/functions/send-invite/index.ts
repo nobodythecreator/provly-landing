@@ -155,7 +155,9 @@ Deno.serve(async (req) => {
     const inviterName = [callerStaff.first_name, callerStaff.last_name]
       .filter(Boolean).join(" ") || "An administrator";
 
-    const sendRes = await fetch("https://api.resend.com/emails", {
+    let sendRes: Response | null = null;
+    try {
+      sendRes = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${resendKey}`,
@@ -184,13 +186,23 @@ Deno.serve(async (req) => {
           </div>
         `,
       }),
-    });
+      });
+    } catch (sendErr) {
+      // Round-4 finding: a network-level rejection makes fetch THROW with no
+      // response object — previously that escaped to the outer catch and
+      // skipped cleanup, leaving the prior invite revoked and the
+      // replacement undelivered. Caught here so both failure shapes
+      // (thrown transport error, non-ok HTTP response) share one cleanup.
+      console.error("Resend transport failure (fetch threw):", sendErr);
+    }
 
-    if (!sendRes.ok) {
-      const detail = await sendRes.text().catch(() => "");
-      console.error("Resend send failed:", sendRes.status, detail);
+    if (!sendRes || !sendRes.ok) {
+      const detail = sendRes
+        ? await sendRes.text().catch(() => "")
+        : "no response (transport failure)";
+      console.error("Resend send failed:", sendRes ? sendRes.status : "-", detail);
       // Honest failure: remove the undelivered row AND restore the prior
-      // invite, so the recipient keeps a usable link.
+      // invite, so the recipient ALWAYS keeps a usable link.
       await admin.from("invites").delete().eq("id", invite.id);
       await restorePrior();
       return json({ error: "Invite email could not be sent" }, 502);
