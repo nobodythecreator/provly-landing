@@ -951,7 +951,21 @@
             }
             // The org_id JWT claim was just written server-side; refresh the
             // session so RLS sees it immediately.
-            await supabase.auth.refreshSession();
+            // Round-8: navigation is GATED on the refresh actually succeeding.
+            // supabase-js RESOLVES with { error } (it does not throw) — the
+            // join is complete server-side, but entering with the pre-join
+            // token (no org_id claim) would strand the user behind RLS.
+            let { error: refreshErr } = await supabase.auth.refreshSession();
+            if (refreshErr) {
+              ({ error: refreshErr } = await supabase.auth.refreshSession());
+            }
+            if (refreshErr) {
+              console.error("post-accept session refresh failed:", refreshErr);
+              await supabase.auth.signOut().catch(() => {});
+              setSubmitError("You've joined successfully, but this tab couldn't refresh your session. Use the Sign in link below to enter your workspace.");
+              setSubmitting(false);
+              return;
+            }
             window.history.pushState({}, "", "/app");
             window.dispatchEvent(new PopStateEvent("popstate"));
             return;
@@ -1222,7 +1236,7 @@
     // path dead-ended). Calls accept_invite directly; the RPC enforces
     // email match, expiry, revocation, and single-org membership.
     function AcceptInvitePage({ token }) {
-      const [status, setStatus] = useState("working"); // working | error
+      const [status, setStatus] = useState("working"); // working | signin | error
       const [message, setMessage] = useState("");
       useEffect(() => {
         let alive = true;
@@ -1238,7 +1252,18 @@
             // The org_id JWT claim was just written server-side; refresh the
             // session, then hard-reload onto /app so AuthProvider rehydrates
             // with the new claim from a clean slate.
-            await supabase.auth.refreshSession();
+            // Round-8: gated on refresh success (supabase-js resolves with
+            // { error }); the join is complete server-side, but navigating
+            // with the pre-join token would strand the user behind RLS.
+            let { error: refreshErr } = await supabase.auth.refreshSession();
+            if (refreshErr) {
+              ({ error: refreshErr } = await supabase.auth.refreshSession());
+            }
+            if (refreshErr) {
+              console.error("post-accept session refresh failed:", refreshErr);
+              setStatus("signin");
+              return;
+            }
             window.history.replaceState({}, "", "/app");
             window.location.reload();
           } catch (err) {
@@ -1260,6 +1285,13 @@
               <Spinner size={22} />
               <div style={{ fontSize: 15, color: CB.textMid, fontWeight: 500 }}>Accepting your invitation…</div>
             </React.Fragment>
+          )}
+          {status === "signin" && (
+            <div style={{ maxWidth: 440, textAlign: "center" }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: CB.navy, marginBottom: 8 }}>You've joined — one more step</div>
+              <div style={{ fontSize: 14, color: CB.textMid, marginBottom: 20 }}>Your invitation was accepted, but this tab couldn't refresh your session. Sign in again to enter your workspace.</div>
+              <a href="/app" onClick={async (e) => { e.preventDefault(); await supabase.auth.signOut().catch(() => {}); window.location.href = "/app"; }} style={{ color: CB.teal, fontWeight: 600, textDecoration: "none" }}>Sign in to continue →</a>
+            </div>
           )}
           {status === "error" && (
             <div style={{ maxWidth: 440, textAlign: "center" }}>
