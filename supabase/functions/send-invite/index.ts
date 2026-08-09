@@ -96,17 +96,33 @@ Deno.serve(async (req) => {
       .maybeSingle();
     const orgName = org?.display_name || org?.legal_name || org?.name || "your organization";
 
-    // v20.0.3 — supersede semantics: a new invite to an address revokes any
-    // prior PENDING invite for it first, so expired invites never deadlock
-    // re-inviting and "resend" works with no extra UI (the partial unique
-    // index would otherwise block replacements until manual revocation).
-    await admin
+    // v20.0.3 — supersede semantics WITH restore-on-failure: a new invite
+    // replaces any prior pending one, but if creating or delivering the
+    // replacement fails, the prior invite is restored — the recipient is
+    // never left without a usable link (review finding: revoke-before-
+    // replace stranded recipients when the replacement failed).
+    const { data: priorInvite } = await admin
       .from("invites")
-      .update({ revoked_at: new Date().toISOString() })
+      .select("id")
       .eq("org_id", callerStaff.org_id)
       .eq("email", email)
       .is("accepted_at", null)
-      .is("revoked_at", null);
+      .is("revoked_at", null)
+      .maybeSingle();
+    if (priorInvite) {
+      await admin
+        .from("invites")
+        .update({ revoked_at: new Date().toISOString() })
+        .eq("id", priorInvite.id);
+    }
+    const restorePrior = async () => {
+      if (priorInvite) {
+        await admin
+          .from("invites")
+          .update({ revoked_at: null })
+          .eq("id", priorInvite.id);
+      }
+    };
 
     // Create the invite row (service role; RLS bypassed by design here).
     const { data: invite, error: invErr } = await admin
@@ -123,6 +139,8 @@ Deno.serve(async (req) => {
       .single();
 
     if (invErr) {
+      // Creation failed — put the prior invite back before reporting.
+      await restorePrior();
       // 23505 = the partial unique index — only reachable as a race
       // (concurrent sends), since pending invites are superseded above.
       if ((invErr as { code?: string }).code === "23505") {
@@ -171,8 +189,10 @@ Deno.serve(async (req) => {
     if (!sendRes.ok) {
       const detail = await sendRes.text().catch(() => "");
       console.error("Resend send failed:", sendRes.status, detail);
-      // Honest failure: remove the row so the UI can say "not sent" truthfully.
+      // Honest failure: remove the undelivered row AND restore the prior
+      // invite, so the recipient keeps a usable link.
       await admin.from("invites").delete().eq("id", invite.id);
+      await restorePrior();
       return json({ error: "Invite email could not be sent" }, 502);
     }
 
