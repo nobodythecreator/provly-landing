@@ -111,8 +111,9 @@ Deno.serve(async (req) => {
     //                      expiry supersedes them
     // No cleanup step is load-bearing for the recipient's access — the only
     // honest guarantee available across a non-transactional email boundary.
-    // (Requires v20.0.3.2: the pending-unique index is dropped; concurrent
-    // duplicates resolve at accept time — first accept wins.)
+    // (Requires v20.0.3.2: the pending-unique index is dropped; and
+    // v20.0.3.3: accept_invite enforces newest-pending-wins, so acceptance
+    // correctness never depends on any revocation in this function.)
 
     // Create the invite row (service role; RLS bypassed by design here).
     const { data: invite, error: invErr } = await admin
@@ -125,7 +126,7 @@ Deno.serve(async (req) => {
         role,
         invited_by: caller.id,
       })
-      .select("id, expires_at")
+      .select("id, expires_at, created_at")
       .single();
 
     if (invErr) {
@@ -189,28 +190,37 @@ Deno.serve(async (req) => {
       // was never touched, so the recipient's usable link is intact even if
       // this delete fails (the leftover row is inert — see doctrine above).
       try {
-        await admin.from("invites").delete().eq("id", invite.id);
-      } catch (delErr) {
-        console.error("undelivered-invite cleanup failed (harmless):", delErr);
+        const { error: delErr } = await admin.from("invites").delete().eq("id", invite.id);
+        if (delErr) console.error("undelivered-invite cleanup returned error (harmless):", delErr);
+      } catch (delThrow) {
+        console.error("undelivered-invite cleanup threw (harmless):", delThrow);
       }
       return json({ error: "Invite email could not be sent" }, 502);
     }
 
-    // Delivery confirmed — NOW supersede any older pending invites for this
-    // address. Best-effort: if this fails, the recipient temporarily holds
-    // more than one working link, which is harmless and self-heals on the
-    // next successful invite or at expiry.
+    // Delivery confirmed — supersede STRICTLY OLDER pendings only (round 6):
+    // .lt(created_at) means concurrent sends can never revoke each other's
+    // newest link (the newest row is older than nothing). And correctness
+    // does not depend on this succeeding at all: accept_invite enforces
+    // NEWEST-PENDING-WINS transactionally (v20.0.3.3), so a stale link —
+    // including a higher-role one — dies at acceptance regardless. This
+    // revocation is hygiene. supabase-js reports failures by RESOLVING with
+    // { error } (it does not throw), so both shapes are checked and logged.
     try {
-      await admin
+      const { error: supErr } = await admin
         .from("invites")
         .update({ revoked_at: new Date().toISOString() })
         .eq("org_id", callerStaff.org_id)
         .eq("email", email)
         .is("accepted_at", null)
         .is("revoked_at", null)
+        .lt("created_at", invite.created_at)
         .neq("id", invite.id);
+      if (supErr) {
+        console.error("post-delivery supersede returned error (harmless — newest-pending-wins enforced at accept):", supErr);
+      }
     } catch (superErr) {
-      console.error("post-delivery supersede failed (harmless — older links stay valid until expiry):", superErr);
+      console.error("post-delivery supersede threw (harmless — newest-pending-wins enforced at accept):", superErr);
     }
 
     return json({ ok: true, inviteId: invite.id, expiresAt: invite.expires_at });
