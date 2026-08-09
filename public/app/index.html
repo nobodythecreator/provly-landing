@@ -1298,6 +1298,13 @@
               <div style={{ fontSize: 16, fontWeight: 700, color: CB.navy, marginBottom: 8 }}>Couldn't accept this invitation</div>
               <div style={{ fontSize: 14, color: CB.textMid, marginBottom: 20 }}>{message}</div>
               <a href="/app" style={{ color: CB.teal, fontWeight: 600, textDecoration: "none" }}>Go to the app →</a>
+              {/* Round-10: refreshing after a completed acceptance replays the
+                  consumed invite into this error state while the browser may
+                  still hold the pre-join token. A fresh sign-in mints the
+                  claim-bearing token, so this recovery is always available. */}
+              <div style={{ marginTop: 14 }}>
+                <a href="/app" onClick={async (e) => { e.preventDefault(); await supabase.auth.signOut().catch(() => {}); window.location.href = "/app"; }} style={{ fontSize: 13, color: CB.textMid, textDecoration: "underline" }}>Just accepted this invite but can't get in? Sign out and sign back in →</a>
+              </div>
             </div>
           )}
         </div>
