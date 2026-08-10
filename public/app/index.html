@@ -820,11 +820,42 @@
     // Branding. Decision-fatigue principle: don't make users choose
     // colors before they've seen them in context.
     // ═══════════════════════════════════════════════════════════════
-    function SignupPage() {
+    function SignupPage({ inviteToken = null }) {
       const [form, setForm] = useState({
         legal_name: "", address: "", phone: "", email: "", contract_number: "",
         first_name: "", last_name: "", password: "", confirm_password: "",
       });
+      // v20.0.3 — invite mode ("join an existing org"). The token is looked
+      // up pre-auth via get_invite; a valid payload flips the page into JOIN
+      // mode: org fields hidden, email locked to the invite.
+      const [invite, setInvite] = useState(null);
+      const [inviteLoading, setInviteLoading] = useState(!!inviteToken);
+      useEffect(() => {
+        if (!inviteToken) return;
+        let alive = true;
+        (async () => {
+          try {
+            const { data, error } = await supabase.rpc("get_invite", { p_token: inviteToken });
+            const payload = error ? { valid: false, reason: "error" } : data;
+            if (!alive) return;
+            setInvite(payload);
+            if (payload && payload.valid) {
+              setForm(f => ({
+                ...f,
+                email: payload.email || f.email,
+                first_name: payload.first_name || f.first_name,
+                last_name: payload.last_name || f.last_name,
+              }));
+            }
+          } catch (_) {
+            if (alive) setInvite({ valid: false, reason: "error" });
+          } finally {
+            if (alive) setInviteLoading(false);
+          }
+        })();
+        return () => { alive = false; };
+      }, [inviteToken]);
+      const inviteMode = !!inviteToken && !!(invite && invite.valid);
       const [errors, setErrors] = useState({});
       const [submitting, setSubmitting] = useState(false);
       const [submitError, setSubmitError] = useState("");
@@ -837,13 +868,16 @@
 
       const validate = () => {
         const e = {};
-        // Org info
-        if (!form.legal_name.trim())              e.legal_name = "Required";
-        if (!form.address.trim())                 e.address = "Required";
-        if (!form.phone.trim())                   e.phone = "Required";
-        if (!form.email.trim())                   e.email = "Required";
-        else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) e.email = "Invalid email format";
-        if (!form.contract_number.trim())         e.contract_number = "Required";
+        // Org info — skipped in invite mode (joining an existing org; the
+        // email is fixed by the invite and enforced server-side).
+        if (!inviteMode) {
+          if (!form.legal_name.trim())              e.legal_name = "Required";
+          if (!form.address.trim())                 e.address = "Required";
+          if (!form.phone.trim())                   e.phone = "Required";
+          if (!form.email.trim())                   e.email = "Required";
+          else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) e.email = "Invalid email format";
+          if (!form.contract_number.trim())         e.contract_number = "Required";
+        }
         // Admin account
         if (!form.first_name.trim())              e.first_name = "Required";
         if (!form.last_name.trim())               e.last_name = "Required";
@@ -858,6 +892,90 @@
         const e = validate();
         setErrors(e);
         if (Object.values(e).some(Boolean)) return;
+
+        // v20.0.3 — JOIN path: create the auth user, then accept_invite
+        // (joins the inviting org) instead of signup_create_organization.
+        if (inviteMode) {
+          setSubmitting(true);
+          try {
+            // v20.0.3.4 — re-validate at the submit instant so an account is
+            // never created against a link that has meanwhile been
+            // superseded, revoked, or expired (round-7: no account creation
+            // on a deterministically dead link). Only a DEFINITIVE invalid
+            // payload is surfaced into the banner — a transient RPC error
+            // must not flip the form out of join mode or claim the link is
+            // bad when it may be fine. Fails closed either way.
+            const { data: recheck, error: recheckErr } = await supabase.rpc("get_invite", { p_token: inviteToken });
+            if (recheckErr || !recheck || !recheck.valid) {
+              if (!recheckErr && recheck) setInvite(recheck);
+              setSubmitError(
+                recheckErr
+                  ? "Couldn't verify your invitation — check your connection and try again."
+                  : recheck && recheck.reason === "superseded"
+                    ? "A newer invitation was sent to this email. Open the most recent invite email and use that link."
+                    : "This invitation is no longer valid — see the notice above.");
+              setSubmitting(false);
+              return;
+            }
+            const { data: authData, error: authErr } = await supabase.auth.signUp({
+              email: invite.email,
+              password: form.password,
+            });
+            if (authErr) {
+              if (/already registered|already exists|user already/i.test(authErr.message)) {
+                setSubmitError("That email is already registered. Sign in first, then open your invite link again.");
+              } else {
+                setSubmitError(authErr.message || "Sign-up failed. Please try again.");
+              }
+              setSubmitting(false);
+              return;
+            }
+            if (!authData || !authData.session) {
+              setSubmitError("Account created — confirm your email, then open your invite link again to finish joining.");
+              setSubmitting(false);
+              return;
+            }
+            const { error: acceptErr } = await supabase.rpc("accept_invite", { p_token: inviteToken });
+            if (acceptErr) {
+              console.error("accept_invite failed:", acceptErr);
+              // v20.0.3.4 — the one race the submit-instant re-check can't
+              // close (a newer invite landing in between) self-heals: the
+              // account now has a session, so opening the NEWEST link routes
+              // to AcceptInvitePage and joins cleanly. Say exactly that.
+              const superseded = /newer invitation/i.test(acceptErr.message || "");
+              setSubmitError(superseded
+                ? "Your account was created, but a newer invitation replaced this link. Open the most recent invite email and click its link to finish joining."
+                : `Account created but joining failed: ${acceptErr.message}. Please contact your administrator.`);
+              setSubmitting(false);
+              return;
+            }
+            // The org_id JWT claim was just written server-side; refresh the
+            // session so RLS sees it immediately.
+            // Round-8: navigation is GATED on the refresh actually succeeding.
+            // supabase-js RESOLVES with { error } (it does not throw) — the
+            // join is complete server-side, but entering with the pre-join
+            // token (no org_id claim) would strand the user behind RLS.
+            let { error: refreshErr } = await supabase.auth.refreshSession();
+            if (refreshErr) {
+              ({ error: refreshErr } = await supabase.auth.refreshSession());
+            }
+            if (refreshErr) {
+              console.error("post-accept session refresh failed:", refreshErr);
+              await supabase.auth.signOut().catch(() => {});
+              setSubmitError("You've joined successfully, but this tab couldn't refresh your session. Use the Sign in link below to enter your workspace.");
+              setSubmitting(false);
+              return;
+            }
+            window.history.pushState({}, "", "/app");
+            window.dispatchEvent(new PopStateEvent("popstate"));
+            return;
+          } catch (err) {
+            console.error("Invite signup unexpected error:", err);
+            setSubmitError(err.message || "Something went wrong. Please try again.");
+            setSubmitting(false);
+            return;
+          }
+        }
 
         setSubmitting(true);
         try {
@@ -1006,9 +1124,11 @@
               }}>
                 {icons.shield({ size: 28, color: CB.white })}
               </div>
-              <h1 style={{ fontSize: 32, fontWeight: 800, color: CB.navy, letterSpacing: -1, marginBottom: 6 }}>Start your trial</h1>
+              <h1 style={{ fontSize: 32, fontWeight: 800, color: CB.navy, letterSpacing: -1, marginBottom: 6 }}>{inviteMode ? `Join ${invite.org_name}` : "Start your trial"}</h1>
               <p style={{ fontSize: 15, color: CB.textMid, fontWeight: 500 }}>
-                30 days free. No credit card required.
+                {inviteMode
+                  ? `You've been invited to join ${invite.org_name} on Provly as ${(STAFF_ROLES.find(x => x.value === invite.role) || {}).label || invite.role}.`
+                  : "30 days free. No credit card required."}
               </p>
             </div>
 
@@ -1024,7 +1144,32 @@
               </div>
             )}
 
-            {/* Section 1: Organization */}
+            {/* v20.0.3 — invite lookup states */}
+            {inviteToken && inviteLoading && (
+              <div style={{ textAlign: "center", padding: "8px 0 24px" }}><Spinner size={20} /></div>
+            )}
+            {inviteToken && !inviteLoading && !inviteMode && (
+              <div style={{
+                background: "rgba(229,57,53,0.08)", border: "1px solid rgba(229,57,53,0.2)",
+                borderRadius: 12, padding: "14px 18px", marginBottom: 20,
+              }}>
+                <div style={{ fontSize: 14, color: CB.red, fontWeight: 600, marginBottom: 4 }}>
+                  {invite && invite.reason === "expired" ? "This invitation has expired."
+                    : invite && invite.reason === "accepted" ? "This invitation was already used."
+                    : invite && invite.reason === "revoked" ? "This invitation was revoked."
+                    : invite && invite.reason === "superseded" ? "A newer invitation has been sent — use the most recent invite email."
+                    : "This invitation link isn't valid."}
+                </div>
+                <div style={{ fontSize: 13, color: CB.textMid }}>
+                  {invite && invite.reason === "superseded"
+                    ? "This older link no longer works — check your inbox for the most recent invite email and use that one."
+                    : "Ask your administrator to send a new invite, or continue below to create a new organization instead."}
+                </div>
+              </div>
+            )}
+
+            {/* Section 1: Organization — hidden in invite mode */}
+            {!inviteMode && (
             <div style={sectionStyle}>
               <div style={sectionLabel}>Step 1</div>
               <h2 style={sectionTitle}>Your organization</h2>
@@ -1038,12 +1183,13 @@
               </div>
               {renderField("contract_number", "DSPD contract number", { placeholder: "e.g. DHHS00000" })}
             </div>
+            )}
 
             {/* Section 2: Admin account */}
             <div style={sectionStyle}>
-              <div style={sectionLabel}>Step 2</div>
-              <h2 style={sectionTitle}>Your account</h2>
-              <p style={sectionSub}>You'll be the owner of this Provly workspace.</p>
+              <div style={sectionLabel}>{inviteMode ? "Your account" : "Step 2"}</div>
+              <h2 style={sectionTitle}>{inviteMode ? "Create your login" : "Your account"}</h2>
+              <p style={sectionSub}>{inviteMode ? `Signing up as ${invite.email}` : "You'll be the owner of this Provly workspace."}</p>
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
                 {renderField("first_name", "First name", { autoComplete: "given-name" })}
@@ -1068,7 +1214,7 @@
               onMouseEnter={e => { if (!submitting) e.currentTarget.style.transform = "translateY(-1px)"; }}
               onMouseLeave={e => e.currentTarget.style.transform = "translateY(0)"}
             >
-              {submitting ? <Spinner size={18} color={CB.white} /> : "Create your workspace"}
+              {submitting ? <Spinner size={18} color={CB.white} /> : (inviteMode ? `Join ${invite.org_name}` : "Create your workspace")}
             </button>
 
             {/* Footer */}
@@ -1083,6 +1229,87 @@
       );
     }
 
+
+    // v20.0.3 — authenticated invite acceptance. A signed-in user opening
+    // an invite link lands here instead of being silently routed into the
+    // app (previously the "sign in first, then reopen your invite link"
+    // path dead-ended). Calls accept_invite directly; the RPC enforces
+    // email match, expiry, revocation, and single-org membership.
+    function AcceptInvitePage({ token }) {
+      const [status, setStatus] = useState("working"); // working | signin | error
+      const [message, setMessage] = useState("");
+      useEffect(() => {
+        let alive = true;
+        (async () => {
+          try {
+            const { error } = await supabase.rpc("accept_invite", { p_token: token });
+            if (!alive) return;
+            if (error) {
+              setStatus("error");
+              setMessage(error.message || "This invitation could not be accepted.");
+              return;
+            }
+            // The org_id JWT claim was just written server-side; refresh the
+            // session, then hard-reload onto /app so AuthProvider rehydrates
+            // with the new claim from a clean slate.
+            // Round-8: gated on refresh success (supabase-js resolves with
+            // { error }); the join is complete server-side, but navigating
+            // with the pre-join token would strand the user behind RLS.
+            let { error: refreshErr } = await supabase.auth.refreshSession();
+            if (refreshErr) {
+              ({ error: refreshErr } = await supabase.auth.refreshSession());
+            }
+            if (refreshErr) {
+              console.error("post-accept session refresh failed:", refreshErr);
+              setStatus("signin");
+              return;
+            }
+            window.history.replaceState({}, "", "/app");
+            window.location.reload();
+          } catch (err) {
+            if (alive) {
+              setStatus("error");
+              setMessage(err.message || "Something went wrong. Please try again.");
+            }
+          }
+        })();
+        return () => { alive = false; };
+      }, [token]);
+      return (
+        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: CB.cream, flexDirection: "column", gap: 16, padding: 24 }}>
+          <div style={{ width: 48, height: 48, borderRadius: 14, background: `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            {icons.shield({ size: 24, color: CB.white })}
+          </div>
+          {status === "working" && (
+            <React.Fragment>
+              <Spinner size={22} />
+              <div style={{ fontSize: 15, color: CB.textMid, fontWeight: 500 }}>Accepting your invitation…</div>
+            </React.Fragment>
+          )}
+          {status === "signin" && (
+            <div style={{ maxWidth: 440, textAlign: "center" }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: CB.navy, marginBottom: 8 }}>You've joined — one more step</div>
+              <div style={{ fontSize: 14, color: CB.textMid, marginBottom: 20 }}>Your invitation was accepted, but this tab couldn't refresh your session. Sign in again to enter your workspace.</div>
+              <a href="/app" onClick={async (e) => { e.preventDefault(); await supabase.auth.signOut().catch(() => {}); window.location.href = "/app"; }} style={{ color: CB.teal, fontWeight: 600, textDecoration: "none" }}>Sign in to continue →</a>
+            </div>
+          )}
+          {status === "error" && (
+            <div style={{ maxWidth: 440, textAlign: "center" }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: CB.navy, marginBottom: 8 }}>Couldn't accept this invitation</div>
+              <div style={{ fontSize: 14, color: CB.textMid, marginBottom: 20 }}>{message}</div>
+              <a href="/app" style={{ color: CB.teal, fontWeight: 600, textDecoration: "none" }}>Go to the app →</a>
+              {/* Round-10: refreshing after a completed acceptance replays the
+                  consumed invite into this error state while the browser may
+                  still hold the pre-join token. A fresh sign-in mints the
+                  claim-bearing token, so this recovery is always available. */}
+              <div style={{ marginTop: 14 }}>
+                <a href="/app" onClick={async (e) => { e.preventDefault(); await supabase.auth.signOut().catch(() => {}); window.location.href = "/app"; }} style={{ fontSize: 13, color: CB.textMid, textDecoration: "underline" }}>Just accepted this invite but can't get in? Sign out and sign back in →</a>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // SIDEBAR
@@ -1214,7 +1441,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.1</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.3</span>
               </div>
             </div>
             {isMobile && (
@@ -1637,6 +1864,76 @@
       { value: "rn", label: "Registered Nurse" },
     ];
 
+    // v20.0.3 — invite a team member by email. Calls the send-invite edge
+    // function (owner/admin only, enforced server-side); the invitee gets a
+    // link into the ?invite= signup path and joins THIS org. Same primitive
+    // later invites HHS operators (scoped) and, in v20.5, care-circle
+    // members. No PHI ever rides in the email.
+    function InviteStaffModal({ open, onClose }) {
+      const { addToast } = useToast();
+      const [form, setForm] = useState({ email: "", first_name: "", last_name: "", role: "dsp" });
+      const [sending, setSending] = useState(false);
+      const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+      const inputStyle = {
+        width: "100%", padding: "10px 14px", borderRadius: 10,
+        border: `1px solid ${CB.border}`, fontSize: 14, fontFamily: "inherit",
+        color: CB.text, background: CB.cream, boxSizing: "border-box",
+      };
+      const labelStyle = { display: "block", fontSize: 12, fontWeight: 600, color: CB.text, marginBottom: 5 };
+      const handleSend = async () => {
+        const email = form.email.trim();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { addToast("Enter a valid email address", "error"); return; }
+        setSending(true);
+        try {
+          // callBillingFn is the generic JWT-authenticated edge-function
+          // caller (name predates non-billing functions).
+          await callBillingFn("send-invite", {
+            email,
+            firstName: form.first_name.trim(),
+            lastName: form.last_name.trim(),
+            role: form.role,
+          });
+          addToast(`Invite sent to ${email}`, "success");
+          setForm({ email: "", first_name: "", last_name: "", role: "dsp" });
+          onClose();
+        } catch (err) {
+          addToast(err.message || "Could not send invite", "error");
+        } finally {
+          setSending(false);
+        }
+      };
+      return (
+        <Modal open={open} onClose={onClose} title="Invite by Email" subtitle="They'll get a link to create their login and join this organization" width={520}>
+          <div style={{ marginBottom: 14 }}>
+            <label style={labelStyle}>Email *</label>
+            <input type="email" value={form.email} onChange={e => set("email", e.target.value)} placeholder="name@example.com" style={inputStyle} />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
+            <div>
+              <label style={labelStyle}>First name</label>
+              <input value={form.first_name} onChange={e => set("first_name", e.target.value)} style={inputStyle} />
+            </div>
+            <div>
+              <label style={labelStyle}>Last name</label>
+              <input value={form.last_name} onChange={e => set("last_name", e.target.value)} style={inputStyle} />
+            </div>
+          </div>
+          <div style={{ marginBottom: 22 }}>
+            <label style={labelStyle}>Role *</label>
+            <select value={form.role} onChange={e => set("role", e.target.value)} style={inputStyle}>
+              {STAFF_ROLES.filter(r => r.value !== "owner").map(r => (
+                <option key={r.value} value={r.value}>{r.label}</option>
+              ))}
+            </select>
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+            <SecondaryButton onClick={onClose}>Cancel</SecondaryButton>
+            <PrimaryButton onClick={handleSend} loading={sending}>{icons.send ? icons.send({ size: 15 }) : null} Send Invite</PrimaryButton>
+          </div>
+        </Modal>
+      );
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // v19.3 — ROLES, TRAINING DECKS, COMPETENCY MATRIX, ENFORCEMENT
     //
@@ -2012,6 +2309,7 @@
       };
 
       const openEdit = (row) => { setEditing(row); setFormOpen(true); };
+      const [inviteOpen, setInviteOpen] = useState(false); // v20.0.3
       const openAdd = () => { setEditing(null); setFormOpen(true); };
       const openProfile = (row) => setViewing(row);
 
@@ -2046,11 +2344,15 @@
         <div>
           <PageHeader title="Staff" subtitle="Manage team members, credentials, and training compliance"
             action={
-              <PrimaryButton onClick={openAdd}>{icons.plus({ size: 16 })} Add Staff</PrimaryButton>
+              <div style={{ display: "flex", gap: 10 }}>
+                <SecondaryButton onClick={() => setInviteOpen(true)} color={CB.teal}>{icons.mail ? icons.mail({ size: 15 }) : null} Invite by Email</SecondaryButton>
+                <PrimaryButton onClick={openAdd}>{icons.plus({ size: 16 })} Add Staff</PrimaryButton>
+              </div>
             }
           />
           <DataTable columns={columns} data={staff} loading={loading} emptyMessage="No staff members found" />
           <StaffForm open={formOpen} onClose={() => setFormOpen(false)} onSaved={loadStaff} editing={editing} />
+          <InviteStaffModal open={inviteOpen} onClose={() => setInviteOpen(false)} />
           <StaffProfileModal open={!!viewing} onClose={() => setViewing(null)} staff={viewing} onEdit={openEdit} onViewFull={onNavigate ? (id) => onNavigate("staff-profile", { type: "staff", id }) : undefined} />
         </div>
       );
@@ -17857,6 +18159,11 @@
         return () => window.removeEventListener("popstate", onPop);
       }, []);
       const isSignupPath = /\/signup\/?$/.test(pathname);
+      // v20.0.3 — an invite link (?invite=<token>) opens signup in JOIN mode
+      // for signed-out visitors.
+      const inviteToken = (typeof window !== "undefined")
+        ? new URLSearchParams(window.location.search).get("invite")
+        : null;
 
       // v19.7.4 — also gate on brandReady for authenticated users. Without
       // this, AppShell can mount with stale brand state and the user sees
@@ -17883,6 +18190,8 @@
         return <AppShell />;
       }
 
+      if (user && inviteToken) return <AcceptInvitePage token={inviteToken} />;
+      if (!user && inviteToken) return <SignupPage inviteToken={inviteToken} />;
       if (!user && isSignupPath) return <SignupPage />;
       return user ? <AppShell /> : <LoginPage />;
     }
