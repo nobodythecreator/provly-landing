@@ -13,6 +13,8 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <!-- v20.0.4h: residence moves, site-node create/edit, and site-node delete now run through transactional RPCs (place_person, save_site_unit, delete_site_unit — sql/v20.0.4h) so partial failures cannot strand an unplaced client or an orphan facility. -->
+  <!-- v20.0.4: HHS Layer 1 — site typology (rhs/hhs) + credential class + capacity ceilings on org_sites; staff employment_type + W-9 date; polymorphic staff_assignments (site XOR person edges); person_placements residency-as-history with soft-confirm census; review-surface HHS + over-census + W-9 flags; hhs_operator role gated from invites until Item 4 RLS. Runs on migrations sql/v20.0.4a-f. -->
   <!-- v19.8: Stripe subscription billing — Settings → Subscription, trial banner, soft tier limits, checkout/portal via edge functions. v20.0: LIVE mode (live price IDs below; live keys in edge-function secrets) -->
   <!-- v19.7.6: mobile EVV GPS UX — browser-specific help modal when location is blocked -->
   <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
@@ -1441,7 +1443,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.3</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.4</span>
               </div>
             </div>
             {isMobile && (
@@ -1860,6 +1862,7 @@
       { value: "day_program_director", label: "Day Program Director" },
       { value: "house_manager", label: "House Manager" },
       { value: "dsp", label: "Direct Support Professional" },
+      { value: "hhs_operator", label: "Host Home Operator" }, // v20.0.4 — HHS Layer 1 (D3/D4 design)
       { value: "bcba", label: "BCBA" },
       { value: "rn", label: "Registered Nurse" },
     ];
@@ -1921,7 +1924,11 @@
           <div style={{ marginBottom: 22 }}>
             <label style={labelStyle}>Role *</label>
             <select value={form.role} onChange={e => set("role", e.target.value)} style={inputStyle}>
-              {STAFF_ROLES.filter(r => r.value !== "owner").map(r => (
+              {/* v20.0.4 (D5) — hhs_operator stays out of the invite path until
+                  Item 4 ships relationship-scoped RLS. An operator login before
+                  those walls exist would see org-wide PHI; records exist now,
+                  logins come with the walls. Reverse this filter in Item 4. */}
+              {STAFF_ROLES.filter(r => r.value !== "owner" && r.value !== "hhs_operator").map(r => (
                 <option key={r.value} value={r.value}>{r.label}</option>
               ))}
             </select>
@@ -2068,6 +2075,7 @@
       const [form, setForm] = useState({
         first_name: "", last_name: "", email: "", phone: "",
         role: "dsp", hire_date: "", date_of_birth: "", is_active: true,
+        employment_type: "w2", w9_received_at: "", // v20.0.4 (D4)
       });
 
       useEffect(() => {
@@ -2081,9 +2089,11 @@
             hire_date: editing.hire_date || "",
             date_of_birth: editing.date_of_birth || "",
             is_active: editing.is_active !== false,
+            employment_type: editing.employment_type || "w2", // v20.0.4 (D4)
+            w9_received_at: editing.w9_received_at || "",
           });
         } else {
-          setForm({ first_name: "", last_name: "", email: "", phone: "", role: "dsp", hire_date: "", date_of_birth: "", is_active: true });
+          setForm({ first_name: "", last_name: "", email: "", phone: "", role: "dsp", hire_date: "", date_of_birth: "", is_active: true, employment_type: "w2", w9_received_at: "" });
         }
       }, [editing, open]);
 
@@ -2112,12 +2122,12 @@
           // save on a legacy record whose stored name has stray whitespace
           // will register as a change and heal it in place.
           const diff = {};
-          const fields = ["first_name", "last_name", "email", "phone", "role", "hire_date", "date_of_birth", "is_active"];
+          const fields = ["first_name", "last_name", "email", "phone", "role", "hire_date", "date_of_birth", "is_active", "employment_type", "w9_received_at"]; // v20.0.4
           fields.forEach(k => {
             const before = editing[k] ?? (k === "is_active" ? true : "");
             const after = clean[k] ?? (k === "is_active" ? true : "");
             if (before !== after) {
-              diff[k] = (after === "" && (k === "email" || k === "phone")) ? null : after;
+              diff[k] = (after === "" && (k === "email" || k === "phone" || k === "w9_received_at")) ? null : after;
             }
           });
           if (Object.keys(diff).length === 0) {
@@ -2131,6 +2141,7 @@
           const payload = { ...clean, org_id: orgId };
           if (!payload.email) delete payload.email;
           if (!payload.phone) delete payload.phone;
+          if (!payload.w9_received_at) delete payload.w9_received_at; // v20.0.4 — date column rejects ""
           result = await supabase.from("staff").insert(payload);
         }
         setSaving(false);
@@ -2182,6 +2193,21 @@
             <FormField label="Hire Date" required half>
               <input style={fieldStyle} type="date" value={form.hire_date} onChange={e => set("hire_date", e.target.value)} />
             </FormField>
+          </FormRow>
+          {/* v20.0.4 (D4) — employment classification is recorded, never inferred
+              from role; the W-9 date (not a boolean) is what audits ask for. */}
+          <FormRow>
+            <FormField label="Employment" required half>
+              <select style={fieldStyle} value={form.employment_type} onChange={e => set("employment_type", e.target.value)}>
+                <option value="w2">W-2 Employee</option>
+                <option value="contractor_1099">1099 Contractor</option>
+              </select>
+            </FormField>
+            {form.employment_type === "contractor_1099" && (
+              <FormField label="W-9 Received" half>
+                <input style={fieldStyle} type="date" value={form.w9_received_at} onChange={e => set("w9_received_at", e.target.value)} />
+              </FormField>
+            )}
           </FormRow>
           {editing && (
             <FormField label="Status">
@@ -2303,7 +2329,7 @@
 
       const loadStaff = async () => {
         setLoading(true);
-        const { data, error } = await supabase.from("staff").select("id, first_name, last_name, role, hire_date, date_of_birth, is_active, email, phone").order("last_name");
+        const { data, error } = await supabase.from("staff").select("id, first_name, last_name, role, hire_date, date_of_birth, is_active, email, phone, employment_type, w9_received_at").order("last_name");
         if (!error) setStaff(data || []);
         setLoading(false);
       };
@@ -2324,7 +2350,15 @@
             onMouseLeave={e => { e.currentTarget.style.color = CB.navy; }}
           >{r.first_name} {r.last_name}</button>
         )},
-        { label: "Role", render: (r) => <Badge text={STAFF_ROLES.find(x => x.value === r.role)?.label || r.role?.replace(/_/g, " ") || "—"} color={CB.navy} /> },
+        { label: "Role", render: (r) => (
+          <div style={{ display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center" }}>
+            <Badge text={STAFF_ROLES.find(x => x.value === r.role)?.label || r.role?.replace(/_/g, " ") || "—"} color={CB.navy} />
+            {/* v20.0.4 (D6) — 1099 chip; amber = W-9 missing, the mirror's flag */}
+            {r.employment_type === "contractor_1099" && (
+              <Badge text={r.w9_received_at ? "1099" : "1099 · W-9 missing"} color={r.w9_received_at ? CB.teal : CB.amber} />
+            )}
+          </div>
+        )},
         { label: "Hire Date", render: (r) => r.hire_date ? new Date(r.hire_date + "T00:00:00").toLocaleDateString() : "—" },
         { label: "Status", render: (r) => <Badge text={r.is_active ? "Active" : "Inactive"} color={r.is_active ? CB.green : CB.textLight} /> },
         { label: "Email", render: (r) => r.email || "—" },
@@ -2853,17 +2887,19 @@
       const [formOpen, setFormOpen] = useState(false);
       const [editing, setEditing] = useState(null);
       const [scLookup, setScLookup] = useState({});
+      const [hhsSet, setHhsSet] = useState(new Set()); // v20.0.4 (D6) — persons actively placed at a host home
       const [viewing, setViewing] = useState(null);
 
       useEffect(() => { loadClients(); }, []);
 
       const loadClients = async () => {
         setLoading(true);
-        const [clientRes, scRes] = await Promise.all([
+        const [clientRes, scRes, placeRes] = await Promise.all([
           supabase.from("persons")
             .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, support_coordinator, support_coordinator_phone, support_coordinator_email, support_coordinator_agency, guardian_name, guardian_phone, guardian_relation, emergency_contact_name, emergency_contact_phone, physician_name, physician_phone, address, city, state, zip, phone, person_service_authorizations(id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code))")
             .order("last_name"),
           supabase.from("service_code_definitions").select("id, code").order("code"),
+          supabase.from("person_placements").select("person_id, org_sites(site_type)").is("end_date", null), // v20.0.4
         ]);
         if (clientRes.error) {
           // Client load error
@@ -2874,6 +2910,11 @@
         const lookup = {};
         (scRes.data || []).forEach(sc => { lookup[sc.id] = sc.code; });
         setScLookup(lookup);
+        // v20.0.4 (D6) — the chip travels with the PERSON (derived from live
+        // placement), because the individual is the record, not the building.
+        const hh = new Set();
+        (placeRes?.data || []).forEach(p => { if (p.org_sites?.site_type === "hhs") hh.add(p.person_id); });
+        setHhsSet(hh);
         setLoading(false);
       };
 
@@ -2892,6 +2933,7 @@
             onMouseLeave={e => { e.currentTarget.style.color = CB.navy; }}
           >{r.first_name} {r.last_name}</button>
         )},
+        { label: "", render: (r) => hhsSet.has(r.id) ? <Badge text="Host home" color={CB.teal} /> : null }, // v20.0.4 (D6)
         { label: "Medicaid #", render: (r) => r.medicaid_number || "—" },
         { label: "DOB", render: (r) => r.date_of_birth ? new Date(r.date_of_birth + "T00:00:00").toLocaleDateString() : "—" },
         { label: "Status", render: (r) => <Badge text={r.is_active ? "Active" : "Inactive"} color={r.is_active ? CB.green : CB.textLight} /> },
@@ -8894,14 +8936,16 @@
       const runAudit = async () => {
         setLoading(true);
         try {
-          const [staffRes, clientRes, trainingRes, topicRes, authRes, noteRes, evvRes] = await Promise.all([
-            supabase.from("staff").select("id, first_name, last_name, role, hire_date, is_active").eq("is_active", true),
+          const [staffRes, clientRes, trainingRes, topicRes, authRes, noteRes, evvRes, siteRes, placeRes] = await Promise.all([
+            supabase.from("staff").select("id, first_name, last_name, role, hire_date, is_active, employment_type, w9_received_at").eq("is_active", true),
             supabase.from("persons").select("id, first_name, last_name, is_active").eq("is_active", true),
             supabase.from("staff_trainings").select("id, staff_id, training_topic_id, completed_at, expires_at"),
             supabase.from("training_topic_definitions").select("id, topic_name, category, deadline_days, renewal_months, requires_certification"),
             supabase.from("person_service_authorizations").select("id, person_id, service_code_id, authorized_units, used_units, end_date, service_code_definitions(code)"),
             supabase.from("service_notes").select("id, person_id, service_code_id, service_date, status").order("service_date", { ascending: false }).limit(500),
             supabase.from("evv_sessions").select("id, staff_id, person_id, clock_in_at, clock_out_at, clock_in_lat, clock_in_lng, geofence_valid").order("clock_in_at", { ascending: false }).limit(200),
+            supabase.from("org_sites").select("id, name, site_type, credential_type, capacity").eq("is_active", true), // v20.0.4
+            supabase.from("person_placements").select("site_id").is("end_date", null), // v20.0.4
           ]);
 
           const staff = staffRes.data || [];
@@ -8913,6 +8957,33 @@
           const evvSessions = evvRes.data || [];
           const now = new Date();
           const flaggedIssues = [];
+
+          // ── v20.0.4 (D2/D6) — SITE CENSUS vs CEILING + HOST-HOME PAPERWORK ──
+          // The mirror regime: over-census is computed here from committed truth
+          // and flagged loudly; nothing upstream blocked the recording of it.
+          const siteRows = siteRes.data || [];
+          const activePlacements = placeRes.data || [];
+          const siteCensus = {};
+          activePlacements.forEach(p => { siteCensus[p.site_id] = (siteCensus[p.site_id] || 0) + 1; });
+          siteRows.forEach(s => {
+            const n = siteCensus[s.id] || 0;
+            if (s.capacity != null && n > s.capacity) {
+              const limitName = s.site_type === "hhs" ? "HHS 2-individual limit (statute)"
+                : s.credential_type === "certified" ? "certified-class ceiling of 3"
+                : `licensed capacity of ${s.capacity}`;
+              flaggedIssues.push({ severity: "high", category: "Sites", message: `${s.name} — ${n} of ${s.capacity} residents, over its ${limitName}` });
+            }
+            if (s.site_type === "hhs" && s.capacity == null) {
+              flaggedIssues.push({ severity: "high", category: "Sites", message: `${s.name} — host home missing its capacity record (statute pins 2)` });
+            }
+          });
+          // Operator W-9 standing: the provider is the operator's office of
+          // licensing — keeping their paperwork current is the provider's duty.
+          staff.forEach(s => {
+            if (s.role === "hhs_operator" && s.employment_type === "contractor_1099" && !s.w9_received_at) {
+              flaggedIssues.push({ severity: "medium", category: "Host Homes", message: `${s.first_name} ${s.last_name} — 1099 host home operator, W-9 not on file` });
+            }
+          });
 
           // ── TRAINING COMPLIANCE ──
           const requiredTopics = topics.filter(t => t.deadline_days || t.renewal_months);
@@ -12153,17 +12224,58 @@
       const [units, setUnits] = useState([]);
       const [loading, setLoading] = useState(true);
       const [addingTo, setAddingTo] = useState(false); // false = modal closed; null = adding root; id = adding child
-      const [newUnit, setNewUnit] = useState({ name: "", unit_type: "group", address: "", city: "" });
+      const [newUnit, setNewUnit] = useState({ name: "", unit_type: "group", address: "", city: "", site_type: "", credential_type: "", capacity: "", license_number: "", license_expiration: "" });
       const [editingUnit, setEditingUnit] = useState(null);
       const [saving, setSaving] = useState(false);
+      const [sites, setSites] = useState([]);        // v20.0.4 — org_sites is the facility source of truth (G1-R)
+      const [census, setCensus] = useState({});      // v20.0.4 — site_id -> active placement count, computed on read
 
       useEffect(() => { loadUnits(); }, []);
 
       const loadUnits = async () => {
         setLoading(true);
-        const { data } = await supabase.from("org_units").select("*").order("sort_order").order("name");
-        setUnits(data || []);
+        // v20.0.4 — tree nodes are navigation; org_sites rows are the facility
+        // truth (type, credential, ceiling); census derives from live placements.
+        const [unitRes, siteRes, placeRes] = await Promise.all([
+          supabase.from("org_units").select("*").order("sort_order").order("name"),
+          supabase.from("org_sites").select("id, name, address, city, site_type, credential_type, capacity, license_number, license_expiration, is_active"),
+          supabase.from("person_placements").select("site_id").is("end_date", null),
+        ]);
+        setUnits(unitRes.data || []);
+        setSites(siteRes.data || []);
+        const counts = {};
+        (placeRes.data || []).forEach(p => { counts[p.site_id] = (counts[p.site_id] || 0) + 1; });
+        setCensus(counts);
         setLoading(false);
+      };
+
+      // v20.0.4 (D2) — ceiling provenance: statute pins HHS at 2, the certified
+      // class pins 3, a licensed site's ceiling is whatever its license says.
+      const deriveCapacity = (site_type, credential_type, entered) => {
+        if (site_type === "hhs") return 2;
+        if (credential_type === "certified") return 3;
+        const n = parseInt(entered, 10);
+        return Number.isFinite(n) && n > 0 ? n : null;
+      };
+
+      // Build the org_sites payload for a site-type unit; returns { error } on bad input.
+      const buildSitePayload = (u) => {
+        if (!u.address) return { error: "Street address is required for a Site / Facility (it goes on the facility record)" };
+        if (!u.site_type) return { error: "Choose the site type — RHS or Host Home (HHS)" };
+        if (u.site_type === "rhs" && !u.credential_type) return { error: "Choose the RHS credential class — Certified or Licensed" };
+        if (u.site_type === "rhs" && u.credential_type === "licensed" && !deriveCapacity(u.site_type, u.credential_type, u.capacity))
+          return { error: "Enter the licensed capacity from the license itself (typically 4+)" };
+        return { payload: {
+          name: u.name,
+          address: u.address,
+          city: u.city || null,
+          site_type: u.site_type,
+          credential_type: u.site_type === "hhs" ? (u.credential_type || null) : u.credential_type,
+          capacity: deriveCapacity(u.site_type, u.credential_type, u.capacity),
+          license_number: u.license_number || null,
+          license_expiration: u.license_expiration || null,
+          is_active: true,
+        }};
       };
 
       const buildTree = (parentId = null, depth = 0) => {
@@ -12183,40 +12295,91 @@
 
       const handleAdd = async () => {
         if (!newUnit.name) return addToast("Name is required", "error");
-        setSaving(true);
-        const { error } = await supabase.from("org_units").insert({
-          org_id: orgId, parent_id: addingTo, name: newUnit.name,
-          unit_type: newUnit.unit_type, address: newUnit.address || null, city: newUnit.city || null,
-        });
-        setSaving(false);
-        if (error) return addToast(error.message, "error");
+        // v20.0.4h (Greptile app round 1) — node + facility are created in ONE
+        // transaction (save_site_unit): a failed node insert can no longer
+        // strand an orphan active facility.
+        if (newUnit.unit_type === "site") {
+          const built = buildSitePayload(newUnit);
+          if (built.error) return addToast(built.error, "error");
+          setSaving(true);
+          const { error: rpcErr } = await supabase.rpc("save_site_unit", {
+            p_unit_id: null, p_parent_id: addingTo, p_name: newUnit.name,
+            p_address: newUnit.address, p_city: newUnit.city || null,
+            p_site_type: newUnit.site_type,
+            p_credential: newUnit.site_type === "rhs" ? (newUnit.credential_type || null) : (newUnit.credential_type || null),
+            p_capacity: parseInt(newUnit.capacity, 10) || null,
+            p_license_number: newUnit.license_number || null,
+            p_license_expiration: newUnit.license_expiration || null,
+          });
+          setSaving(false);
+          if (rpcErr) return addToast(rpcErr.message, "error");
+        } else {
+          setSaving(true);
+          const { error } = await supabase.from("org_units").insert({
+            org_id: orgId, parent_id: addingTo, name: newUnit.name,
+            unit_type: newUnit.unit_type, address: newUnit.address || null, city: newUnit.city || null,
+          });
+          setSaving(false);
+          if (error) return addToast(error.message, "error");
+        }
         addToast(`"${newUnit.name}" added`, "success");
         setAddingTo(null);
-        setNewUnit({ name: "", unit_type: "group", address: "", city: "" });
+        setNewUnit({ name: "", unit_type: "group", address: "", city: "", site_type: "", credential_type: "", capacity: "", license_number: "", license_expiration: "" });
         loadUnits();
       };
 
       const handleDelete = async (unitId, unitName) => {
         const children = units.filter(u => u.parent_id === unitId);
         if (children.length > 0) return addToast("Remove child units first", "error");
-        if (!confirm(`Delete "${unitName}"?`)) return;
-        const { error } = await supabase.from("org_units").delete().eq("id", unitId);
-        if (error) return addToast(error.message, "error");
+        const unit = units.find(u => u.id === unitId);
+        // v20.0.4h (Greptile app round 1) — deleting a Site/Facility node runs
+        // as ONE transaction (delete_site_unit): the linked facility is
+        // deactivated with it, and the server refuses while residents remain —
+        // coherence (an unmanageable active home), not a compliance block.
+        if (unit?.site_id) {
+          if (!confirm(`Delete "${unitName}"?\n\nIts facility record will be deactivated and disappear from site pickers. Placement history is kept.`)) return;
+          const { error } = await supabase.rpc("delete_site_unit", { p_unit_id: unitId });
+          if (error) return addToast(error.message, "error");
+        } else {
+          if (!confirm(`Delete "${unitName}"?`)) return;
+          const { error } = await supabase.from("org_units").delete().eq("id", unitId);
+          if (error) return addToast(error.message, "error");
+        }
         addToast(`"${unitName}" removed`, "success");
         loadUnits();
       };
 
       const handleEdit = async () => {
         if (!editingUnit || !editingUnit.name) return addToast("Name is required", "error");
-        setSaving(true);
-        const { error } = await supabase.from("org_units").update({
-          name: editingUnit.name,
-          unit_type: editingUnit.unit_type,
-          address: editingUnit.address || null,
-          city: editingUnit.city || null,
-        }).eq("id", editingUnit.id);
-        setSaving(false);
-        if (error) return addToast(error.message, "error");
+        // v20.0.4h (Greptile app round 1) — facility + node writes are ONE
+        // transaction (save_site_unit); a legacy site node without a facility
+        // gets one created and linked in the same transaction.
+        if (editingUnit.unit_type === "site") {
+          const built = buildSitePayload(editingUnit);
+          if (built.error) return addToast(built.error, "error");
+          setSaving(true);
+          const { error: rpcErr } = await supabase.rpc("save_site_unit", {
+            p_unit_id: editingUnit.id, p_parent_id: null, p_name: editingUnit.name,
+            p_address: editingUnit.address, p_city: editingUnit.city || null,
+            p_site_type: editingUnit.site_type,
+            p_credential: editingUnit.credential_type || null,
+            p_capacity: parseInt(editingUnit.capacity, 10) || null,
+            p_license_number: editingUnit.license_number || null,
+            p_license_expiration: editingUnit.license_expiration || null,
+          });
+          setSaving(false);
+          if (rpcErr) return addToast(rpcErr.message, "error");
+        } else {
+          setSaving(true);
+          const { error } = await supabase.from("org_units").update({
+            name: editingUnit.name,
+            unit_type: editingUnit.unit_type,
+            address: editingUnit.address || null,
+            city: editingUnit.city || null,
+          }).eq("id", editingUnit.id);
+          setSaving(false);
+          if (error) return addToast(error.message, "error");
+        }
         addToast(`"${editingUnit.name}" updated`, "success");
         setEditingUnit(null);
         loadUnits();
@@ -12246,7 +12409,7 @@
               {flatTree.length === 0 ? (
                 <div style={{ textAlign: "center", padding: "40px 0", color: CB.textLight }}>
                   <p style={{ fontSize: 15, marginBottom: 16 }}>No org units yet. Start by adding your Administration root.</p>
-                  <PrimaryButton onClick={() => { setAddingTo(null); setNewUnit({ name: "Administration", unit_type: "admin", address: "", city: "" }); }} color={CB.navy}>
+                  <PrimaryButton onClick={() => { setAddingTo(null); setNewUnit({ name: "Administration", unit_type: "admin", address: "", city: "", site_type: "", credential_type: "", capacity: "", license_number: "", license_expiration: "" }); }} color={CB.navy}>
                     {icons.plus({ size: 16 })} Create Administration Root
                   </PrimaryButton>
                 </div>
@@ -12277,14 +12440,43 @@
                           <span style={{ fontSize: 14, fontWeight: 600, color: CB.navy }}>{unit.name}</span>
                           <span style={{ fontSize: 11, color: CB.textLight, marginLeft: 8 }}>{ORG_UNIT_TYPES.find(t => t.value === unit.unit_type)?.label || unit.unit_type}</span>
                           {unit.city && <span style={{ fontSize: 11, color: CB.textLight, marginLeft: 8 }}>— {unit.city}</span>}
+                          {/* v20.0.4 (D6) — the facility truth, worn on the node: type,
+                              credential class, live occupancy vs ceiling. Over-census is
+                              flagged, never blocked — the mirror tells, it doesn't stop. */}
+                          {(() => {
+                            const s = unit.site_id ? sites.find(x => x.id === unit.site_id) : null;
+                            if (!s) return null;
+                            const n = census[s.id] || 0;
+                            const over = s.capacity != null && n > s.capacity;
+                            return (
+                              <span style={{ display: "inline-flex", gap: 5, marginLeft: 8, verticalAlign: "middle" }}>
+                                {s.site_type === "hhs" && <Badge text="Host Home" color={CB.teal} />}
+                                {s.site_type === "rhs" && s.credential_type && (
+                                  <Badge text={s.credential_type === "certified" ? "Certified RHS" : "Licensed RHS"} color={CB.blue} />
+                                )}
+                                {s.capacity != null && (
+                                  <Badge text={`${n}/${s.capacity}${over ? (s.site_type === "hhs" ? " — over HHS limit" : " — over capacity") : ""}`}
+                                    color={over ? CB.red : n === s.capacity ? CB.amber : CB.green} />
+                                )}
+                              </span>
+                            );
+                          })()}
                         </div>
                       </div>
                       <div style={{ display: "flex", gap: 4 }}>
-                        <button onClick={() => setEditingUnit({ id: unit.id, name: unit.name, unit_type: unit.unit_type, address: unit.address || "", city: unit.city || "" })} title="Edit" style={{
+                        <button onClick={() => {
+                          const s = sites.find(x => x.id === unit.site_id) || {};
+                          setEditingUnit({ id: unit.id, name: unit.name, unit_type: unit.unit_type,
+                            address: unit.address || s.address || "", city: unit.city || s.city || "",
+                            site_id: unit.site_id || null,
+                            site_type: s.site_type || "", credential_type: s.credential_type || "",
+                            capacity: s.capacity != null ? String(s.capacity) : "",
+                            license_number: s.license_number || "", license_expiration: s.license_expiration || "" });
+                        }} title="Edit" style={{
                           padding: "4px 8px", borderRadius: 6, border: `1px solid ${CB.border}`, background: CB.white,
                           color: CB.blue, cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit",
                         }}>{icons.edit({ size: 12, color: CB.blue })}</button>
-                        <button onClick={() => { setAddingTo(unit.id); setNewUnit({ name: "", unit_type: "group", address: "", city: "" }); }} title="Add child" style={{
+                        <button onClick={() => { setAddingTo(unit.id); setNewUnit({ name: "", unit_type: "group", address: "", city: "", site_type: "", credential_type: "", capacity: "", license_number: "", license_expiration: "" }); }} title="Add child" style={{
                           padding: "4px 8px", borderRadius: 6, border: `1px solid ${CB.border}`, background: CB.white,
                           color: CB.teal, cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit",
                         }}>{icons.plus({ size: 12, color: CB.teal })}</button>
@@ -12320,6 +12512,49 @@
                 <input style={fieldStyle} value={newUnit.address} onChange={e => setNewUnit(p => ({ ...p, address: e.target.value }))} placeholder="Street address" />
               </FormField>
             </FormRow>
+            {/* v20.0.4 (D2/D3) — facility record for Site/Facility nodes */}
+            {newUnit.unit_type === "site" && (
+              <div style={{ marginTop: 4, paddingTop: 14, borderTop: `1px dashed ${CB.border}` }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: CB.navy, marginBottom: 10, letterSpacing: 0.3 }}>
+                  FACILITY RECORD <span style={{ fontWeight: 400, color: CB.textLight }}>— type, credential, and ceiling (admin/owner)</span>
+                </div>
+                <FormRow>
+                  <FormField label="Site Type" required half>
+                    <select style={fieldStyle} value={newUnit.site_type} onChange={e => setNewUnit(p => ({ ...p, site_type: e.target.value, credential_type: e.target.value === "hhs" ? "" : p.credential_type }))}>
+                      <option value="">Select…</option>
+                      <option value="rhs">RHS — Residential Habilitation</option>
+                      <option value="hhs">HHS — Host Home</option>
+                    </select>
+                  </FormField>
+                  {newUnit.site_type === "rhs" && (
+                    <FormField label="Credential Class" required half>
+                      <select style={fieldStyle} value={newUnit.credential_type} onChange={e => setNewUnit(p => ({ ...p, credential_type: e.target.value }))}>
+                        <option value="">Select…</option>
+                        <option value="certified">Certified (up to 3 individuals)</option>
+                        <option value="licensed">Licensed (per license, 4+)</option>
+                      </select>
+                    </FormField>
+                  )}
+                </FormRow>
+                <FormRow>
+                  <FormField label="Capacity" half>
+                    {newUnit.site_type === "hhs" ? (
+                      <input style={{ ...fieldStyle, background: CB.cream, color: CB.textMid }} value="2 — set by statute" disabled />
+                    ) : newUnit.credential_type === "certified" ? (
+                      <input style={{ ...fieldStyle, background: CB.cream, color: CB.textMid }} value="3 — certified class ceiling" disabled />
+                    ) : (
+                      <input style={fieldStyle} type="number" min="1" value={newUnit.capacity} onChange={e => setNewUnit(p => ({ ...p, capacity: e.target.value }))} placeholder="From the license (typically 4+)" />
+                    )}
+                  </FormField>
+                  <FormField label="License / Certificate #" half>
+                    <input style={fieldStyle} value={newUnit.license_number} onChange={e => setNewUnit(p => ({ ...p, license_number: e.target.value }))} placeholder="State-issued number" />
+                  </FormField>
+                </FormRow>
+                <FormField label="License Expiration">
+                  <input style={fieldStyle} type="date" value={newUnit.license_expiration} onChange={e => setNewUnit(p => ({ ...p, license_expiration: e.target.value }))} />
+                </FormField>
+              </div>
+            )}
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 8 }}>
               <SecondaryButton onClick={() => setAddingTo(false)}>Cancel</SecondaryButton>
               <PrimaryButton onClick={handleAdd} loading={saving}>{icons.plus({ size: 16 })} Add Unit</PrimaryButton>
@@ -12347,6 +12582,49 @@
                     <input style={fieldStyle} value={editingUnit.address} onChange={e => setEditingUnit(p => ({ ...p, address: e.target.value }))} placeholder="Street address" />
                   </FormField>
                 </FormRow>
+                {/* v20.0.4 (D2/D3) — facility record for Site/Facility nodes */}
+                {editingUnit.unit_type === "site" && (
+              <div style={{ marginTop: 4, paddingTop: 14, borderTop: `1px dashed ${CB.border}` }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: CB.navy, marginBottom: 10, letterSpacing: 0.3 }}>
+                  FACILITY RECORD <span style={{ fontWeight: 400, color: CB.textLight }}>— type, credential, and ceiling (admin/owner)</span>
+                </div>
+                <FormRow>
+                  <FormField label="Site Type" required half>
+                    <select style={fieldStyle} value={editingUnit.site_type} onChange={e => setEditingUnit(p => ({ ...p, site_type: e.target.value, credential_type: e.target.value === "hhs" ? "" : p.credential_type }))}>
+                      <option value="">Select…</option>
+                      <option value="rhs">RHS — Residential Habilitation</option>
+                      <option value="hhs">HHS — Host Home</option>
+                    </select>
+                  </FormField>
+                  {editingUnit.site_type === "rhs" && (
+                    <FormField label="Credential Class" required half>
+                      <select style={fieldStyle} value={editingUnit.credential_type} onChange={e => setEditingUnit(p => ({ ...p, credential_type: e.target.value }))}>
+                        <option value="">Select…</option>
+                        <option value="certified">Certified (up to 3 individuals)</option>
+                        <option value="licensed">Licensed (per license, 4+)</option>
+                      </select>
+                    </FormField>
+                  )}
+                </FormRow>
+                <FormRow>
+                  <FormField label="Capacity" half>
+                    {editingUnit.site_type === "hhs" ? (
+                      <input style={{ ...fieldStyle, background: CB.cream, color: CB.textMid }} value="2 — set by statute" disabled />
+                    ) : editingUnit.credential_type === "certified" ? (
+                      <input style={{ ...fieldStyle, background: CB.cream, color: CB.textMid }} value="3 — certified class ceiling" disabled />
+                    ) : (
+                      <input style={fieldStyle} type="number" min="1" value={editingUnit.capacity} onChange={e => setEditingUnit(p => ({ ...p, capacity: e.target.value }))} placeholder="From the license (typically 4+)" />
+                    )}
+                  </FormField>
+                  <FormField label="License / Certificate #" half>
+                    <input style={fieldStyle} value={editingUnit.license_number} onChange={e => setEditingUnit(p => ({ ...p, license_number: e.target.value }))} placeholder="State-issued number" />
+                  </FormField>
+                </FormRow>
+                <FormField label="License Expiration">
+                  <input style={fieldStyle} type="date" value={editingUnit.license_expiration} onChange={e => setEditingUnit(p => ({ ...p, license_expiration: e.target.value }))} />
+                </FormField>
+              </div>
+            )}
                 <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 8 }}>
                   <SecondaryButton onClick={() => setEditingUnit(null)}>Cancel</SecondaryButton>
                   <PrimaryButton onClick={handleEdit} loading={saving}>{icons.save({ size: 16 })} Save Changes</PrimaryButton>
@@ -15120,6 +15398,7 @@
       const tabs = [
         { key: "overview", label: "Overview", icon: icons.users, content: <StaffOverviewTab staff={staff} /> },
         { key: "training", label: "Training", icon: icons.book, count: trainingCount, content: <StaffTrainingTab staffId={staffId} orgId={orgId} /> },
+        { key: "assignments", label: "Assignments", icon: icons.mapPin, content: <StaffAssignmentsTab staffId={staffId} orgId={orgId} /> }, // v20.0.4
         { key: "notes", label: "Service Notes", icon: icons.fileText, count: noteCount, content: <StaffNotesTab staffId={staffId} /> },
         { key: "documents", label: "Documents", icon: icons.folder || icons.fileText, content: (
           <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, padding: 20 }}>
@@ -15745,6 +16024,276 @@
       );
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // v20.0.4 — HHS LAYER 1: RESIDENCE (person_placements) + ASSIGNMENTS
+    //
+    // Placement is tracked history with rationale, never a flag — the
+    // individual is the durable unit, the home is a chapter (G1-R).
+    // Census rules are MIRROR rules: the UI warns and records, the review
+    // surface flags; nothing blocks the recording of reality (D2 doctrine).
+    // ═══════════════════════════════════════════════════════════════
+    function ClientResidenceTab({ clientId, orgId }) {
+      const { addToast } = useToast();
+      const [placements, setPlacements] = useState([]);
+      const [siteOptions, setSiteOptions] = useState([]);
+      const [census, setCensus] = useState({});
+      const [loading, setLoading] = useState(true);
+      const [placeOpen, setPlaceOpen] = useState(false);
+      const [endOpen, setEndOpen] = useState(false);
+      const [saving, setSaving] = useState(false);
+      const today = () => new Date().toISOString().split("T")[0];
+      const [placeForm, setPlaceForm] = useState({ site_id: "", start_date: today(), reason: "" });
+      const [endForm, setEndForm] = useState({ end_date: today(), reason: "" });
+
+      const load = async () => {
+        setLoading(true);
+        const [pRes, sRes, cRes] = await Promise.all([
+          supabase.from("person_placements")
+            .select("id, site_id, start_date, end_date, reason, org_sites(name, site_type, credential_type, capacity)")
+            .eq("person_id", clientId).order("start_date", { ascending: false }),
+          supabase.from("org_sites").select("id, name, site_type, credential_type, capacity").eq("is_active", true).order("name"),
+          supabase.from("person_placements").select("site_id").is("end_date", null),
+        ]);
+        setPlacements(pRes.data || []);
+        setSiteOptions(sRes.data || []);
+        const counts = {};
+        (cRes.data || []).forEach(p => { counts[p.site_id] = (counts[p.site_id] || 0) + 1; });
+        setCensus(counts);
+        setLoading(false);
+      };
+      useEffect(() => { load(); }, [clientId]);
+
+      const current = placements.find(p => !p.end_date) || null;
+      const fmtD = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString() : "—";
+
+      const handlePlace = async () => {
+        if (!placeForm.site_id) return addToast("Choose a site", "error");
+        if (!placeForm.start_date) return addToast("Start date is required", "error");
+        const site = siteOptions.find(s => s.id === placeForm.site_id);
+        const activeCount = census[placeForm.site_id] || 0;
+        // D2 soft-confirm — informed, never blocked. The database records
+        // reality; the review surface carries the flag until it's resolved.
+        if (site && site.capacity != null && activeCount >= site.capacity) {
+          const limitName = site.site_type === "hhs" ? "its 2-individual HHS limit (Utah statute)"
+            : site.credential_type === "certified" ? "its certified-class ceiling of 3"
+            : `its licensed capacity of ${site.capacity}`;
+          const ok = confirm(`This will put ${site.name} at ${activeCount + 1} of ${site.capacity} — over ${limitName}.\n\nThe placement will be recorded and the site will show OUT OF COMPLIANCE on the review surface until resolved.\n\nRecord anyway?`);
+          if (!ok) return;
+        }
+        setSaving(true);
+        // v20.0.4h (Greptile app round 1) — the move is ONE transaction now:
+        // place_person ends the old placement and starts the new one together,
+        // or neither happens. No window where a client sits unplaced.
+        const { error } = await supabase.rpc("place_person", {
+          p_person_id: clientId,
+          p_site_id: placeForm.site_id,
+          p_start: placeForm.start_date,
+          p_reason: placeForm.reason || null,
+        });
+        setSaving(false);
+        if (error) return addToast(error.message, "error");
+        addToast(current ? "Move recorded" : "Placement recorded", "success");
+        setPlaceOpen(false); setPlaceForm({ site_id: "", start_date: today(), reason: "" });
+        load();
+      };
+
+      const handleEnd = async () => {
+        if (!current) return;
+        if (!endForm.end_date) return addToast("End date is required", "error");
+        setSaving(true);
+        const { error } = await supabase.from("person_placements")
+          .update({ end_date: endForm.end_date, reason: endForm.reason || current.reason || null })
+          .eq("id", current.id);
+        setSaving(false);
+        if (error) return addToast(error.message, "error");
+        addToast("Placement ended", "success");
+        setEndOpen(false); setEndForm({ end_date: today(), reason: "" });
+        load();
+      };
+
+      if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
+
+      return (
+        <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, padding: 20 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+            <h4 style={{ fontSize: 15, fontWeight: 700, color: CB.navy }}>Residence</h4>
+            <div style={{ display: "flex", gap: 8 }}>
+              {current && <SecondaryButton onClick={() => setEndOpen(true)}>End Placement</SecondaryButton>}
+              <PrimaryButton onClick={() => setPlaceOpen(true)}>{icons.plus({ size: 14 })} {current ? "Move" : "Place at Site"}</PrimaryButton>
+            </div>
+          </div>
+
+          {current ? (
+            <div style={{ padding: "14px 16px", borderRadius: 12, border: `1px solid ${CB.border}`, background: CB.cream, marginBottom: 16 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 15, fontWeight: 700, color: CB.navy }}>{current.org_sites?.name || "—"}</span>
+                {current.org_sites?.site_type === "hhs" && <Badge text="Host Home" color={CB.teal} />}
+                {current.org_sites?.site_type === "rhs" && current.org_sites?.credential_type && (
+                  <Badge text={current.org_sites.credential_type === "certified" ? "Certified RHS" : "Licensed RHS"} color={CB.blue} />
+                )}
+              </div>
+              <div style={{ fontSize: 12, color: CB.textMid, marginTop: 4 }}>Since {fmtD(current.start_date)}{current.reason ? ` — ${current.reason}` : ""}</div>
+            </div>
+          ) : (
+            <div style={{ padding: "14px 16px", borderRadius: 12, border: `1px dashed ${CB.border}`, color: CB.textLight, fontSize: 13, marginBottom: 16 }}>
+              No current placement on record.
+            </div>
+          )}
+
+          {placements.filter(p => p.end_date).length > 0 && (
+            <>
+              <div style={{ fontSize: 12, fontWeight: 700, color: CB.textMid, marginBottom: 8, letterSpacing: 0.3 }}>HISTORY</div>
+              <div style={{ display: "grid", gap: 6 }}>
+                {placements.filter(p => p.end_date).map(p => (
+                  <div key={p.id} style={{ display: "flex", justifyContent: "space-between", padding: "8px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, fontSize: 13 }}>
+                    <span style={{ fontWeight: 600, color: CB.navy }}>{p.org_sites?.name || "—"}</span>
+                    <span style={{ color: CB.textMid }}>{fmtD(p.start_date)} → {fmtD(p.end_date)}{p.reason ? ` — ${p.reason}` : ""}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
+          <Modal open={placeOpen} onClose={() => setPlaceOpen(false)} title={current ? "Move to a New Site" : "Place at Site"} subtitle={current ? "Ends the current placement on the move date, then starts the new one" : "Starts this individual's tracked residence"}>
+            <FormField label="Site" required>
+              <select style={fieldStyle} value={placeForm.site_id} onChange={e => setPlaceForm(p => ({ ...p, site_id: e.target.value }))}>
+                <option value="">Select a site…</option>
+                {siteOptions.map(s => {
+                  const n = census[s.id] || 0;
+                  return <option key={s.id} value={s.id}>{s.name}{s.capacity != null ? ` — ${n}/${s.capacity}` : ""}{s.site_type === "hhs" ? " (Host Home)" : ""}</option>;
+                })}
+              </select>
+            </FormField>
+            <FormRow>
+              <FormField label={current ? "Move Date" : "Start Date"} required half>
+                <input style={fieldStyle} type="date" value={placeForm.start_date} onChange={e => setPlaceForm(p => ({ ...p, start_date: e.target.value }))} />
+              </FormField>
+              <FormField label="Reason" half>
+                <input style={fieldStyle} value={placeForm.reason} onChange={e => setPlaceForm(p => ({ ...p, reason: e.target.value }))} placeholder="Optional — e.g. step toward independence" />
+              </FormField>
+            </FormRow>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 8 }}>
+              <SecondaryButton onClick={() => setPlaceOpen(false)}>Cancel</SecondaryButton>
+              <PrimaryButton onClick={handlePlace} loading={saving}>{icons.save({ size: 15 })} Record</PrimaryButton>
+            </div>
+          </Modal>
+
+          <Modal open={endOpen} onClose={() => setEndOpen(false)} title="End Current Placement" subtitle={current ? `Ending residence at ${current.org_sites?.name || ""}` : ""}>
+            <FormRow>
+              <FormField label="End Date" required half>
+                <input style={fieldStyle} type="date" value={endForm.end_date} onChange={e => setEndForm(p => ({ ...p, end_date: e.target.value }))} />
+              </FormField>
+              <FormField label="Reason" half>
+                <input style={fieldStyle} value={endForm.reason} onChange={e => setEndForm(p => ({ ...p, reason: e.target.value }))} placeholder="Optional" />
+              </FormField>
+            </FormRow>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 8 }}>
+              <SecondaryButton onClick={() => setEndOpen(false)}>Cancel</SecondaryButton>
+              <PrimaryButton onClick={handleEnd} loading={saving}>{icons.save({ size: 15 })} End Placement</PrimaryButton>
+            </div>
+          </Modal>
+        </div>
+      );
+    }
+
+    // v20.0.4 — minimal assign-to-site (staff_assignments site-edges only;
+    // person-edge UI arrives when Item 4 makes anything consume it). The edge
+    // is the operator's career; placements flowing through are the chapters.
+    function StaffAssignmentsTab({ staffId, orgId }) {
+      const { addToast } = useToast();
+      const [edges, setEdges] = useState([]);
+      const [siteOptions, setSiteOptions] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [saving, setSaving] = useState(false);
+      const today = () => new Date().toISOString().split("T")[0];
+      const [form, setForm] = useState({ site_id: "", start_date: today() });
+
+      const load = async () => {
+        setLoading(true);
+        const [aRes, sRes] = await Promise.all([
+          supabase.from("staff_assignments")
+            .select("id, site_id, start_date, end_date, org_sites(name, site_type)")
+            .eq("staff_id", staffId).not("site_id", "is", null).order("start_date", { ascending: false }),
+          supabase.from("org_sites").select("id, name, site_type").eq("is_active", true).order("name"),
+        ]);
+        setEdges(aRes.data || []);
+        setSiteOptions(sRes.data || []);
+        setLoading(false);
+      };
+      useEffect(() => { load(); }, [staffId]);
+
+      const active = edges.filter(e => !e.end_date);
+      const fmtD = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString() : "—";
+
+      const handleAssign = async () => {
+        if (!form.site_id) return addToast("Choose a site", "error");
+        setSaving(true);
+        const { error } = await supabase.from("staff_assignments").insert({
+          org_id: orgId, staff_id: staffId, site_id: form.site_id,
+          start_date: form.start_date || today(), is_primary: false,
+        });
+        setSaving(false);
+        if (error) return addToast(error.message.includes("staff_assignments_active_site_uniq") ? "Already actively assigned to that site" : error.message, "error");
+        addToast("Assignment recorded", "success");
+        setForm({ site_id: "", start_date: today() });
+        load();
+      };
+
+      const handleEndEdge = async (edge) => {
+        if (!confirm(`End the assignment to ${edge.org_sites?.name || "this site"}? History is kept.`)) return;
+        const { error } = await supabase.from("staff_assignments").update({ end_date: today() }).eq("id", edge.id);
+        if (error) return addToast(error.message, "error");
+        addToast("Assignment ended", "success");
+        load();
+      };
+
+      if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
+
+      return (
+        <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, padding: 20 }}>
+          <h4 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Site Assignments</h4>
+          <p style={{ fontSize: 12, color: CB.textLight, marginBottom: 16 }}>
+            Who serves where, as dated history. In Item 4 these edges become what an operator's login can see — access flows from relationship, never role alone.
+          </p>
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 16 }}>
+            <div style={{ flex: 2, minWidth: 220 }}>
+              <FormField label="Assign to Site">
+                <select style={fieldStyle} value={form.site_id} onChange={e => setForm(p => ({ ...p, site_id: e.target.value }))}>
+                  <option value="">Select a site…</option>
+                  {siteOptions.map(s => <option key={s.id} value={s.id}>{s.name}{s.site_type === "hhs" ? " (Host Home)" : ""}</option>)}
+                </select>
+              </FormField>
+            </div>
+            <div style={{ flex: 1, minWidth: 150 }}>
+              <FormField label="Start Date">
+                <input style={fieldStyle} type="date" value={form.start_date} onChange={e => setForm(p => ({ ...p, start_date: e.target.value }))} />
+              </FormField>
+            </div>
+            <div style={{ paddingBottom: 14 }}>
+              <PrimaryButton onClick={handleAssign} loading={saving}>{icons.plus({ size: 14 })} Assign</PrimaryButton>
+            </div>
+          </div>
+          {active.length === 0 && <div style={{ padding: "12px 14px", borderRadius: 10, border: `1px dashed ${CB.border}`, color: CB.textLight, fontSize: 13, marginBottom: 12 }}>No active site assignments.</div>}
+          <div style={{ display: "grid", gap: 6 }}>
+            {edges.map(e => (
+              <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", borderRadius: 8, border: `1px solid ${e.end_date ? CB.border : `${CB.teal}50`}`, fontSize: 13, background: e.end_date ? CB.white : `${CB.teal}06` }}>
+                <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <span style={{ fontWeight: 600, color: CB.navy }}>{e.org_sites?.name || "—"}</span>
+                  {e.org_sites?.site_type === "hhs" && <Badge text="Host Home" color={CB.teal} />}
+                </span>
+                <span style={{ display: "flex", gap: 10, alignItems: "center", color: CB.textMid }}>
+                  {fmtD(e.start_date)} → {e.end_date ? fmtD(e.end_date) : "present"}
+                  {!e.end_date && (
+                    <button onClick={() => handleEndEdge(e)} style={{ padding: "3px 8px", borderRadius: 6, border: `1px solid ${CB.border}`, background: CB.white, color: CB.red, cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit" }}>End</button>
+                  )}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
     function ClientProfilePage({ clientId, onNavigate, onBack }) {
       const [client, setClient] = useState(null);
       const [loading, setLoading] = useState(true);
@@ -15777,6 +16326,7 @@
 
       const tabs = [
         { key: "overview", label: "Overview", icon: icons.users, content: <ClientOverviewTab client={client} /> },
+        { key: "residence", label: "Residence", icon: icons.heart, content: <ClientResidenceTab clientId={clientId} orgId={orgId} /> }, // v20.0.4
         { key: "goals", label: "PCSP Goals", icon: icons.crosshair, count: counts.goals, content: <ClientGoalsTab clientId={clientId} /> },
         { key: "medications", label: "Medications", icon: icons.capsule, count: counts.meds, content: <ClientMedicationsTab clientId={clientId} /> },
         { key: "notes", label: "Service Notes", icon: icons.fileText, count: counts.notes, content: <ClientNotesTab clientId={clientId} /> },
