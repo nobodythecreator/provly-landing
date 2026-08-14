@@ -13,6 +13,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <!-- v20.0.4h: residence moves, site-node create/edit, and site-node delete now run through transactional RPCs (place_person, save_site_unit, delete_site_unit — sql/v20.0.4h) so partial failures cannot strand an unplaced client or an orphan facility. -->
   <!-- v20.0.4: HHS Layer 1 — site typology (rhs/hhs) + credential class + capacity ceilings on org_sites; staff employment_type + W-9 date; polymorphic staff_assignments (site XOR person edges); person_placements residency-as-history with soft-confirm census; review-surface HHS + over-census + W-9 flags; hhs_operator role gated from invites until Item 4 RLS. Runs on migrations sql/v20.0.4a-f. -->
   <!-- v19.8: Stripe subscription billing — Settings → Subscription, trial banner, soft tier limits, checkout/portal via edge functions. v20.0: LIVE mode (live price IDs below; live keys in edge-function secrets) -->
   <!-- v19.7.6: mobile EVV GPS UX — browser-specific help modal when location is blocked -->
@@ -12294,27 +12295,33 @@
 
       const handleAdd = async () => {
         if (!newUnit.name) return addToast("Name is required", "error");
-        // v20.0.4 — a Site/Facility node creates the real facility record first,
-        // then the tree node REFERENCES it (site_id). One truth, two views.
-        let siteId = null;
+        // v20.0.4h (Greptile app round 1) — node + facility are created in ONE
+        // transaction (save_site_unit): a failed node insert can no longer
+        // strand an orphan active facility.
         if (newUnit.unit_type === "site") {
           const built = buildSitePayload(newUnit);
           if (built.error) return addToast(built.error, "error");
           setSaving(true);
-          const { data: siteRow, error: siteErr } = await supabase.from("org_sites")
-            .insert({ ...built.payload, org_id: orgId }).select("id").single();
-          if (siteErr) { setSaving(false); return addToast(siteErr.message, "error"); }
-          siteId = siteRow.id;
+          const { error: rpcErr } = await supabase.rpc("save_site_unit", {
+            p_unit_id: null, p_parent_id: addingTo, p_name: newUnit.name,
+            p_address: newUnit.address, p_city: newUnit.city || null,
+            p_site_type: newUnit.site_type,
+            p_credential: newUnit.site_type === "rhs" ? (newUnit.credential_type || null) : (newUnit.credential_type || null),
+            p_capacity: parseInt(newUnit.capacity, 10) || null,
+            p_license_number: newUnit.license_number || null,
+            p_license_expiration: newUnit.license_expiration || null,
+          });
+          setSaving(false);
+          if (rpcErr) return addToast(rpcErr.message, "error");
         } else {
           setSaving(true);
+          const { error } = await supabase.from("org_units").insert({
+            org_id: orgId, parent_id: addingTo, name: newUnit.name,
+            unit_type: newUnit.unit_type, address: newUnit.address || null, city: newUnit.city || null,
+          });
+          setSaving(false);
+          if (error) return addToast(error.message, "error");
         }
-        const { error } = await supabase.from("org_units").insert({
-          org_id: orgId, parent_id: addingTo, name: newUnit.name,
-          unit_type: newUnit.unit_type, address: newUnit.address || null, city: newUnit.city || null,
-          site_id: siteId,
-        });
-        setSaving(false);
-        if (error) return addToast(error.message, "error");
         addToast(`"${newUnit.name}" added`, "success");
         setAddingTo(null);
         setNewUnit({ name: "", unit_type: "group", address: "", city: "", site_type: "", credential_type: "", capacity: "", license_number: "", license_expiration: "" });
@@ -12324,43 +12331,55 @@
       const handleDelete = async (unitId, unitName) => {
         const children = units.filter(u => u.parent_id === unitId);
         if (children.length > 0) return addToast("Remove child units first", "error");
-        if (!confirm(`Delete "${unitName}"?`)) return;
-        const { error } = await supabase.from("org_units").delete().eq("id", unitId);
-        if (error) return addToast(error.message, "error");
+        const unit = units.find(u => u.id === unitId);
+        // v20.0.4h (Greptile app round 1) — deleting a Site/Facility node runs
+        // as ONE transaction (delete_site_unit): the linked facility is
+        // deactivated with it, and the server refuses while residents remain —
+        // coherence (an unmanageable active home), not a compliance block.
+        if (unit?.site_id) {
+          if (!confirm(`Delete "${unitName}"?\n\nIts facility record will be deactivated and disappear from site pickers. Placement history is kept.`)) return;
+          const { error } = await supabase.rpc("delete_site_unit", { p_unit_id: unitId });
+          if (error) return addToast(error.message, "error");
+        } else {
+          if (!confirm(`Delete "${unitName}"?`)) return;
+          const { error } = await supabase.from("org_units").delete().eq("id", unitId);
+          if (error) return addToast(error.message, "error");
+        }
         addToast(`"${unitName}" removed`, "success");
         loadUnits();
       };
 
       const handleEdit = async () => {
         if (!editingUnit || !editingUnit.name) return addToast("Name is required", "error");
-        // v20.0.4 — editing a Site/Facility node writes the facility record too;
-        // a legacy site node without one gets its org_sites row created and linked.
-        let siteId = editingUnit.site_id || null;
+        // v20.0.4h (Greptile app round 1) — facility + node writes are ONE
+        // transaction (save_site_unit); a legacy site node without a facility
+        // gets one created and linked in the same transaction.
         if (editingUnit.unit_type === "site") {
           const built = buildSitePayload(editingUnit);
           if (built.error) return addToast(built.error, "error");
           setSaving(true);
-          if (siteId) {
-            const { error: siteErr } = await supabase.from("org_sites").update(built.payload).eq("id", siteId);
-            if (siteErr) { setSaving(false); return addToast(siteErr.message, "error"); }
-          } else {
-            const { data: siteRow, error: siteErr } = await supabase.from("org_sites")
-              .insert({ ...built.payload, org_id: orgId }).select("id").single();
-            if (siteErr) { setSaving(false); return addToast(siteErr.message, "error"); }
-            siteId = siteRow.id;
-          }
+          const { error: rpcErr } = await supabase.rpc("save_site_unit", {
+            p_unit_id: editingUnit.id, p_parent_id: null, p_name: editingUnit.name,
+            p_address: editingUnit.address, p_city: editingUnit.city || null,
+            p_site_type: editingUnit.site_type,
+            p_credential: editingUnit.credential_type || null,
+            p_capacity: parseInt(editingUnit.capacity, 10) || null,
+            p_license_number: editingUnit.license_number || null,
+            p_license_expiration: editingUnit.license_expiration || null,
+          });
+          setSaving(false);
+          if (rpcErr) return addToast(rpcErr.message, "error");
         } else {
           setSaving(true);
+          const { error } = await supabase.from("org_units").update({
+            name: editingUnit.name,
+            unit_type: editingUnit.unit_type,
+            address: editingUnit.address || null,
+            city: editingUnit.city || null,
+          }).eq("id", editingUnit.id);
+          setSaving(false);
+          if (error) return addToast(error.message, "error");
         }
-        const { error } = await supabase.from("org_units").update({
-          name: editingUnit.name,
-          unit_type: editingUnit.unit_type,
-          address: editingUnit.address || null,
-          city: editingUnit.city || null,
-          site_id: siteId,
-        }).eq("id", editingUnit.id);
-        setSaving(false);
-        if (error) return addToast(error.message, "error");
         addToast(`"${editingUnit.name}" updated`, "success");
         setEditingUnit(null);
         loadUnits();
@@ -16062,17 +16081,14 @@
           if (!ok) return;
         }
         setSaving(true);
-        // Same-day move: discharge before admit (ending the old placement is
-        // what makes room; the one-active-per-person index enforces coherence).
-        if (current) {
-          const { error: endErr } = await supabase.from("person_placements")
-            .update({ end_date: placeForm.start_date, reason: current.reason || null })
-            .eq("id", current.id);
-          if (endErr) { setSaving(false); return addToast(endErr.message, "error"); }
-        }
-        const { error } = await supabase.from("person_placements").insert({
-          org_id: orgId, person_id: clientId, site_id: placeForm.site_id,
-          start_date: placeForm.start_date, reason: placeForm.reason || null,
+        // v20.0.4h (Greptile app round 1) — the move is ONE transaction now:
+        // place_person ends the old placement and starts the new one together,
+        // or neither happens. No window where a client sits unplaced.
+        const { error } = await supabase.rpc("place_person", {
+          p_person_id: clientId,
+          p_site_id: placeForm.site_id,
+          p_start: placeForm.start_date,
+          p_reason: placeForm.reason || null,
         });
         setSaving(false);
         if (error) return addToast(error.message, "error");
