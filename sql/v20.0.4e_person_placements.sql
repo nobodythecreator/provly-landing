@@ -1,5 +1,11 @@
 -- v20.0.4e — person_placements: who lives where, as history (G1-R)
 --
+-- HARDENED IN v20.0.4g (post-review): the single-column FKs below were
+-- replaced with tenant-bound composite FKs — (person_id, org_id),
+-- (site_id, org_id), (created_by, org_id) — because Postgres FK checks
+-- bypass RLS and could otherwise reference rows across orgs. This file is
+-- the journal of what ran on Aug 10; g is the journal of the fix.
+--
 -- FINALIZED (Aug 10): the policies below match the app's existing org-tenancy
 -- dialect observed via pg_policies — flat (org_id = org_id()) on all four
 -- commands, identical to persons / staff / org_sites.
