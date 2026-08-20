@@ -13,7 +13,8 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
-  <!-- v20.0.5r1 (Greptile): hydration failures now retry on the next same-user auth event (hydratedRef success latch), and the Settings tab rides the hash (#/settings/subscription). -->
+  <!-- v20.0.5r2 (Greptile P1): a failed staff-profile lookup no longer strands owner-level UI on a non-owner — fetch failure degrades the role to dsp and keeps the same-user auth path retrying (staffOkRef) until identity resolves; the owner fallback now applies only to a successful query with no row. -->
+  <!-- v20.0.5r1 (Greptile): hydration failures now retry on the next same-user auth event (org/staff success latches), and the Settings tab rides the hash (#/settings/subscription). -->
   <!-- v20.0.5: stability hotfix — (1) auth listener no longer remounts the app on token-refresh/tab-focus events for the same user (the "constant refresh to dashboard"); (2) hash routing #/page/id so the current page survives reloads, discards, and remounts; (3) org-tree add modal actually closes after a successful add; (4) type changes on populated/admin nodes require confirmation. -->
   <!-- v20.0.4h: residence moves, site-node create/edit, and site-node delete now run through transactional RPCs (place_person, save_site_unit, delete_site_unit — sql/v20.0.4h) so partial failures cannot strand an unplaced client or an orphan facility. -->
   <!-- v20.0.4: HHS Layer 1 — site typology (rhs/hhs) + credential class + capacity ceilings on org_sites; staff employment_type + W-9 date; polymorphic staff_assignments (site XOR person edges); person_placements residency-as-history with soft-confirm census; review-surface HHS + over-census + W-9 flags; hhs_operator role gated from invites until Item 4 RLS. Runs on migrations sql/v20.0.4a-f. -->
@@ -297,7 +298,7 @@
         // write below is skipped and the newer run's writes win.
         const epoch = ++brandFetchEpoch;
         const stale = () => epoch !== brandFetchEpoch;
-        hydratedRef.current = false; // v20.0.5r1 — not hydrated until this run completes
+        orgOkRef.current = false; // v20.0.5r1/r2 — not hydrated until this run completes
         // v19.5 dev override — `?org=<uuid>` lets you preview another tenant's
         // branding without re-authing. Used during the white-label proof test
         // (insert a fake org row, switch via the URL param, regenerate PDFs).
@@ -312,7 +313,7 @@
           if (!resolvedOrgId) {
             const { data, error } = await supabase.rpc('org_id');
             if (error || !data) {
-              // v20.0.5r1 — hydratedRef stays false: the next same-user auth
+              // v20.0.5r1/r2 — orgOkRef stays false: the next same-user auth
               // event (token refresh / tab focus) will retry this hydration.
               // v20.0.1 — org lookup failed on an explicit refresh: positively
               // reset brand + singleton rather than leaving a previous
@@ -328,7 +329,7 @@
           }
           if (stale()) return;
           setOrgId(resolvedOrgId);
-          hydratedRef.current = true; // v20.0.5r1 — org resolved; later cosmetic fetches may still be in flight
+          orgOkRef.current = true; // v20.0.5r2 — org resolved (staff identity latches separately)
           // Try to load enforcement settings — graceful fallback if columns don't exist yet
           const { data: org } = await supabase.from("organizations")
             .select("enforcement_role, enforcement_training, enforcement_person_specific")
@@ -440,15 +441,26 @@
       };
 
       const fetchStaffProfile = async (email) => {
-        const { data } = await supabase.from("staff").select("id, first_name, last_name, role, is_active").eq("email", email).maybeSingle();
+        // v20.0.5r2 — three-valued identity. "Query succeeded, no row" is the
+        // legacy owner account and keeps the owner fallback. "Query FAILED"
+        // is unknown identity: staffOkRef stays false (the same-user auth
+        // path will retry) and the role falls DOWN to dsp, never up to owner.
+        staffOkRef.current = false;
+        const { data, error } = await supabase.from("staff").select("id, first_name, last_name, role, is_active").eq("email", email).maybeSingle();
+        if (error) {
+          setStaffLoadFailed(true);
+          return;
+        }
+        staffOkRef.current = true;
+        setStaffLoadFailed(false);
         // If no staff record found, default to owner (for the main admin account)
         setStaffProfile(data || { role: "owner", first_name: "Admin", last_name: "" });
       };
 
       const lastUserIdRef = useRef(null); // v20.0.5 — who the app is currently hydrated for
-      const hydratedRef = useRef(false);  // v20.0.5r1 — true only after a hydration run COMPLETES;
-                                          // a transient org/staff fetch failure leaves this false so
-                                          // the next same-user auth event retries instead of returning
+      const orgOkRef = useRef(false);     // v20.0.5r2 — org hydration completed for this user
+      const staffOkRef = useRef(false);   // v20.0.5r2 — staff-profile query COMPLETED (row or legitimately no row)
+      const [staffLoadFailed, setStaffLoadFailed] = useState(false); // v20.0.5r2 — drives the fail-DOWN role
 
       useEffect(() => {
         supabase.auth.getSession().then(({ data: { session } }) => {
@@ -478,7 +490,7 @@
             // v20.0.5r1 — same user AND fully hydrated: nothing to do. Same
             // user but a previous hydration failed mid-flight: fall through
             // and retry (the old remount bug was, accidentally, the retry).
-            if (session.user.id === lastUserIdRef.current && hydratedRef.current) return;
+            if (session.user.id === lastUserIdRef.current && orgOkRef.current && staffOkRef.current) return;
             lastUserIdRef.current = session.user.id;
             // v19.7.4 — re-engage the brand gate every time a new session
             // appears. fetchOrgId will set brandReady=true once the new
@@ -503,7 +515,11 @@
         return () => subscription.unsubscribe();
       }, []);
 
-      const role = staffProfile?.role || "owner";
+      // v20.0.5r2 — if the staff-profile query FAILED, identity is unknown:
+      // degrade to the minimal dsp toolkit until a retry succeeds. The owner
+      // fallback applies only when the query succeeded and found no row
+      // (fetchStaffProfile sets that profile explicitly).
+      const role = staffProfile?.role || (staffLoadFailed ? "dsp" : "owner");
       const permissions = ROLE_PERMISSIONS[role] || ROLE_PERMISSIONS.dsp;
       const navItems = ROLE_NAV[role] || ROLE_NAV.dsp;
 
