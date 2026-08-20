@@ -13,6 +13,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <!-- v20.0.5r1 (Greptile): hydration failures now retry on the next same-user auth event (hydratedRef success latch), and the Settings tab rides the hash (#/settings/subscription). -->
   <!-- v20.0.5: stability hotfix — (1) auth listener no longer remounts the app on token-refresh/tab-focus events for the same user (the "constant refresh to dashboard"); (2) hash routing #/page/id so the current page survives reloads, discards, and remounts; (3) org-tree add modal actually closes after a successful add; (4) type changes on populated/admin nodes require confirmation. -->
   <!-- v20.0.4h: residence moves, site-node create/edit, and site-node delete now run through transactional RPCs (place_person, save_site_unit, delete_site_unit — sql/v20.0.4h) so partial failures cannot strand an unplaced client or an orphan facility. -->
   <!-- v20.0.4: HHS Layer 1 — site typology (rhs/hhs) + credential class + capacity ceilings on org_sites; staff employment_type + W-9 date; polymorphic staff_assignments (site XOR person edges); person_placements residency-as-history with soft-confirm census; review-surface HHS + over-census + W-9 flags; hhs_operator role gated from invites until Item 4 RLS. Runs on migrations sql/v20.0.4a-f. -->
@@ -296,6 +297,7 @@
         // write below is skipped and the newer run's writes win.
         const epoch = ++brandFetchEpoch;
         const stale = () => epoch !== brandFetchEpoch;
+        hydratedRef.current = false; // v20.0.5r1 — not hydrated until this run completes
         // v19.5 dev override — `?org=<uuid>` lets you preview another tenant's
         // branding without re-authing. Used during the white-label proof test
         // (insert a fake org row, switch via the URL param, regenerate PDFs).
@@ -310,6 +312,8 @@
           if (!resolvedOrgId) {
             const { data, error } = await supabase.rpc('org_id');
             if (error || !data) {
+              // v20.0.5r1 — hydratedRef stays false: the next same-user auth
+              // event (token refresh / tab focus) will retry this hydration.
               // v20.0.1 — org lookup failed on an explicit refresh: positively
               // reset brand + singleton rather than leaving a previous
               // tenant's identity active. brandReady still releases via
@@ -324,6 +328,7 @@
           }
           if (stale()) return;
           setOrgId(resolvedOrgId);
+          hydratedRef.current = true; // v20.0.5r1 — org resolved; later cosmetic fetches may still be in flight
           // Try to load enforcement settings — graceful fallback if columns don't exist yet
           const { data: org } = await supabase.from("organizations")
             .select("enforcement_role, enforcement_training, enforcement_person_specific")
@@ -441,6 +446,9 @@
       };
 
       const lastUserIdRef = useRef(null); // v20.0.5 — who the app is currently hydrated for
+      const hydratedRef = useRef(false);  // v20.0.5r1 — true only after a hydration run COMPLETES;
+                                          // a transient org/staff fetch failure leaves this false so
+                                          // the next same-user auth event retries instead of returning
 
       useEffect(() => {
         supabase.auth.getSession().then(({ data: { session } }) => {
@@ -467,7 +475,10 @@
             // return ("the website keeps refreshing"). Only a genuine user
             // change re-engages the gate; same-user events just update the
             // session object above and stop here.
-            if (session.user.id === lastUserIdRef.current) return;
+            // v20.0.5r1 — same user AND fully hydrated: nothing to do. Same
+            // user but a previous hydration failed mid-flight: fall through
+            // and retry (the old remount bug was, accidentally, the retry).
+            if (session.user.id === lastUserIdRef.current && hydratedRef.current) return;
             lastUserIdRef.current = session.user.id;
             // v19.7.4 — re-engage the brand gate every time a new session
             // appears. fetchOrgId will set brandReady=true once the new
@@ -18622,10 +18633,13 @@
       if ((p === "staff-profile" || p === "client-profile") && id) {
         return { page: p, context: { id } };
       }
+      if (p === "settings" && id) {
+        return { page: p, context: { tab: id } }; // v20.0.5r1 — #/settings/subscription restores the tab
+      }
       return { page: p, context: null };
     };
     const writeHash = (target, context) => {
-      const next = "#/" + target + (context?.id ? "/" + context.id : "");
+      const next = "#/" + target + (context?.id ? "/" + context.id : context?.tab ? "/" + context.tab : ""); // v20.0.5r1
       if (window.location.hash !== next) {
         // pushState: the back button walks your page history like a real app
         try { window.history.pushState(null, "", next); } catch { window.location.hash = next; }
