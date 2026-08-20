@@ -13,6 +13,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <!-- v20.0.5: stability hotfix — (1) auth listener no longer remounts the app on token-refresh/tab-focus events for the same user (the "constant refresh to dashboard"); (2) hash routing #/page/id so the current page survives reloads, discards, and remounts; (3) org-tree add modal actually closes after a successful add; (4) type changes on populated/admin nodes require confirmation. -->
   <!-- v20.0.4h: residence moves, site-node create/edit, and site-node delete now run through transactional RPCs (place_person, save_site_unit, delete_site_unit — sql/v20.0.4h) so partial failures cannot strand an unplaced client or an orphan facility. -->
   <!-- v20.0.4: HHS Layer 1 — site typology (rhs/hhs) + credential class + capacity ceilings on org_sites; staff employment_type + W-9 date; polymorphic staff_assignments (site XOR person edges); person_placements residency-as-history with soft-confirm census; review-surface HHS + over-census + W-9 flags; hhs_operator role gated from invites until Item 4 RLS. Runs on migrations sql/v20.0.4a-f. -->
   <!-- v19.8: Stripe subscription billing — Settings → Subscription, trial banner, soft tier limits, checkout/portal via edge functions. v20.0: LIVE mode (live price IDs below; live keys in edge-function secrets) -->
@@ -439,11 +440,14 @@
         setStaffProfile(data || { role: "owner", first_name: "Admin", last_name: "" });
       };
 
+      const lastUserIdRef = useRef(null); // v20.0.5 — who the app is currently hydrated for
+
       useEffect(() => {
         supabase.auth.getSession().then(({ data: { session } }) => {
           setSession(session);
           setUser(session?.user ?? null);
           if (session?.user) {
+            lastUserIdRef.current = session.user.id; // v20.0.5
             fetchOrgId();
             fetchStaffProfile(session.user.email);
           } else {
@@ -456,6 +460,15 @@
           setSession(session);
           setUser(session?.user ?? null);
           if (session?.user) {
+            // v20.0.5 — the gate below UNMOUNTS the whole app while it
+            // re-hydrates. Supabase re-emits auth events on token refresh
+            // and on tab focus for the SAME user; treating those as fresh
+            // sign-ins remounted the app to the dashboard on every tab
+            // return ("the website keeps refreshing"). Only a genuine user
+            // change re-engages the gate; same-user events just update the
+            // session object above and stop here.
+            if (session.user.id === lastUserIdRef.current) return;
+            lastUserIdRef.current = session.user.id;
             // v19.7.4 — re-engage the brand gate every time a new session
             // appears. fetchOrgId will set brandReady=true once the new
             // tenant's brand has been hydrated. This prevents the brief
@@ -467,6 +480,7 @@
             fetchOrgId();
             fetchStaffProfile(session.user.email);
           } else {
+            lastUserIdRef.current = null; // v20.0.5 — next sign-in is genuinely new
             brandFetchEpoch++; // v20.0.1 — invalidate any in-flight hydration
             setOrgId(null);
             setStaffProfile(null);
@@ -1443,7 +1457,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.4</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.5</span>
               </div>
             </div>
             {isMobile && (
@@ -12323,7 +12337,7 @@
           if (error) return addToast(error.message, "error");
         }
         addToast(`"${newUnit.name}" added`, "success");
-        setAddingTo(null);
+        setAddingTo(false); // v20.0.5 — false = CLOSED (null meant add-root mode and left a phantom modal open)
         setNewUnit({ name: "", unit_type: "group", address: "", city: "", site_type: "", credential_type: "", capacity: "", license_number: "", license_expiration: "" });
         loadUnits();
       };
@@ -12351,6 +12365,16 @@
 
       const handleEdit = async () => {
         if (!editingUnit || !editingUnit.name) return addToast("Name is required", "error");
+        // v20.0.5 — retyping a populated node (or a state root) restructures
+        // the organization; after the Utah→East/North incidents, it confirms.
+        const orig = units.find(u => u.id === editingUnit.id);
+        if (orig && orig.unit_type !== editingUnit.unit_type) {
+          const kids = units.filter(u => u.parent_id === editingUnit.id).length;
+          if (orig.unit_type === "admin" || kids > 0) {
+            const what = orig.unit_type === "admin" ? "a state Administration root" : `a ${orig.unit_type} with ${kids} unit(s) under it`;
+            if (!confirm(`"${orig.name}" is ${what}. Changing its type restructures your organization tree.\n\nContinue?`)) return;
+          }
+        }
         // v20.0.4h (Greptile app round 1) — facility + node writes are ONE
         // transaction (save_site_unit); a legacy site node without a facility
         // gets one created and linked in the same transaction.
@@ -18587,9 +18611,31 @@
     // ═══════════════════════════════════════════════════════════════
     // APP SHELL
     // ═══════════════════════════════════════════════════════════════
+    // v20.0.5 — hash routing: #/page or #/page/id. Where you are lives in
+    // the URL, so tab discards, reloads, and remounts land you back on the
+    // page you were on instead of the dashboard.
+    const PAGE_KEYS = ["dashboard", "staff", "clients", "intake", "schedule", "contexts", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "billing", "finance", "docs", "ai", "messages", "migration", "settings", "staff-profile", "client-profile"];
+    const parseHash = () => {
+      const raw = (window.location.hash || "").replace(/^#\/?/, "");
+      const [p, id] = raw.split("/");
+      if (!PAGE_KEYS.includes(p)) return { page: "dashboard", context: null };
+      if ((p === "staff-profile" || p === "client-profile") && id) {
+        return { page: p, context: { id } };
+      }
+      return { page: p, context: null };
+    };
+    const writeHash = (target, context) => {
+      const next = "#/" + target + (context?.id ? "/" + context.id : "");
+      if (window.location.hash !== next) {
+        // pushState: the back button walks your page history like a real app
+        try { window.history.pushState(null, "", next); } catch { window.location.hash = next; }
+      }
+    };
+
     function AppShell() {
-      const [page, setPage] = useState("dashboard");
-      const [pageContext, setPageContext] = useState(null);
+      const initial = parseHash();
+      const [page, setPage] = useState(initial.page);
+      const [pageContext, setPageContext] = useState(initial.context);
       const { isMobile } = useMobile();
       const [sidebarOpen, setSidebarOpen] = useState(false);
       const { subscription, refetchSubscription } = useAuth();
@@ -18618,8 +18664,21 @@
       const navigate = (target, context = null) => {
         setPage(target);
         setPageContext(context);
+        writeHash(target, context); // v20.0.5 — the URL remembers
         if (isMobile) setSidebarOpen(false);
       };
+
+      // v20.0.5 — back/forward buttons and hand-edited hashes navigate too
+      useEffect(() => {
+        const onHash = () => {
+          const next = parseHash();
+          setPage(next.page);
+          setPageContext(next.context);
+        };
+        window.addEventListener("hashchange", onHash);
+        window.addEventListener("popstate", onHash);
+        return () => { window.removeEventListener("hashchange", onHash); window.removeEventListener("popstate", onHash); };
+      }, []);
 
       const renderPage = () => {
         switch (page) {
