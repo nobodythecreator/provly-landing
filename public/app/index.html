@@ -13,6 +13,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <!-- v20.0.5r3 (Greptile): a failed staff-profile REFETCH now clears any previously loaded profile (one 2s in-place retry first) so stale privileged roles cannot persist — fail down to dsp until a retry succeeds; Settings tabs sync with back/forward history and tab clicks write #/settings/<tab>. -->
   <!-- v20.0.5r2 (Greptile P1): a failed staff-profile lookup no longer strands owner-level UI on a non-owner — fetch failure degrades the role to dsp and keeps the same-user auth path retrying (staffOkRef) until identity resolves; the owner fallback now applies only to a successful query with no row. -->
   <!-- v20.0.5r1 (Greptile): hydration failures now retry on the next same-user auth event (org/staff success latches), and the Settings tab rides the hash (#/settings/subscription). -->
   <!-- v20.0.5: stability hotfix — (1) auth listener no longer remounts the app on token-refresh/tab-focus events for the same user (the "constant refresh to dashboard"); (2) hash routing #/page/id so the current page survives reloads, discards, and remounts; (3) org-tree add modal actually closes after a successful add; (4) type changes on populated/admin nodes require confirmation. -->
@@ -441,13 +442,22 @@
       };
 
       const fetchStaffProfile = async (email) => {
-        // v20.0.5r2 — three-valued identity. "Query succeeded, no row" is the
-        // legacy owner account and keeps the owner fallback. "Query FAILED"
-        // is unknown identity: staffOkRef stays false (the same-user auth
-        // path will retry) and the role falls DOWN to dsp, never up to owner.
+        // v20.0.5r2/r3 — three-valued identity. "Query succeeded, no row" is
+        // the legacy owner account and keeps the owner fallback. "Query
+        // FAILED" is unknown identity — including a REFETCH failure after a
+        // privileged profile was already loaded: the stale profile is
+        // cleared so the role fails DOWN to dsp until a retry succeeds
+        // (staffOkRef stays false, so every same-user auth event retries).
+        // One quick in-place retry absorbs transient blips before demoting.
         staffOkRef.current = false;
-        const { data, error } = await supabase.from("staff").select("id, first_name, last_name, role, is_active").eq("email", email).maybeSingle();
+        const attempt = () => supabase.from("staff").select("id, first_name, last_name, role, is_active").eq("email", email).maybeSingle();
+        let { data, error } = await attempt();
         if (error) {
+          await new Promise(r => setTimeout(r, 2000));
+          ({ data, error } = await attempt());
+        }
+        if (error) {
+          setStaffProfile(null); // v20.0.5r3 — never retain a stale privileged identity
           setStaffLoadFailed(true);
           return;
         }
@@ -16646,7 +16656,17 @@
     // Future tabs (Branding, Billing, API keys) will land here too.
     // ═══════════════════════════════════════════════════════════════
     function SettingsPage({ initialTab }) {
-      const [tab, setTab] = useState(initialTab || "org");
+      const [tab, setTabState] = useState(initialTab || "org");
+      // v20.0.5r3 — back/forward between #/settings/<tab> hashes must move
+      // the visible tab: sync when the routed tab changes...
+      useEffect(() => {
+        if (initialTab && initialTab !== tab) setTabState(initialTab);
+      }, [initialTab]);
+      // ...and tab clicks write the hash so history has entries to walk.
+      const setTab = (t) => {
+        setTabState(t);
+        writeHash("settings", { tab: t });
+      };
       const { isMobile } = useMobile();
       const { permissions } = useAuth();
 
