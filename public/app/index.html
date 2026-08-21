@@ -13,6 +13,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <!-- v20.0.5r4 (Greptile): staff-profile hydration is generation-scoped (brandFetchEpoch — the fetchOrgId pattern): a delayed response from a previous session writes nothing, killing the cross-user role race by construction; sign-out fully clears identity state. Settings tab is now DERIVED from the routed context (no local copy) and clicks route via navigate(), so bare #/settings restores the default section and URL/tab can never disagree. -->
   <!-- v20.0.5r3 (Greptile): a failed staff-profile REFETCH now clears any previously loaded profile (one 2s in-place retry first) so stale privileged roles cannot persist — fail down to dsp until a retry succeeds; Settings tabs sync with back/forward history and tab clicks write #/settings/<tab>. -->
   <!-- v20.0.5r2 (Greptile P1): a failed staff-profile lookup no longer strands owner-level UI on a non-owner — fetch failure degrades the role to dsp and keeps the same-user auth path retrying (staffOkRef) until identity resolves; the owner fallback now applies only to a successful query with no row. -->
   <!-- v20.0.5r1 (Greptile): hydration failures now retry on the next same-user auth event (org/staff success latches), and the Settings tab rides the hash (#/settings/subscription). -->
@@ -442,19 +443,26 @@
       };
 
       const fetchStaffProfile = async (email) => {
-        // v20.0.5r2/r3 — three-valued identity. "Query succeeded, no row" is
-        // the legacy owner account and keeps the owner fallback. "Query
-        // FAILED" is unknown identity — including a REFETCH failure after a
-        // privileged profile was already loaded: the stale profile is
-        // cleared so the role fails DOWN to dsp until a retry succeeds
+        // v20.0.5r4 — GENERATION-SCOPED, the same guard fetchOrgId has
+        // carried since v20.0.1. Every run belongs to the auth generation it
+        // started in (brandFetchEpoch); sign-out and user change bump the
+        // generation, so a delayed response from a previous session cannot
+        // write ANY state into the current one — the cross-user race is
+        // dead by construction, not by timing.
+        // Three-valued identity stands: success-no-row = legacy owner
+        // fallback; FAILURE clears any stale profile and fails DOWN to dsp
         // (staffOkRef stays false, so every same-user auth event retries).
-        // One quick in-place retry absorbs transient blips before demoting.
+        const epoch = brandFetchEpoch;
+        const stale = () => epoch !== brandFetchEpoch;
         staffOkRef.current = false;
         const attempt = () => supabase.from("staff").select("id, first_name, last_name, role, is_active").eq("email", email).maybeSingle();
         let { data, error } = await attempt();
+        if (stale()) return;
         if (error) {
           await new Promise(r => setTimeout(r, 2000));
+          if (stale()) return;
           ({ data, error } = await attempt());
+          if (stale()) return;
         }
         if (error) {
           setStaffProfile(null); // v20.0.5r3 — never retain a stale privileged identity
@@ -515,6 +523,9 @@
           } else {
             lastUserIdRef.current = null; // v20.0.5 — next sign-in is genuinely new
             brandFetchEpoch++; // v20.0.1 — invalidate any in-flight hydration
+            staffOkRef.current = false;   // v20.0.5r4 — identity fully reset on sign-out
+            setStaffProfile(null);
+            setStaffLoadFailed(false);
             setOrgId(null);
             setStaffProfile(null);
             setBrand(DEFAULT_BRAND);
@@ -16655,18 +16666,13 @@
 
     // Future tabs (Branding, Billing, API keys) will land here too.
     // ═══════════════════════════════════════════════════════════════
-    function SettingsPage({ initialTab }) {
-      const [tab, setTabState] = useState(initialTab || "org");
-      // v20.0.5r3 — back/forward between #/settings/<tab> hashes must move
-      // the visible tab: sync when the routed tab changes...
-      useEffect(() => {
-        if (initialTab && initialTab !== tab) setTabState(initialTab);
-      }, [initialTab]);
-      // ...and tab clicks write the hash so history has entries to walk.
-      const setTab = (t) => {
-        setTabState(t);
-        writeHash("settings", { tab: t });
-      };
+    function SettingsPage({ initialTab, onTabChange }) {
+      // v20.0.5r4 — ONE source of truth: the routed context IS the tab.
+      // No local copy to drift. Bare #/settings renders the default section;
+      // clicks route through navigate(), so state, context, hash, and
+      // history can never disagree in any direction.
+      const tab = initialTab || "org";
+      const setTab = (t) => onTabChange ? onTabChange(t) : null;
       const { isMobile } = useMobile();
       const { permissions } = useAuth();
 
@@ -18752,7 +18758,7 @@
           case "ai": return <AIPage />;
           case "messages": return <MessagingPage />;
           case "migration": return <MigrationPage />;
-          case "settings": return <SettingsPage initialTab={pageContext?.tab} />;
+          case "settings": return <SettingsPage initialTab={pageContext?.tab} onTabChange={(t) => navigate("settings", { tab: t })} />;
           case "staff-profile":
             return pageContext?.id
               ? <StaffProfilePage staffId={pageContext.id} onNavigate={navigate} onBack={() => navigate("staff")} />
