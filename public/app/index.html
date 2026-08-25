@@ -13,6 +13,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <!-- v20.0.6r2 (Greptile): the schema-fallback retry no longer strips explicit NULLs from its payload — a cleared Medicaid number stays cleared even when the save retries on an older schema; a schema genuinely missing the column now fails loudly rather than reporting success with stale data. -->
   <!-- v20.0.6r1 (Greptile): cleared optional client fields now persist as explicit NULLs instead of being dropped from the update payload (clearing a saved Medicaid number actually clears it, and the audit can flag it); the Medicaid field no longer renders a required marker. -->
   <!-- v20.0.6: tier limits meter CLIENTS ONLY (staff/operators/care-circle free and unlimited — Principle 7); plan copy "up to X clients · unlimited staff". Medicaid number OPTIONAL at intake/edit (format-validated only when provided) with a compliance audit flag for active clients missing it — record reality, mirror the gap. -->
   <!-- v20.0.5r5 (Greptile): Settings tab names from the URL are validated against the user's actual permission-filtered section list — unknown or unavailable tabs render the default Organization Structure section, never an empty pane. -->
@@ -2625,7 +2626,12 @@
             medicaid_number: form.medicaid_number || null,
             is_active: form.is_active,
           };
-          Object.keys(core).forEach(k => { if (core[k] === null) delete core[k]; });
+          // v20.0.6r2 — the fallback carries explicit NULLs too. Deleting
+          // null keys recreated the r1 bug on the retry path: a cleared
+          // Medicaid number would silently survive a fallback save that
+          // reported success. If a truly ancient schema lacks one of these
+          // columns, the retry now fails LOUDLY instead of succeeding while
+          // quietly keeping stale data — the honest failure mode.
           if (editing) {
             result = await supabase.from("persons").update(core).eq("id", editing.id);
           } else {
