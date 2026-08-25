@@ -13,6 +13,9 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <!-- v20.0.6r2 (Greptile): the schema-fallback retry no longer strips explicit NULLs from its payload — a cleared Medicaid number stays cleared even when the save retries on an older schema; a schema genuinely missing the column now fails loudly rather than reporting success with stale data. -->
+  <!-- v20.0.6r1 (Greptile): cleared optional client fields now persist as explicit NULLs instead of being dropped from the update payload (clearing a saved Medicaid number actually clears it, and the audit can flag it); the Medicaid field no longer renders a required marker. -->
+  <!-- v20.0.6: tier limits meter CLIENTS ONLY (staff/operators/care-circle free and unlimited — Principle 7); plan copy "up to X clients · unlimited staff". Medicaid number OPTIONAL at intake/edit (format-validated only when provided) with a compliance audit flag for active clients missing it — record reality, mirror the gap. -->
   <!-- v20.0.5r5 (Greptile): Settings tab names from the URL are validated against the user's actual permission-filtered section list — unknown or unavailable tabs render the default Organization Structure section, never an empty pane. -->
   <!-- v20.0.5r4 (Greptile): staff-profile hydration is generation-scoped (brandFetchEpoch — the fetchOrgId pattern): a delayed response from a previous session writes nothing, killing the cross-user role race by construction; sign-out fully clears identity state. Settings tab is now DERIVED from the routed context (no local copy) and clicks route via navigate(), so bare #/settings restores the default section and URL/tab can never disagree. -->
   <!-- v20.0.5r3 (Greptile): a failed staff-profile REFETCH now clears any previously loaded profile (one 2s in-place retry first) so stale privileged roles cannot persist — fail down to dsp until a retry succeeds; Settings tabs sync with back/forward history and tab clicks write #/settings/<tab>. -->
@@ -136,13 +139,14 @@
           .select("subscription_tier").eq("id", orgId).maybeSingle();
         const meta = TIER_META[org?.subscription_tier];
         if (!meta || !meta.cap) return;
-        const [staffRes, clientRes] = await Promise.all([
-          supabase.from("staff").select("id", { count: "exact", head: true }).eq("is_active", true),
-          supabase.from("persons").select("id", { count: "exact", head: true }).eq("is_active", true),
-        ]);
-        const used = (staffRes.count || 0) + (clientRes.count || 0);
+        // v20.0.6 — tiers meter CLIENTS ONLY. Staff, operators, and care-circle
+        // members are free and unlimited (Principle 7: give away the network,
+        // sell the operation); clients are the value metric.
+        const { count } = await supabase.from("persons")
+          .select("id", { count: "exact", head: true }).eq("is_active", true);
+        const used = count || 0;
         if (used >= meta.cap) {
-          addToast(`You're at ${used}/${meta.cap} users on the ${meta.name} plan. Upgrade in Settings \u2192 Subscription to add more.`, "warning");
+          addToast(`You're at ${used}/${meta.cap} clients on the ${meta.name} plan. Upgrade in Settings \u2192 Subscription to add more.`, "warning");
         }
       } catch (_) { /* advisory only — never block a save */ }
     }
@@ -1506,7 +1510,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.5</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.6</span>
               </div>
             </div>
             {isMobile && (
@@ -2574,12 +2578,13 @@
 
       const handleSave = async () => {
         if (!form.first_name?.trim() || !form.last_name?.trim()) return addToast("First and last name are required", "error");
-        // v19.9 (EVV hardening) — medicaid_number is required and must be 9–10
-        // digits. UEVV rejects sessions without a valid member Medicaid ID, so
-        // enforce at intake rather than discovering it at submission time.
+        // v20.0.6 — medicaid_number is OPTIONAL (Tombé: providers often don't
+        // have it yet at intake; blocking the save blocks recording reality —
+        // mirror doctrine). When a value IS provided it must be well-formed;
+        // when absent, the compliance audit flags it (EVV/billing exports
+        // need it), which is the mirror's job, not the form's.
         const ma = (form.medicaid_number || "").trim();
-        if (!ma) return addToast("Medicaid number is required", "error");
-        if (!/^\d{9,10}$/.test(ma)) return addToast("Medicaid number must be 9–10 digits (numbers only, no spaces or dashes)", "error");
+        if (ma && !/^\d{9,10}$/.test(ma)) return addToast("Medicaid number must be 9–10 digits (numbers only, no spaces or dashes)", "error");
         setSaving(true);
         const payload = { ...form };
         // v19.4.5 — trim leading/trailing whitespace on every string field before save
@@ -2588,7 +2593,13 @@
         Object.keys(payload).forEach(k => {
           if (typeof payload[k] === "string") payload[k] = payload[k].trim();
         });
-        // Strip all empty optional fields so we don't write empty strings into nullable columns
+        // v20.0.6r1 — empty optional fields become explicit NULLs, not
+        // omissions. The old delete-the-key approach made "clear this field"
+        // a silent no-op on EDIT: the update never touched the column, the
+        // stale value survived (and a removed Medicaid number could never be
+        // re-flagged by the audit). Null persists the clearing; nullable
+        // columns accept it on insert identically. This un-breaks clearing
+        // for EVERY optional client field, not just Medicaid.
         const optionalKeys = [
           "date_of_birth", "medicaid_number", "identification_number",
           "support_coordinator", "support_coordinator_phone", "support_coordinator_email", "support_coordinator_agency",
@@ -2597,7 +2608,7 @@
           "physician_name", "physician_phone",
           "address", "city", "zip", "phone",
         ];
-        optionalKeys.forEach(k => { if (!payload[k]) delete payload[k]; });
+        optionalKeys.forEach(k => { if (!payload[k]) payload[k] = null; });
 
         let result;
         if (editing) {
@@ -2615,7 +2626,12 @@
             medicaid_number: form.medicaid_number || null,
             is_active: form.is_active,
           };
-          Object.keys(core).forEach(k => { if (core[k] === null) delete core[k]; });
+          // v20.0.6r2 — the fallback carries explicit NULLs too. Deleting
+          // null keys recreated the r1 bug on the retry path: a cleared
+          // Medicaid number would silently survive a fallback save that
+          // reported success. If a truly ancient schema lacks one of these
+          // columns, the retry now fails LOUDLY instead of succeeding while
+          // quietly keeping stale data — the honest failure mode.
           if (editing) {
             result = await supabase.from("persons").update(core).eq("id", editing.id);
           } else {
@@ -2650,8 +2666,8 @@
             <FormField label="Date of Birth" half>
               <input style={fieldStyle} type="date" value={form.date_of_birth} onChange={e => set("date_of_birth", e.target.value)} />
             </FormField>
-            <FormField label="Medicaid Number" required half>
-              <input style={fieldStyle} value={form.medicaid_number} onChange={e => set("medicaid_number", e.target.value)} placeholder="9–10 digit Medicaid ID" inputMode="numeric" maxLength={10} />
+            <FormField label="Medicaid Number" half>
+              <input style={fieldStyle} value={form.medicaid_number} onChange={e => set("medicaid_number", e.target.value)} placeholder="9–10 digits — add when available" inputMode="numeric" maxLength={10} />
             </FormField>
           </FormRow>
           <FormRow>
@@ -9001,7 +9017,7 @@
         try {
           const [staffRes, clientRes, trainingRes, topicRes, authRes, noteRes, evvRes, siteRes, placeRes] = await Promise.all([
             supabase.from("staff").select("id, first_name, last_name, role, hire_date, is_active, employment_type, w9_received_at").eq("is_active", true),
-            supabase.from("persons").select("id, first_name, last_name, is_active").eq("is_active", true),
+            supabase.from("persons").select("id, first_name, last_name, is_active, medicaid_number").eq("is_active", true), // v20.0.6 — the audit fetches the field it flags
             supabase.from("staff_trainings").select("id, staff_id, training_topic_id, completed_at, expires_at"),
             supabase.from("training_topic_definitions").select("id, topic_name, category, deadline_days, renewal_months, requires_certification"),
             supabase.from("person_service_authorizations").select("id, person_id, service_code_id, authorized_units, used_units, end_date, service_code_definitions(code)"),
@@ -9043,8 +9059,17 @@
           // Operator W-9 standing: the provider is the operator's office of
           // licensing — keeping their paperwork current is the provider's duty.
           staff.forEach(s => {
+            // (see also: clients missing Medicaid numbers, flagged below)
             if (s.role === "hhs_operator" && s.employment_type === "contractor_1099" && !s.w9_received_at) {
               flaggedIssues.push({ severity: "medium", category: "Host Homes", message: `${s.first_name} ${s.last_name} — 1099 host home operator, W-9 not on file` });
+            }
+          });
+          // v20.0.6 — the intake form records reality (Medicaid number is
+          // optional now); the mirror surfaces the gap, because EVV and
+          // billing exports need the member ID.
+          clients.forEach(c => {
+            if (c.is_active && !c.medicaid_number) {
+              flaggedIssues.push({ severity: "medium", category: "Clients", message: `${c.first_name} ${c.last_name} — no Medicaid number on file (needed for EVV/billing exports)` });
             }
           });
 
@@ -16511,7 +16536,7 @@
       const trialEnds = subscription?.trial_ends_at ? new Date(subscription.trial_ends_at) : null;
       const daysLeft = trialEnds ? Math.ceil((trialEnds - new Date()) / 86400000) : null;
 
-      const used = usage ? usage.staff + usage.clients : null;
+      const used = usage ? usage.clients : null; // v20.0.6 — clients only; staff are free
       const cap = meta?.cap || null;
       const pct = (used !== null && cap) ? Math.min(100, Math.round((used / cap) * 100)) : 0;
       const over = (used !== null && cap) ? used >= cap : false;
@@ -16626,7 +16651,7 @@
                   <div style={{ fontSize: 22, fontWeight: 800, color: CB.navy }}>
                     {t.price ? <>${t.price}<span style={{ fontSize: 13, fontWeight: 600, color: CB.textMid }}>/mo</span></> : <span style={{ fontSize: 16 }}>Contact sales</span>}
                   </div>
-                  <div style={{ fontSize: 13, color: CB.textMid }}>Up to {t.cap.toLocaleString()} users</div>
+                  <div style={{ fontSize: 13, color: CB.textMid }}>Up to {t.cap.toLocaleString()} clients \u00b7 unlimited staff</div>
                   {key === "enterprise" ? (
                     <a href="mailto:sales@getprovly.com?subject=Provly%20Enterprise" style={{
                       marginTop: "auto", textAlign: "center", textDecoration: "none",
