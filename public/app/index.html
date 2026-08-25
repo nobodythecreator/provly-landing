@@ -13,6 +13,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <!-- v20.0.6r1 (Greptile): cleared optional client fields now persist as explicit NULLs instead of being dropped from the update payload (clearing a saved Medicaid number actually clears it, and the audit can flag it); the Medicaid field no longer renders a required marker. -->
   <!-- v20.0.6: tier limits meter CLIENTS ONLY (staff/operators/care-circle free and unlimited — Principle 7); plan copy "up to X clients · unlimited staff". Medicaid number OPTIONAL at intake/edit (format-validated only when provided) with a compliance audit flag for active clients missing it — record reality, mirror the gap. -->
   <!-- v20.0.5r5 (Greptile): Settings tab names from the URL are validated against the user's actual permission-filtered section list — unknown or unavailable tabs render the default Organization Structure section, never an empty pane. -->
   <!-- v20.0.5r4 (Greptile): staff-profile hydration is generation-scoped (brandFetchEpoch — the fetchOrgId pattern): a delayed response from a previous session writes nothing, killing the cross-user role race by construction; sign-out fully clears identity state. Settings tab is now DERIVED from the routed context (no local copy) and clicks route via navigate(), so bare #/settings restores the default section and URL/tab can never disagree. -->
@@ -2591,7 +2592,13 @@
         Object.keys(payload).forEach(k => {
           if (typeof payload[k] === "string") payload[k] = payload[k].trim();
         });
-        // Strip all empty optional fields so we don't write empty strings into nullable columns
+        // v20.0.6r1 — empty optional fields become explicit NULLs, not
+        // omissions. The old delete-the-key approach made "clear this field"
+        // a silent no-op on EDIT: the update never touched the column, the
+        // stale value survived (and a removed Medicaid number could never be
+        // re-flagged by the audit). Null persists the clearing; nullable
+        // columns accept it on insert identically. This un-breaks clearing
+        // for EVERY optional client field, not just Medicaid.
         const optionalKeys = [
           "date_of_birth", "medicaid_number", "identification_number",
           "support_coordinator", "support_coordinator_phone", "support_coordinator_email", "support_coordinator_agency",
@@ -2600,7 +2607,7 @@
           "physician_name", "physician_phone",
           "address", "city", "zip", "phone",
         ];
-        optionalKeys.forEach(k => { if (!payload[k]) delete payload[k]; });
+        optionalKeys.forEach(k => { if (!payload[k]) payload[k] = null; });
 
         let result;
         if (editing) {
@@ -2653,7 +2660,7 @@
             <FormField label="Date of Birth" half>
               <input style={fieldStyle} type="date" value={form.date_of_birth} onChange={e => set("date_of_birth", e.target.value)} />
             </FormField>
-            <FormField label="Medicaid Number" required half>
+            <FormField label="Medicaid Number" half>
               <input style={fieldStyle} value={form.medicaid_number} onChange={e => set("medicaid_number", e.target.value)} placeholder="9–10 digits — add when available" inputMode="numeric" maxLength={10} />
             </FormField>
           </FormRow>
