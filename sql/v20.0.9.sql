@@ -12,21 +12,27 @@ comment on column public.organizations.checkout_lock_at is
 comment on column public.organizations.stripe_checkout_session_id is
   'create-checkout-session: the org''s single open Stripe Checkout session — reused while open for the same price, expired when the price differs';
 
--- ── v20.0.9r6 (Greptile) — owner backfill, strict ───────────────────────────
--- org_id() resolves membership from the JWT's app_metadata.org_id, so an org can
--- be fully usable with no org_members row — but create-checkout-session is
--- fail-closed on an org_members owner row. Promote, per org lacking an owner, the
--- auth user carrying that org in app_metadata — ONLY when that user is the sole
--- one (r6: no email tie-breaker; a contact-address match is not ownership).
--- Orgs with several such users are left for a human. Idempotent.
-insert into public.org_members (id, user_id, org_id, role, is_default_org, joined_at)
-select gen_random_uuid(), c.user_id, c.org_id, 'owner', true, now()
-from (
-  select o.id as org_id, min(u.id::text)::uuid as user_id, count(*) as candidates
+-- ── v20.0.9r7 (Greptile) — owner membership: verify, never infer ────────────
+-- create-checkout-session is fail-closed on an org_members owner row. A tenant
+-- claim (JWT app_metadata.org_id) proves membership, not billing authority, so
+-- this migration grants NOTHING automatically. It verifies instead: if any org
+-- with signed-up users lacks an owner row, the migration fails loudly naming the
+-- org, and a human inserts the owner row for the verified person by user id.
+-- Verified Aug 26, 2026 against production: every org with users has an owner.
+do $$
+declare
+  missing text;
+begin
+  select string_agg(coalesce(o.legal_name, o.name) || ' (' || o.id || ')', ', ')
+    into missing
     from public.organizations o
-    join auth.users u on u.raw_app_meta_data ->> 'org_id' = o.id::text
-   where not exists (select 1 from public.org_members m where m.org_id = o.id and m.role = 'owner')
-   group by o.id
-) c
-where c.candidates = 1
-  and not exists (select 1 from public.org_members m where m.org_id = c.org_id and m.user_id = c.user_id);
+   where exists (select 1 from auth.users u where u.raw_app_meta_data ->> 'org_id' = o.id::text)
+     and not exists (select 1 from public.org_members m where m.org_id = o.id and m.role = 'owner');
+  if missing is not null then
+    raise exception 'v20.0.9: organizations with users but no org_members owner row — insert the verified owner by user id before deploying create-checkout-session: %', missing;
+  end if;
+end $$;
+
+-- Manual path, run only by a human who has verified ownership (never automated):
+-- insert into public.org_members (id, user_id, org_id, role, is_default_org, joined_at)
+-- values (gen_random_uuid(), '<verified auth.users.id>', '<organizations.id>', 'owner', true, now());
