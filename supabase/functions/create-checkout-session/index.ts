@@ -36,6 +36,14 @@
 //      and the subscription-id backfill. A fenced write that lands zero rows
 //      means the lease is gone: undo what Stripe was just asked to make and
 //      answer 409.
+//      v20.0.9r5 (Greptile): the one-open-session invariant is re-established
+//      by EVERY holder from Stripe's own truth — at acquire it lists the
+//      customer's open Checkout sessions and expires all but the same-price
+//      one it will reuse. The DB column is a hint, not the source of truth,
+//      so an orphan left by a failed compensation (Stripe refused the
+//      expiry) is swept by the next request. Compensation itself retries,
+//      and a request that could not compensate never returns the orphan's
+//      URL — the session is unreachable until swept.
 //
 // Schema (sql/v20.0.9): organizations.checkout_lock_at timestamptz,
 // organizations.stripe_checkout_session_id text.
@@ -59,6 +67,24 @@ const LIVE_STATUSES = new Set<string>([
 ]);
 // NOT live: canceled, incomplete_expired, incomplete — a new checkout is the
 // right recovery for an incomplete one.
+
+// v20.0.9r5 (Greptile) — compensation is not best-effort. Expire a Checkout
+// session with retries; a session that is already not open counts as done.
+// Returns false only when Stripe would not take the expiry after three tries.
+async function expireSession(id: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await stripe.checkout.sessions.expire(id);
+      return true;
+    } catch (err) {
+      const e = err as Stripe.errors.StripeError;
+      if (e?.code === "resource_missing") return true;
+      if (/not open|already expired|cannot be expired|status/i.test(e?.message ?? "")) return true;
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+    }
+  }
+  return false;
+}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -225,27 +251,45 @@ Deno.serve(async (req) => {
         return json({ url, mode: "portal", subscriptionId: live.id, samePlan });
       }
 
-      // ── One open Checkout session per org (v20.0.9r1) ──────────────────
-      // Reuse the remembered session if Stripe says it is still open for the
-      // SAME price; expire it if the price differs. After this block, no other
-      // payable session for this org exists — the one created below is it.
-      if (priorSessionId) {
-        try {
-          const prior = await stripe.checkout.sessions.retrieve(priorSessionId, {
-            expand: ["line_items"],
-          });
-          if (prior.status === "open" && prior.url) {
-            const priorPrice = prior.line_items?.data?.[0]?.price?.id ?? null;
-            if (priorPrice === priceId) {
-              return json({ url: prior.url, mode: "checkout", reused: true });
-            }
-            await stripe.checkout.sessions.expire(prior.id);
-          }
-        } catch (err) {
-          // A session id Stripe no longer knows (or a transient retrieve
-          // failure) must not brick checkout; the id is overwritten below.
-          console.warn("prior checkout session lookup:", (err as Error).message);
+      // ── One open Checkout session per org (v20.0.9r1, r5) ──────────────
+      // Stripe is asked directly which sessions are OPEN for this customer.
+      // Exactly one may survive: an open session for the SAME price is reused
+      // (its URL is returned); every other open session is expired. This
+      // holds regardless of what our column remembers — an orphan from a
+      // failed compensation, or a session recorded by a request whose lease
+      // was taken over, is expired here. If an expiry is refused, we do NOT
+      // proceed to mint another payable session: 409, the next request
+      // sweeps again.
+      let reuse: Stripe.Checkout.Session | null = null;
+      const openSessions = await stripe.checkout.sessions.list({
+        customer: customerId,
+        status: "open",
+        limit: 20,
+        expand: ["data.line_items"],
+      });
+      for (const sess of openSessions.data) {
+        const sessPrice = sess.line_items?.data?.[0]?.price?.id ?? null;
+        if (!reuse && sessPrice === priceId && sess.url) {
+          reuse = sess;
+          continue;
         }
+        if (!(await expireSession(sess.id))) {
+          console.error("could not expire stray checkout session", sess.id, "for org", org.id);
+          return json({ error: "Checkout could not be prepared — please try again" }, 409);
+        }
+      }
+      if (reuse) {
+        // Recording the reused id is still fenced; zero rows only means a
+        // newer holder owns the row now, and returning an already-open
+        // same-price session creates nothing new — safe either way.
+        if (reuse.id !== priorSessionId) {
+          await supabaseAdmin
+            .from("organizations")
+            .update({ stripe_checkout_session_id: reuse.id })
+            .eq("id", org.id)
+            .eq("checkout_lock_at", lockToken);
+        }
+        return json({ url: reuse.url, mode: "checkout", reused: true });
       }
 
       // ── Checkout ───────────────────────────────────────────────────────
@@ -279,11 +323,14 @@ Deno.serve(async (req) => {
         .eq("checkout_lock_at", lockToken)
         .select("id");
       if (rememberErr) {
-        await stripe.checkout.sessions.expire(session.id).catch(() => {});
+        if (!(await expireSession(session.id))) console.error("ORPHAN checkout session (record failed, expiry refused)", session.id, "org", org.id);
         throw rememberErr;
       }
       if (!fenced || fenced.length === 0) {
-        await stripe.checkout.sessions.expire(session.id).catch(() => {});
+        // v20.0.9r5 — the URL below is never returned on this path, so even
+        // if Stripe refuses the expiry the session is unreachable; the next
+        // holder's sweep expires it.
+        if (!(await expireSession(session.id))) console.error("ORPHAN checkout session (lease lost, expiry refused)", session.id, "org", org.id);
         return json({ error: "Checkout took too long to prepare — please try again" }, 409);
       }
 
