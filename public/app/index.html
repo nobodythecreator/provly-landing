@@ -13,6 +13,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <!-- v20.0.8r5 (Greptile): each sequential poll attempt is killed, not abandoned — a per-attempt AbortController (8s) makes a never-responding refresh settle by abortion, so the 30s deadline is always evaluated and the finalizing state cannot hang; cancel()/watcher/unmount abort the in-flight attempt too, so no orphaned request survives cancellation. -->
   <!-- v20.0.8r4 (Greptile): the checkout poll is rewritten as a SEQUENTIAL loop — one request in flight at a time, every result awaited and observed, activation anywhere in the window ends it silently, and the timeout warning is reachable only when every attempt returned non-active with none in flight. This removes the overlapping-request primitive that generated the r1–r3 ordering findings, rather than narrowing another window. -->
   <!-- v20.0.8r3 (Greptile): the timeout verdict consults the freshest truth — the final attempt's result OR a live status mirror updated by any overlapping refresh — so out-of-order resolutions and a failed final request cannot produce a delayed-confirmation warning after activation has already been confirmed. -->
   <!-- v20.0.8r2 (Greptile): the final poll attempt is awaited and its result decides the outcome — no delayed-confirmation warning when the last refresh returns active; refetchSubscription is now a purpose-built billing-row fetch that returns its result (the old context value aliased fetchOrgId: full org re-hydration per tick, no observable result). -->
@@ -491,14 +492,16 @@
       // nothing). The checkout poll needs only the billing row — and its
       // RESULT, so the final attempt can be observed before a timeout is
       // declared.
-      const refetchSubscription = async () => {
+      const refetchSubscription = async (signal) => {
         try {
-          const { data: sub } = await supabase.from("organizations")
+          let q = supabase.from("organizations")
             .select("subscription_status, subscription_tier, trial_ends_at, stripe_customer_id, stripe_subscription_id")
             .eq("id", orgId).maybeSingle();
+          if (signal) q = q.abortSignal(signal); // v20.0.8r5 — callers may bound the attempt
+          const { data: sub } = await q;
           if (sub) setSubscription(sub);
           return sub || null;
-        } catch (_) { return null; }
+        } catch (_) { return null; } // aborted or failed = no answer this attempt
       };
 
       const lastUserIdRef = useRef(null); // v20.0.5 — who the app is currently hydrated for
@@ -18788,11 +18791,23 @@
           setCheckoutPending(true);
           if (refetchSubscription) {
             let cancelled = false;
-            checkoutPollRef.current = { cancel: () => { cancelled = true; } };
+            let currentCtrl = null;
+            checkoutPollRef.current = { cancel: () => { cancelled = true; if (currentCtrl) currentCtrl.abort(); } };
             (async () => {
               const deadline = Date.now() + 30000;
               while (!cancelled) {
-                const sub = await refetchSubscription();
+                // v20.0.8r5 — each attempt is KILLED, not abandoned: an
+                // AbortController bounds it at 8s, so a request that never
+                // responds is aborted and its promise SETTLES — the deadline
+                // is always reachable and the finalizing state cannot hang
+                // on one dead connection. cancel() (activation watcher,
+                // unmount) aborts the in-flight attempt too, so nothing
+                // orphaned survives cancellation to write stale state later.
+                currentCtrl = new AbortController();
+                const bound = setTimeout(() => currentCtrl.abort(), 8000);
+                const sub = await refetchSubscription(currentCtrl.signal);
+                clearTimeout(bound);
+                currentCtrl = null;
                 if (cancelled) return;
                 if (sub?.subscription_status === "active") {
                   checkoutPollRef.current = null;
