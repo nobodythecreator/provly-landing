@@ -44,6 +44,13 @@
 //      expiry) is swept by the next request. Compensation itself retries,
 //      and a request that could not compensate never returns the orphan's
 //      URL — the session is unreachable until swept.
+//      v20.0.9r8 (Greptile): every session we create is stamped with the
+//      creating lease's token (metadata.lock_token). The sweep refuses to
+//      touch anything when it sees a session stamped with a NEWER token —
+//      that session belongs to a holder who took the lease from us, and its
+//      URL may already be in the owner's hands. We answer 409 before any
+//      mutation. Ordering is exact: a newer holder can only acquire after
+//      our lease went stale (≥30s later), far beyond any clock skew.
 //      v20.0.9r6 (Greptile): the sweep runs BEFORE the live-subscription
 //      branch. An org with a live subscription (e.g. one that started a
 //      checkout on trial, then subscribed through the portal) gets every
@@ -222,6 +229,16 @@ Deno.serve(async (req) => {
       const existing = await stripe.subscriptions.list({ customer: customerId, status: "all", limit: 20 });
       const live = existing.data.find((s) => LIVE_STATUSES.has(s.status));
 
+      // v20.0.9r8 — lease-loss detection BEFORE any mutation: a session
+      // stamped by a later lease means a newer holder is (or was) active and
+      // may have handed its URL to the owner. Nothing here may be expired.
+      for (const sess of openSessions.data) {
+        const sessToken = sess.metadata?.lock_token ?? "";
+        if (sessToken > lockToken) {
+          return json({ error: "Checkout took too long to prepare — please try again" }, 409);
+        }
+      }
+
       let reuse: Stripe.Checkout.Session | null = null;
       for (const sess of openSessions.data) {
         const sessPrice = sess.line_items?.data?.[0]?.price?.id ?? null;
@@ -304,7 +321,9 @@ Deno.serve(async (req) => {
       // Return URLs are honored only on the requesting origin; anything else
       // falls back to the default so this cannot become an open redirect.
       const sameOrigin = (u: unknown): u is string => typeof u === "string" && u.startsWith(`${origin}/`);
-      const metadata = { org_id: org.id, tier, client_census: String(census) };
+      // v20.0.9r8 — lock_token stamps the creating lease so a later sweep can
+      // tell a newer holder's session from a stray (see header).
+      const metadata = { org_id: org.id, tier, client_census: String(census), lock_token: lockToken };
       const session = await stripe.checkout.sessions.create({
         mode: "subscription",
         customer: customerId,
