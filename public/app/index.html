@@ -13,6 +13,13 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <!-- v20.0.8r6 (Greptile): the 30s confirmation deadline is now exact — each attempt's abort timer is min(8s, time remaining) and inter-attempt sleeps are clamped the same way, so an attempt starting near the limit aborts AT the deadline and the delayed-confirmation guidance always appears by 30s; the finalizing state is also only engaged when the resolving loop can actually run. -->
+  <!-- v20.0.8r5 (Greptile): each sequential poll attempt is killed, not abandoned — a per-attempt AbortController (8s) makes a never-responding refresh settle by abortion, so the 30s deadline is always evaluated and the finalizing state cannot hang; cancel()/watcher/unmount abort the in-flight attempt too, so no orphaned request survives cancellation. -->
+  <!-- v20.0.8r4 (Greptile): the checkout poll is rewritten as a SEQUENTIAL loop — one request in flight at a time, every result awaited and observed, activation anywhere in the window ends it silently, and the timeout warning is reachable only when every attempt returned non-active with none in flight. This removes the overlapping-request primitive that generated the r1–r3 ordering findings, rather than narrowing another window. -->
+  <!-- v20.0.8r3 (Greptile): the timeout verdict consults the freshest truth — the final attempt's result OR a live status mirror updated by any overlapping refresh — so out-of-order resolutions and a failed final request cannot produce a delayed-confirmation warning after activation has already been confirmed. -->
+  <!-- v20.0.8r2 (Greptile): the final poll attempt is awaited and its result decides the outcome — no delayed-confirmation warning when the last refresh returns active; refetchSubscription is now a purpose-built billing-row fetch that returns its result (the old context value aliased fetchOrgId: full org re-hydration per tick, no observable result). -->
+  <!-- v20.0.8r1 (Greptile): checkout-pending is React state passed as a prop (sessionStorage gave no render signal, so the finalizing banner could outlive its cleared flag); the poll now stops on activation and on shell unmount, and the timeout path tells the user instead of going silent. -->
+  <!-- v20.0.8: post-checkout truth — the Stripe return lands on the Subscription page (success URL carries the hash route), the app POLLS the subscription status for up to 30s after checkout (the webhook writes after the redirect, so a single refetch lost the race and the trial banner sat stale until a manual reload), TrialBanner shows a calm "finalizing" state during that window and clears once active, and the checkout param cleanup preserves the hash route. -->
   <!-- v20.0.7: copy hotfix — plan cards render a real middot (JSX text had shown the \u00b7 escape literally); usage row fully clients-only ("X / Y clients", caption "N active clients · staff unlimited (M active)"). -->
   <!-- v20.0.6r2 (Greptile): the schema-fallback retry no longer strips explicit NULLs from its payload — a cleared Medicaid number stays cleared even when the save retries on an older schema; a schema genuinely missing the column now fails loudly rather than reporting success with stale data. -->
   <!-- v20.0.6r1 (Greptile): cleared optional client fields now persist as explicit NULLs instead of being dropped from the update payload (clearing a saved Medicaid number actually clears it, and the audit can flag it); the Medicaid field no longer renders a required marker. -->
@@ -481,6 +488,23 @@
         setStaffProfile(data || { role: "owner", first_name: "Admin", last_name: "" });
       };
 
+      // v20.0.8r2 — purpose-built subscription refetch. The old context value
+      // aliased fetchOrgId (full org re-hydration per poll tick, returning
+      // nothing). The checkout poll needs only the billing row — and its
+      // RESULT, so the final attempt can be observed before a timeout is
+      // declared.
+      const refetchSubscription = async (signal) => {
+        try {
+          let q = supabase.from("organizations")
+            .select("subscription_status, subscription_tier, trial_ends_at, stripe_customer_id, stripe_subscription_id")
+            .eq("id", orgId).maybeSingle();
+          if (signal) q = q.abortSignal(signal); // v20.0.8r5 — callers may bound the attempt
+          const { data: sub } = await q;
+          if (sub) setSubscription(sub);
+          return sub || null;
+        } catch (_) { return null; } // aborted or failed = no answer this attempt
+      };
+
       const lastUserIdRef = useRef(null); // v20.0.5 — who the app is currently hydrated for
       const orgOkRef = useRef(false);     // v20.0.5r2 — org hydration completed for this user
       const staffOkRef = useRef(false);   // v20.0.5r2 — staff-profile query COMPLETED (row or legitimately no row)
@@ -554,7 +578,7 @@
       const signOut = () => supabase.auth.signOut();
 
       return (
-        <AuthContext.Provider value={{ user, session, loading, brandReady, signIn, signOut, orgId, staffProfile, role, permissions, navItems, enforcement, brand, refetchBrand: fetchOrgId, subscription, refetchSubscription: fetchOrgId }}>
+        <AuthContext.Provider value={{ user, session, loading, brandReady, signIn, signOut, orgId, staffProfile, role, permissions, navItems, enforcement, brand, refetchBrand: fetchOrgId, subscription, refetchSubscription }}>
           {children}
         </AuthContext.Provider>
       );
@@ -1511,7 +1535,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.7</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.8</span>
               </div>
             </div>
             {isMobile && (
@@ -16463,11 +16487,28 @@
     // Renders across the top of the app when the trial is ending (≤7 days),
     // or when billing needs attention (past_due / canceled).
     // ═══════════════════════════════════════════════════════════════
-    function TrialBanner({ subscription, onUpgrade }) {
+    function TrialBanner({ subscription, checkoutPending, onUpgrade }) {
       if (!subscription) return null;
       const status = subscription.subscription_status;
       const trialEnds = subscription.trial_ends_at ? new Date(subscription.trial_ends_at) : null;
       const daysLeft = trialEnds ? Math.ceil((trialEnds - new Date()) / 86400000) : null;
+
+      // v20.0.8r1 — the minute after checkout: payment is done but the
+      // webhook may not have written the new status yet. Pending arrives as a
+      // PROP from the shell (React state — clearing it re-renders this banner
+      // immediately, on activation or on timeout).
+      if (checkoutPending && status !== "active") {
+        return (
+          <div style={{
+            background: CB.blue, color: CB.white, borderRadius: 10, padding: "12px 18px",
+            marginBottom: 20, display: "flex", alignItems: "center", gap: 10,
+            fontSize: 14, fontWeight: 600, boxShadow: "0 2px 12px rgba(10,30,51,0.12)",
+          }}>
+            {icons.clock({ size: 18, color: CB.white })}
+            <span>Payment received — finalizing your subscription. This takes a few seconds…</span>
+          </div>
+        );
+      }
 
       let show = false, bg = CB.blue, msg = "", cta = "View plans";
       if (status === "trial" && daysLeft !== null && daysLeft <= 7) {
@@ -16553,7 +16594,7 @@
           const { url } = await callBillingFn("create-checkout-session", {
             orgId,
             priceId: t.priceId,
-            successUrl: `${origin}/app?checkout=success`,
+            successUrl: `${origin}/app?checkout=success#/settings/subscription`, // v20.0.8 — return lands on the plan page
             cancelUrl: `${origin}/app?checkout=cancel`,
           });
           if (url) window.location.href = url;
@@ -18722,6 +18763,8 @@
       const initial = parseHash();
       const [page, setPage] = useState(initial.page);
       const [pageContext, setPageContext] = useState(initial.context);
+      const [checkoutPending, setCheckoutPending] = useState(false); // v20.0.8r1 — React state, not sessionStorage
+      const checkoutPollRef = useRef(null); // v20.0.8r4 — cancel handle for the sequential poll loop
       const { isMobile } = useMobile();
       const [sidebarOpen, setSidebarOpen] = useState(false);
       const { subscription, refetchSubscription } = useAuth();
@@ -18736,15 +18779,75 @@
         if (!c) return;
         if (c === "success") {
           addToast("Subscription updated — welcome aboard!", "success");
-          if (refetchSubscription) refetchSubscription();
+          // v20.0.8r4 — SEQUENTIAL poll loop, replacing the interval. The
+          // interval fired overlapping untracked requests, and each review
+          // round found another ordering window (stale flag, unobserved
+          // final attempt, out-of-order straggler) because untracked
+          // concurrency cannot be conclusively judged at a point in time.
+          // One request in flight at a time closes the class by
+          // construction: every result is awaited and observed the moment
+          // it exists; activation anywhere in the window ends the loop
+          // silently; the timeout warning is reachable only when every
+          // attempt returned non-active and none remain in flight.
+          if (refetchSubscription) {
+            setCheckoutPending(true); // v20.0.8r6 — only when the loop below can actually resolve it
+            let cancelled = false;
+            let currentCtrl = null;
+            checkoutPollRef.current = { cancel: () => { cancelled = true; if (currentCtrl) currentCtrl.abort(); } };
+            (async () => {
+              const deadline = Date.now() + 30000;
+              while (!cancelled) {
+                // v20.0.8r5 — each attempt is KILLED, not abandoned: an
+                // AbortController bounds it at 8s, so a request that never
+                // responds is aborted and its promise SETTLES — the deadline
+                // is always reachable and the finalizing state cannot hang
+                // on one dead connection. cancel() (activation watcher,
+                // unmount) aborts the in-flight attempt too, so nothing
+                // orphaned survives cancellation to write stale state later.
+                currentCtrl = new AbortController();
+                // v20.0.8r6 — the attempt bound is clamped to the DEADLINE:
+                // min(8s, time remaining). An attempt starting late aborts AT
+                // the deadline, so the finalizing state always resolves by
+                // 30s — never 36.5s.
+                const bound = setTimeout(() => currentCtrl.abort(), Math.min(8000, Math.max(deadline - Date.now(), 1)));
+                const sub = await refetchSubscription(currentCtrl.signal);
+                clearTimeout(bound);
+                currentCtrl = null;
+                if (cancelled) return;
+                if (sub?.subscription_status === "active") {
+                  checkoutPollRef.current = null;
+                  setCheckoutPending(false);
+                  return;
+                }
+                if (Date.now() >= deadline) {
+                  checkoutPollRef.current = null;
+                  setCheckoutPending(false);
+                  addToast("Still confirming your payment — this can take a minute. Refresh shortly, or check Manage billing.", "warning");
+                  return;
+                }
+                await new Promise(r => setTimeout(r, Math.min(2500, Math.max(deadline - Date.now(), 0)))); // v20.0.8r6 — never sleep past the deadline
+              }
+            })();
+          }
         } else if (c === "cancel") {
           addToast("Checkout canceled — no changes made.", "warning");
         }
         params.delete("checkout");
         params.delete("session_id");
         const qs = params.toString();
-        window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
+        window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash); // v20.0.8 — keep the route
+        return () => { if (checkoutPollRef.current) { checkoutPollRef.current.cancel(); checkoutPollRef.current = null; } }; // v20.0.8r1/r4 — no orphan loops after unmount
       }, []);
+
+      // v20.0.8r1/r4 — belt to the loop's suspenders: if activation arrives
+      // via any non-poll path (hydration refetch on an auth event), stop the
+      // loop and clear the finalizing state immediately.
+      useEffect(() => {
+        if (checkoutPending && subscription?.subscription_status === "active") {
+          if (checkoutPollRef.current) { checkoutPollRef.current.cancel(); checkoutPollRef.current = null; }
+          setCheckoutPending(false);
+        }
+      }, [checkoutPending, subscription]);
 
       // Navigation helper — accepts optional context (e.g. { type: "staff", id } for profile pages)
       const navigate = (target, context = null) => {
@@ -18830,7 +18933,7 @@
             maxWidth: isMobile ? "100vw" : `calc(100vw - ${CB.sidebarW}px)`,
             overflowX: "hidden",
           }}>
-            <TrialBanner subscription={subscription} onUpgrade={() => navigate("settings", { tab: "subscription" })} />
+            <TrialBanner subscription={subscription} checkoutPending={checkoutPending} onUpgrade={() => navigate("settings", { tab: "subscription" })} />
             {renderPage()}
           </main>
         </div>
