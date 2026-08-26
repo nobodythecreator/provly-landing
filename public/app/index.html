@@ -13,6 +13,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <!-- v20.0.8r3 (Greptile): the timeout verdict consults the freshest truth — the final attempt's result OR a live status mirror updated by any overlapping refresh — so out-of-order resolutions and a failed final request cannot produce a delayed-confirmation warning after activation has already been confirmed. -->
   <!-- v20.0.8r2 (Greptile): the final poll attempt is awaited and its result decides the outcome — no delayed-confirmation warning when the last refresh returns active; refetchSubscription is now a purpose-built billing-row fetch that returns its result (the old context value aliased fetchOrgId: full org re-hydration per tick, no observable result). -->
   <!-- v20.0.8r1 (Greptile): checkout-pending is React state passed as a prop (sessionStorage gave no render signal, so the finalizing banner could outlive its cleared flag); the poll now stops on activation and on shell unmount, and the timeout path tells the user instead of going silent. -->
   <!-- v20.0.8: post-checkout truth — the Stripe return lands on the Subscription page (success URL carries the hash route), the app POLLS the subscription status for up to 30s after checkout (the webhook writes after the redirect, so a single refetch lost the race and the trial banner sat stale until a manual reload), TrialBanner shows a calm "finalizing" state during that window and clears once active, and the checkout param cleanup preserves the hash route. -->
@@ -18759,6 +18760,8 @@
       const [pageContext, setPageContext] = useState(initial.context);
       const [checkoutPending, setCheckoutPending] = useState(false); // v20.0.8r1 — React state, not sessionStorage
       const checkoutPollRef = useRef(null);                          // v20.0.8r1 — poll handle for stop/cleanup
+      const subStatusRef = useRef(null);                             // v20.0.8r3 — live status mirror for the async verdict
+      useEffect(() => { subStatusRef.current = subscription?.subscription_status || null; }, [subscription]);
       const { isMobile } = useMobile();
       const [sidebarOpen, setSidebarOpen] = useState(false);
       const { subscription, refetchSubscription } = useAuth();
@@ -18792,8 +18795,13 @@
               clearInterval(checkoutPollRef.current);
               checkoutPollRef.current = null;
               const last = refetchSubscription ? await refetchSubscription() : null;
+              // v20.0.8r3 — verdict on the FRESHEST truth, not one request:
+              // an overlapping earlier refresh may have already confirmed
+              // activation (and out-of-order resolution or a failed final
+              // request must not out-shout that success).
+              const confirmedActive = last?.subscription_status === "active" || subStatusRef.current === "active";
               setCheckoutPending(false);
-              if (!last || last.subscription_status !== "active") {
+              if (!confirmedActive) {
                 addToast("Still confirming your payment — this can take a minute. Refresh shortly, or check Manage billing.", "warning");
               }
             }, 2500);
