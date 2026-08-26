@@ -58,6 +58,11 @@ type SyncResult = {
   customerId: string | null;
   subscriptionId: string | null;
   note: string;
+  // v20.0.9r1 (Greptile): a LIVE subscription that could not be attached to
+  // an org is a provisioning failure, not a decision — answered 500 so Stripe
+  // keeps retrying (up to 3 days) while the data is repaired. A dead
+  // subscription that cannot resolve is acknowledged (nothing to provision).
+  retry?: boolean;
 };
 
 const idOf = (ref: string | { id: string } | null | undefined): string | null =>
@@ -119,8 +124,9 @@ async function syncSubscription(subscriptionId: string, origin: string): Promise
   const base = { customerId, subscriptionId: sub.id };
 
   const { org, conflict } = await resolveOrg(sub);
-  if (conflict) return { ...base, orgId: null, note: `CONFLICT (not applied): ${conflict}` };
-  if (!org) return { ...base, orgId: null, note: `unresolved: no org for customer ${customerId ?? "?"} (${origin})` };
+  const retry = LIVE_STATUSES.has(sub.status); // v20.0.9r1 — live + unattached = retryable failure
+  if (conflict) return { ...base, orgId: null, retry, note: `CONFLICT (not applied): ${conflict}` };
+  if (!org) return { ...base, orgId: null, retry, note: `unresolved: no org for customer ${customerId ?? "?"} (${origin}, ${sub.status})` };
 
   // ONE tracked subscription per org. If the org already tracks a different
   // subscription, the event's subscription replaces it only if the tracked
@@ -284,5 +290,11 @@ Deno.serve(async (req) => {
   }
 
   await logEvent(event, result);
+  if (result.retry) {
+    // v20.0.9r1 — provisioning did not happen for a live subscription: fail
+    // loudly so Stripe retries; the seen-check above already treats this
+    // row's note as reprocessable.
+    return new Response(JSON.stringify({ error: result.note }), { status: 500 });
+  }
   return new Response(JSON.stringify({ received: true }), { status: 200 });
 });
