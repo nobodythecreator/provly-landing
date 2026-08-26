@@ -13,6 +13,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <!-- v20.0.8r2 (Greptile): the final poll attempt is awaited and its result decides the outcome — no delayed-confirmation warning when the last refresh returns active; refetchSubscription is now a purpose-built billing-row fetch that returns its result (the old context value aliased fetchOrgId: full org re-hydration per tick, no observable result). -->
   <!-- v20.0.8r1 (Greptile): checkout-pending is React state passed as a prop (sessionStorage gave no render signal, so the finalizing banner could outlive its cleared flag); the poll now stops on activation and on shell unmount, and the timeout path tells the user instead of going silent. -->
   <!-- v20.0.8: post-checkout truth — the Stripe return lands on the Subscription page (success URL carries the hash route), the app POLLS the subscription status for up to 30s after checkout (the webhook writes after the redirect, so a single refetch lost the race and the trial banner sat stale until a manual reload), TrialBanner shows a calm "finalizing" state during that window and clears once active, and the checkout param cleanup preserves the hash route. -->
   <!-- v20.0.7: copy hotfix — plan cards render a real middot (JSX text had shown the \u00b7 escape literally); usage row fully clients-only ("X / Y clients", caption "N active clients · staff unlimited (M active)"). -->
@@ -483,6 +484,21 @@
         setStaffProfile(data || { role: "owner", first_name: "Admin", last_name: "" });
       };
 
+      // v20.0.8r2 — purpose-built subscription refetch. The old context value
+      // aliased fetchOrgId (full org re-hydration per poll tick, returning
+      // nothing). The checkout poll needs only the billing row — and its
+      // RESULT, so the final attempt can be observed before a timeout is
+      // declared.
+      const refetchSubscription = async () => {
+        try {
+          const { data: sub } = await supabase.from("organizations")
+            .select("subscription_status, subscription_tier, trial_ends_at, stripe_customer_id, stripe_subscription_id")
+            .eq("id", orgId).maybeSingle();
+          if (sub) setSubscription(sub);
+          return sub || null;
+        } catch (_) { return null; }
+      };
+
       const lastUserIdRef = useRef(null); // v20.0.5 — who the app is currently hydrated for
       const orgOkRef = useRef(false);     // v20.0.5r2 — org hydration completed for this user
       const staffOkRef = useRef(false);   // v20.0.5r2 — staff-profile query COMPLETED (row or legitimately no row)
@@ -556,7 +572,7 @@
       const signOut = () => supabase.auth.signOut();
 
       return (
-        <AuthContext.Provider value={{ user, session, loading, brandReady, signIn, signOut, orgId, staffProfile, role, permissions, navItems, enforcement, brand, refetchBrand: fetchOrgId, subscription, refetchSubscription: fetchOrgId }}>
+        <AuthContext.Provider value={{ user, session, loading, brandReady, signIn, signOut, orgId, staffProfile, role, permissions, navItems, enforcement, brand, refetchBrand: fetchOrgId, subscription, refetchSubscription }}>
           {children}
         </AuthContext.Provider>
       );
@@ -18767,13 +18783,17 @@
           if (refetchSubscription) {
             refetchSubscription();
             let tries = 0;
-            checkoutPollRef.current = setInterval(() => {
+            checkoutPollRef.current = setInterval(async () => {
               tries += 1;
-              refetchSubscription();
-              if (tries >= 12) {
-                clearInterval(checkoutPollRef.current);
-                checkoutPollRef.current = null;
-                setCheckoutPending(false);
+              if (tries < 12) { refetchSubscription(); return; }
+              // v20.0.8r2 — the FINAL attempt is awaited and its result
+              // decides: no delayed-confirmation warning when the last
+              // refresh confirms activation moments after the window closes.
+              clearInterval(checkoutPollRef.current);
+              checkoutPollRef.current = null;
+              const last = refetchSubscription ? await refetchSubscription() : null;
+              setCheckoutPending(false);
+              if (!last || last.subscription_status !== "active") {
                 addToast("Still confirming your payment — this can take a minute. Refresh shortly, or check Manage billing.", "warning");
               }
             }, 2500);
