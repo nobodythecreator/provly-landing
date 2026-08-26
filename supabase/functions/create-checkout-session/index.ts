@@ -29,6 +29,13 @@
 //      The remembered session id is read atomically WITH the acquire, so a
 //      request cannot act on a value that predates another request's
 //      commit. Correctness no longer depends on how long Stripe takes.
+//      v20.0.9r4 (Greptile): EVERY write under the lease is fenced, not just
+//      the session record — the customer link (a lease-loser overwriting it
+//      would strand the accepted session's subscription on a customer the
+//      org no longer claims, and the webhook would refuse it as a conflict)
+//      and the subscription-id backfill. A fenced write that lands zero rows
+//      means the lease is gone: undo what Stripe was just asked to make and
+//      answer 409.
 //
 // Schema (sql/v20.0.9): organizations.checkout_lock_at timestamptz,
 // organizations.stripe_checkout_session_id text.
@@ -120,7 +127,7 @@ Deno.serve(async (req) => {
       .update({ checkout_lock_at: lockToken })
       .eq("id", org.id)
       .or(`checkout_lock_at.is.null,checkout_lock_at.lt.${staleBefore}`)
-      .select("id, stripe_checkout_session_id");
+      .select("id, stripe_checkout_session_id, stripe_customer_id, stripe_subscription_id");
     if (lockErr) throw lockErr;
     if (!locked || locked.length === 0) {
       return json({ error: "A checkout is already being prepared for your organization — try again in a moment" }, 409);
@@ -132,19 +139,35 @@ Deno.serve(async (req) => {
 
     try {
       // ── Stripe customer (create once, persist before anything else) ────
-      let customerId = org.stripe_customer_id as string | null;
+      // v20.0.9r4 — the customer id is read from the ACQUIRE, not the pre-lock
+      // org fetch, for the same reason as the session id.
+      let customerId = (locked[0].stripe_customer_id as string | null) ?? null;
       if (!customerId) {
         const customer = await stripe.customers.create({
           name: org.legal_name ?? undefined,
           email: org.email ?? undefined,
           metadata: { org_id: org.id },
         });
-        customerId = customer.id;
-        const { error: linkErr } = await supabaseAdmin
+        // v20.0.9r4 — FENCED link: only under our lease and only into an
+        // empty slot. Zero rows = a newer holder already linked a customer
+        // (and may have an accepted session on it); ours must not replace
+        // theirs. Delete the customer we made so Stripe holds no orphan.
+        const { data: linked, error: linkErr } = await supabaseAdmin
           .from("organizations")
-          .update({ stripe_customer_id: customerId })
-          .eq("id", org.id);
-        if (linkErr) throw linkErr;
+          .update({ stripe_customer_id: customer.id })
+          .eq("id", org.id)
+          .eq("checkout_lock_at", lockToken)
+          .is("stripe_customer_id", null)
+          .select("id");
+        if (linkErr) {
+          await stripe.customers.del(customer.id).catch(() => {});
+          throw linkErr;
+        }
+        if (!linked || linked.length === 0) {
+          await stripe.customers.del(customer.id).catch(() => {});
+          return json({ error: "Checkout took too long to prepare — please try again" }, 409);
+        }
+        customerId = customer.id;
       }
 
       const origin = req.headers.get("origin") ?? "https://getprovly.com";
@@ -155,11 +178,16 @@ Deno.serve(async (req) => {
       if (live) {
         // Identifier backfill only (the org row may predate parity — e.g. a
         // portal-originated subscription). Status and tier stay the webhook's.
-        if (!org.stripe_subscription_id) {
+        // v20.0.9r4 — fenced on the lease and on the slot being empty; a zero-
+        // row result is fine here (a newer holder or the webhook filled it),
+        // and the portal URL below creates nothing payable either way.
+        if (!locked[0].stripe_subscription_id) {
           const { error: bfErr } = await supabaseAdmin
             .from("organizations")
             .update({ stripe_subscription_id: live.id })
-            .eq("id", org.id);
+            .eq("id", org.id)
+            .eq("checkout_lock_at", lockToken)
+            .is("stripe_subscription_id", null);
           if (bfErr) throw bfErr;
         }
 
