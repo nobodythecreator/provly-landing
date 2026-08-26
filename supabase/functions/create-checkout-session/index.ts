@@ -22,7 +22,13 @@
 //      the price differs, and only then creates one. Steps 4–5 run under an
 //      atomic compare-and-set lock on the org row (checkout_lock_at, 30s
 //      stale expiry) so two simultaneous requests cannot both pass the
-//      checks and each mint a payable session.
+//      checks and each mint a payable session. v20.0.9r3 (Greptile): the
+//      lease is FENCED — the write that records a new session is conditioned
+//      on still holding the lease, and a request that lost it (a Stripe
+//      call outlived the 30s) expires the session it made and answers 409.
+//      The remembered session id is read atomically WITH the acquire, so a
+//      request cannot act on a value that predates another request's
+//      commit. Correctness no longer depends on how long Stripe takes.
 //
 // Schema (sql/v20.0.9): organizations.checkout_lock_at timestamptz,
 // organizations.stripe_checkout_session_id text.
@@ -86,7 +92,7 @@ Deno.serve(async (req) => {
     // ── Org + census ───────────────────────────────────────────────────
     const { data: org, error: orgErr } = await supabaseAdmin
       .from("organizations")
-      .select("id, legal_name, email, stripe_customer_id, stripe_subscription_id, stripe_checkout_session_id")
+      .select("id, legal_name, email, stripe_customer_id, stripe_subscription_id")
       .eq("id", orgId)
       .maybeSingle();
     if (orgErr || !org) {
@@ -114,11 +120,15 @@ Deno.serve(async (req) => {
       .update({ checkout_lock_at: lockToken })
       .eq("id", org.id)
       .or(`checkout_lock_at.is.null,checkout_lock_at.lt.${staleBefore}`)
-      .select("id");
+      .select("id, stripe_checkout_session_id");
     if (lockErr) throw lockErr;
     if (!locked || locked.length === 0) {
       return json({ error: "A checkout is already being prepared for your organization — try again in a moment" }, 409);
     }
+    // v20.0.9r3 — the session id as of the ACQUIRE, not the pre-lock read:
+    // a request that committed between our org fetch and our acquire is
+    // visible here and nowhere else.
+    const priorSessionId = (locked[0].stripe_checkout_session_id as string | null) ?? null;
 
     try {
       // ── Stripe customer (create once, persist before anything else) ────
@@ -191,9 +201,9 @@ Deno.serve(async (req) => {
       // Reuse the remembered session if Stripe says it is still open for the
       // SAME price; expire it if the price differs. After this block, no other
       // payable session for this org exists — the one created below is it.
-      if (org.stripe_checkout_session_id) {
+      if (priorSessionId) {
         try {
-          const prior = await stripe.checkout.sessions.retrieve(org.stripe_checkout_session_id, {
+          const prior = await stripe.checkout.sessions.retrieve(priorSessionId, {
             expand: ["line_items"],
           });
           if (prior.status === "open" && prior.url) {
@@ -228,16 +238,25 @@ Deno.serve(async (req) => {
         cancel_url: sameOrigin(cancelUrl) ? cancelUrl : `${origin}/app?checkout=cancel`,
       });
 
-      // Remember the open session BEFORE returning the URL: the lock is still
-      // held, so the next request sees it. If this write fails, the session
-      // must not be handed out untracked.
-      const { error: rememberErr } = await supabaseAdmin
+      // v20.0.9r3 — FENCED commit. Recording the session is conditioned on
+      // checkout_lock_at still being OUR token. If the lease was taken over
+      // while Stripe was slow, this updates zero rows: the session we just
+      // made must not be handed out — expire it and tell the caller to retry.
+      // The session is recorded BEFORE its URL is returned, so the next
+      // holder sees it at acquire time.
+      const { data: fenced, error: rememberErr } = await supabaseAdmin
         .from("organizations")
         .update({ stripe_checkout_session_id: session.id })
-        .eq("id", org.id);
+        .eq("id", org.id)
+        .eq("checkout_lock_at", lockToken)
+        .select("id");
       if (rememberErr) {
         await stripe.checkout.sessions.expire(session.id).catch(() => {});
         throw rememberErr;
+      }
+      if (!fenced || fenced.length === 0) {
+        await stripe.checkout.sessions.expire(session.id).catch(() => {});
+        return json({ error: "Checkout took too long to prepare — please try again" }, 409);
       }
 
       return json({ url: session.url, mode: "checkout" });
