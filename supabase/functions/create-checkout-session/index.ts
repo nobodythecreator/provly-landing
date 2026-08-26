@@ -44,6 +44,11 @@
 //      expiry) is swept by the next request. Compensation itself retries,
 //      and a request that could not compensate never returns the orphan's
 //      URL — the session is unreachable until swept.
+//      v20.0.9r6 (Greptile): the sweep runs BEFORE the live-subscription
+//      branch. An org with a live subscription (e.g. one that started a
+//      checkout on trial, then subscribed through the portal) gets every
+//      open session expired before the portal URL is returned — a stale
+//      checkout link can no longer buy a second subscription.
 //
 // Schema (sql/v20.0.9): organizations.checkout_lock_at timestamptz,
 // organizations.stripe_checkout_session_id text.
@@ -198,9 +203,39 @@ Deno.serve(async (req) => {
 
       const origin = req.headers.get("origin") ?? "https://getprovly.com";
 
-      // ── 4. Duplicate-subscription guard (Stripe is the source of truth) ─
+      // ── One open Checkout session per org (v20.0.9r1, r5, r6) ──────────
+      // Stripe is asked directly which Checkout sessions are OPEN for this
+      // customer. At most one may survive — an open session for the SAME
+      // price, and only when there is no live subscription to route to the
+      // portal instead. Every other open session is expired, whatever our
+      // column remembers (orphans from a refused compensation, sessions
+      // recorded by a request whose lease was taken over, sessions started
+      // on trial before a portal subscription). If an expiry is refused we
+      // do not proceed to hand out anything payable: 409, the next request
+      // sweeps again.
+      const openSessions = await stripe.checkout.sessions.list({
+        customer: customerId,
+        status: "open",
+        limit: 20,
+        expand: ["data.line_items"],
+      });
       const existing = await stripe.subscriptions.list({ customer: customerId, status: "all", limit: 20 });
       const live = existing.data.find((s) => LIVE_STATUSES.has(s.status));
+
+      let reuse: Stripe.Checkout.Session | null = null;
+      for (const sess of openSessions.data) {
+        const sessPrice = sess.line_items?.data?.[0]?.price?.id ?? null;
+        if (!live && !reuse && sessPrice === priceId && sess.url) {
+          reuse = sess;
+          continue;
+        }
+        if (!(await expireSession(sess.id))) {
+          console.error("could not expire stray checkout session", sess.id, "for org", org.id);
+          return json({ error: "Checkout could not be prepared — please try again" }, 409);
+        }
+      }
+
+      // ── 4. Duplicate-subscription guard (Stripe is the source of truth) ─
       if (live) {
         // Identifier backfill only (the org row may predate parity — e.g. a
         // portal-originated subscription). Status and tier stay the webhook's.
@@ -251,33 +286,6 @@ Deno.serve(async (req) => {
         return json({ url, mode: "portal", subscriptionId: live.id, samePlan });
       }
 
-      // ── One open Checkout session per org (v20.0.9r1, r5) ──────────────
-      // Stripe is asked directly which sessions are OPEN for this customer.
-      // Exactly one may survive: an open session for the SAME price is reused
-      // (its URL is returned); every other open session is expired. This
-      // holds regardless of what our column remembers — an orphan from a
-      // failed compensation, or a session recorded by a request whose lease
-      // was taken over, is expired here. If an expiry is refused, we do NOT
-      // proceed to mint another payable session: 409, the next request
-      // sweeps again.
-      let reuse: Stripe.Checkout.Session | null = null;
-      const openSessions = await stripe.checkout.sessions.list({
-        customer: customerId,
-        status: "open",
-        limit: 20,
-        expand: ["data.line_items"],
-      });
-      for (const sess of openSessions.data) {
-        const sessPrice = sess.line_items?.data?.[0]?.price?.id ?? null;
-        if (!reuse && sessPrice === priceId && sess.url) {
-          reuse = sess;
-          continue;
-        }
-        if (!(await expireSession(sess.id))) {
-          console.error("could not expire stray checkout session", sess.id, "for org", org.id);
-          return json({ error: "Checkout could not be prepared — please try again" }, 409);
-        }
-      }
       if (reuse) {
         // Recording the reused id is still fenced; zero rows only means a
         // newer holder owns the row now, and returning an already-open
