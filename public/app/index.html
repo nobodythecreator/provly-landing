@@ -13,6 +13,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <!-- v20.0.8r1 (Greptile): checkout-pending is React state passed as a prop (sessionStorage gave no render signal, so the finalizing banner could outlive its cleared flag); the poll now stops on activation and on shell unmount, and the timeout path tells the user instead of going silent. -->
   <!-- v20.0.8: post-checkout truth — the Stripe return lands on the Subscription page (success URL carries the hash route), the app POLLS the subscription status for up to 30s after checkout (the webhook writes after the redirect, so a single refetch lost the race and the trial banner sat stale until a manual reload), TrialBanner shows a calm "finalizing" state during that window and clears once active, and the checkout param cleanup preserves the hash route. -->
   <!-- v20.0.7: copy hotfix — plan cards render a real middot (JSX text had shown the \u00b7 escape literally); usage row fully clients-only ("X / Y clients", caption "N active clients · staff unlimited (M active)"). -->
   <!-- v20.0.6r2 (Greptile): the schema-fallback retry no longer strips explicit NULLs from its payload — a cleared Medicaid number stays cleared even when the save retries on an older schema; a schema genuinely missing the column now fails loudly rather than reporting success with stale data. -->
@@ -16464,18 +16465,17 @@
     // Renders across the top of the app when the trial is ending (≤7 days),
     // or when billing needs attention (past_due / canceled).
     // ═══════════════════════════════════════════════════════════════
-    function TrialBanner({ subscription, onUpgrade }) {
+    function TrialBanner({ subscription, checkoutPending, onUpgrade }) {
       if (!subscription) return null;
       const status = subscription.subscription_status;
       const trialEnds = subscription.trial_ends_at ? new Date(subscription.trial_ends_at) : null;
       const daysLeft = trialEnds ? Math.ceil((trialEnds - new Date()) / 86400000) : null;
 
-      // v20.0.8 — the minute after checkout: payment is done but the webhook
-      // may not have written the new status yet. Show a calm finalizing note
-      // instead of the red trial-ended banner; clear the flag once active.
-      const pending = sessionStorage.getItem("provly_checkout_pending") === "1";
-      if (pending && status === "active") sessionStorage.removeItem("provly_checkout_pending");
-      if (pending && status !== "active") {
+      // v20.0.8r1 — the minute after checkout: payment is done but the
+      // webhook may not have written the new status yet. Pending arrives as a
+      // PROP from the shell (React state — clearing it re-renders this banner
+      // immediately, on activation or on timeout).
+      if (checkoutPending && status !== "active") {
         return (
           <div style={{
             background: CB.blue, color: CB.white, borderRadius: 10, padding: "12px 18px",
@@ -18741,6 +18741,8 @@
       const initial = parseHash();
       const [page, setPage] = useState(initial.page);
       const [pageContext, setPageContext] = useState(initial.context);
+      const [checkoutPending, setCheckoutPending] = useState(false); // v20.0.8r1 — React state, not sessionStorage
+      const checkoutPollRef = useRef(null);                          // v20.0.8r1 — poll handle for stop/cleanup
       const { isMobile } = useMobile();
       const [sidebarOpen, setSidebarOpen] = useState(false);
       const { subscription, refetchSubscription } = useAuth();
@@ -18755,19 +18757,25 @@
         if (!c) return;
         if (c === "success") {
           addToast("Subscription updated — welcome aboard!", "success");
-          // v20.0.8 — Stripe redirects back BEFORE the webhook has written
-          // the new status, so a single refetch usually loses that race (the
-          // trial banner then sits on stale data until a manual reload).
-          // Mark checkout as pending (TrialBanner shows a calm finalizing
-          // state) and poll until the new status lands or the window closes.
-          sessionStorage.setItem("provly_checkout_pending", "1");
+          // v20.0.8r1 — Stripe redirects back BEFORE the webhook writes the
+          // new status. Pending is REACT STATE, so the banner re-renders the
+          // instant it changes (sessionStorage gave no render signal — the
+          // finalizing banner could outlive its own cleared flag). The poll
+          // stops on activation (watcher effect below), on timeout — which
+          // now tells the user instead of going silent — and on unmount.
+          setCheckoutPending(true);
           if (refetchSubscription) {
             refetchSubscription();
             let tries = 0;
-            const poll = setInterval(() => {
+            checkoutPollRef.current = setInterval(() => {
               tries += 1;
               refetchSubscription();
-              if (tries >= 12) { clearInterval(poll); sessionStorage.removeItem("provly_checkout_pending"); }
+              if (tries >= 12) {
+                clearInterval(checkoutPollRef.current);
+                checkoutPollRef.current = null;
+                setCheckoutPending(false);
+                addToast("Still confirming your payment — this can take a minute. Refresh shortly, or check Manage billing.", "warning");
+              }
             }, 2500);
           }
         } else if (c === "cancel") {
@@ -18777,7 +18785,17 @@
         params.delete("session_id");
         const qs = params.toString();
         window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash); // v20.0.8 — keep the route
+        return () => { if (checkoutPollRef.current) clearInterval(checkoutPollRef.current); }; // v20.0.8r1 — no orphan polls after unmount
       }, []);
+
+      // v20.0.8r1 — stop the finalizing state (and its poll) the moment the
+      // new status lands, instead of polling to exhaustion.
+      useEffect(() => {
+        if (checkoutPending && subscription?.subscription_status === "active") {
+          if (checkoutPollRef.current) { clearInterval(checkoutPollRef.current); checkoutPollRef.current = null; }
+          setCheckoutPending(false);
+        }
+      }, [checkoutPending, subscription]);
 
       // Navigation helper — accepts optional context (e.g. { type: "staff", id } for profile pages)
       const navigate = (target, context = null) => {
@@ -18863,7 +18881,7 @@
             maxWidth: isMobile ? "100vw" : `calc(100vw - ${CB.sidebarW}px)`,
             overflowX: "hidden",
           }}>
-            <TrialBanner subscription={subscription} onUpgrade={() => navigate("settings", { tab: "subscription" })} />
+            <TrialBanner subscription={subscription} checkoutPending={checkoutPending} onUpgrade={() => navigate("settings", { tab: "subscription" })} />
             {renderPage()}
           </main>
         </div>
