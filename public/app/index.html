@@ -13,6 +13,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <!-- v20.0.8r6 (Greptile): the 30s confirmation deadline is now exact — each attempt's abort timer is min(8s, time remaining) and inter-attempt sleeps are clamped the same way, so an attempt starting near the limit aborts AT the deadline and the delayed-confirmation guidance always appears by 30s; the finalizing state is also only engaged when the resolving loop can actually run. -->
   <!-- v20.0.8r5 (Greptile): each sequential poll attempt is killed, not abandoned — a per-attempt AbortController (8s) makes a never-responding refresh settle by abortion, so the 30s deadline is always evaluated and the finalizing state cannot hang; cancel()/watcher/unmount abort the in-flight attempt too, so no orphaned request survives cancellation. -->
   <!-- v20.0.8r4 (Greptile): the checkout poll is rewritten as a SEQUENTIAL loop — one request in flight at a time, every result awaited and observed, activation anywhere in the window ends it silently, and the timeout warning is reachable only when every attempt returned non-active with none in flight. This removes the overlapping-request primitive that generated the r1–r3 ordering findings, rather than narrowing another window. -->
   <!-- v20.0.8r3 (Greptile): the timeout verdict consults the freshest truth — the final attempt's result OR a live status mirror updated by any overlapping refresh — so out-of-order resolutions and a failed final request cannot produce a delayed-confirmation warning after activation has already been confirmed. -->
@@ -18788,8 +18789,8 @@
           // it exists; activation anywhere in the window ends the loop
           // silently; the timeout warning is reachable only when every
           // attempt returned non-active and none remain in flight.
-          setCheckoutPending(true);
           if (refetchSubscription) {
+            setCheckoutPending(true); // v20.0.8r6 — only when the loop below can actually resolve it
             let cancelled = false;
             let currentCtrl = null;
             checkoutPollRef.current = { cancel: () => { cancelled = true; if (currentCtrl) currentCtrl.abort(); } };
@@ -18804,7 +18805,11 @@
                 // unmount) aborts the in-flight attempt too, so nothing
                 // orphaned survives cancellation to write stale state later.
                 currentCtrl = new AbortController();
-                const bound = setTimeout(() => currentCtrl.abort(), 8000);
+                // v20.0.8r6 — the attempt bound is clamped to the DEADLINE:
+                // min(8s, time remaining). An attempt starting late aborts AT
+                // the deadline, so the finalizing state always resolves by
+                // 30s — never 36.5s.
+                const bound = setTimeout(() => currentCtrl.abort(), Math.min(8000, Math.max(deadline - Date.now(), 1)));
                 const sub = await refetchSubscription(currentCtrl.signal);
                 clearTimeout(bound);
                 currentCtrl = null;
@@ -18820,7 +18825,7 @@
                   addToast("Still confirming your payment — this can take a minute. Refresh shortly, or check Manage billing.", "warning");
                   return;
                 }
-                await new Promise(r => setTimeout(r, 2500));
+                await new Promise(r => setTimeout(r, Math.min(2500, Math.max(deadline - Date.now(), 0)))); // v20.0.8r6 — never sleep past the deadline
               }
             })();
           }
