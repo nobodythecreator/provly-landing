@@ -225,18 +225,24 @@ Deno.serve(async (req) => {
       // request (their creators are gone or will 409 on their own fenced
       // commit) and are expired here. If an expiry is refused we do not
       // proceed to hand out anything payable: 409, the next request sweeps.
-      const openSessions = await stripe.checkout.sessions.list({
+      // v20.0.9r11 (Greptile) — full pagination: the SDK's async iterator
+      // follows has_more, so the guard and the sweep see EVERY open session,
+      // not the first page. Same below for subscriptions.
+      const openSessions: Stripe.Checkout.Session[] = [];
+      for await (const sess of stripe.checkout.sessions.list({
         customer: customerId,
         status: "open",
-        limit: 20,
-      });
-      for (const sess of openSessions.data) {
+        limit: 100,
+      })) {
+        openSessions.push(sess);
+      }
+      for (const sess of openSessions) {
         const sessToken = sess.metadata?.lock_token ?? "";
         if (sessToken > lockToken) {
           return json({ error: "Checkout took too long to prepare — please try again" }, 409);
         }
       }
-      for (const sess of openSessions.data) {
+      for (const sess of openSessions) {
         if (!(await expireSession(sess.id))) {
           console.error("could not expire stray checkout session", sess.id, "for org", org.id);
           return json({ error: "Checkout could not be prepared — please try again" }, 409);
@@ -244,8 +250,13 @@ Deno.serve(async (req) => {
       }
 
       // ── 4. Duplicate-subscription guard (Stripe is the source of truth) ─
-      const existing = await stripe.subscriptions.list({ customer: customerId, status: "all", limit: 20 });
-      const live = existing.data.find((sub) => LIVE_STATUSES.has(sub.status));
+      // v20.0.9r11 — walks every subscription (auto-paginated) until a live
+      // one is found; a live subscription beyond page one still routes to the
+      // portal instead of a second checkout.
+      let live: Stripe.Subscription | null = null;
+      for await (const sub of stripe.subscriptions.list({ customer: customerId, status: "all", limit: 100 })) {
+        if (LIVE_STATUSES.has(sub.status)) { live = sub; break; }
+      }
       if (live) {
         // Identifier backfill only (the org row may predate parity — e.g. a
         // portal-originated subscription). Status and tier stay the webhook's.
