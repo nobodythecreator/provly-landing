@@ -16,10 +16,11 @@
 //      created: the caller gets a Billing Portal URL deep-linked to the
 //      plan change instead. A second checkout would otherwise create a
 //      second, parallel subscription.
-//   5. One open Checkout session per org (v20.0.9r1, Greptile). The org row
-//      remembers its open session (stripe_checkout_session_id); a new request
-//      reuses it when it is still open for the same price, expires it when
-//      the price differs, and only then creates one. Steps 4–5 run under an
+//   5. One returned Checkout session per org (v20.0.9r1, superseded by r9).
+//      The org row records the current session (stripe_checkout_session_id,
+//      an observability hint); a new request expires every open session it
+//      can see and mints its own — reuse across leases no longer exists.
+//      Steps 4–5 run under an
 //      atomic compare-and-set lock on the org row (checkout_lock_at, 30s
 //      stale expiry) so two simultaneous requests cannot both pass the
 //      checks and each mint a payable session. v20.0.9r3 (Greptile): the
@@ -36,14 +37,22 @@
 //      and the subscription-id backfill. A fenced write that lands zero rows
 //      means the lease is gone: undo what Stripe was just asked to make and
 //      answer 409.
-//      v20.0.9r5 (Greptile): the one-open-session invariant is re-established
-//      by EVERY holder from Stripe's own truth — at acquire it lists the
-//      customer's open Checkout sessions and expires all but the same-price
-//      one it will reuse. The DB column is a hint, not the source of truth,
+//      v20.0.9r5 (Greptile): the invariant is re-established by EVERY holder
+//      from Stripe's own truth — at acquire it lists the customer's open
+//      Checkout sessions and expires them (r9: all of them). The DB column
+//      is a hint, not the source of truth,
 //      so an orphan left by a failed compensation (Stripe refused the
 //      expiry) is swept by the next request. Compensation itself retries,
 //      and a request that could not compensate never returns the orphan's
 //      URL — the session is unreachable until swept.
+//      v20.0.9r9 (Greptile): cross-lease session REUSE is REMOVED. Both
+//      round-9 races existed only because one lease could return a session a
+//      different lease created. Rule now: a request only ever returns a URL
+//      it minted under its own lease. Every holder expires all open sessions
+//      it can see (after the r8 newer-token guard) and creates its own; a
+//      stale creator's compensation therefore only ever targets its own,
+//      never-returned session. The newest request wins; an older tab's link
+//      dying is the correct reading of the owner's latest intent.
 //      v20.0.9r8 (Greptile): every session we create is stamped with the
 //      creating lease's token (metadata.lock_token). The sweep refuses to
 //      touch anything when it sees a session stamped with a NEWER token —
@@ -165,15 +174,11 @@ Deno.serve(async (req) => {
       .update({ checkout_lock_at: lockToken })
       .eq("id", org.id)
       .or(`checkout_lock_at.is.null,checkout_lock_at.lt.${staleBefore}`)
-      .select("id, stripe_checkout_session_id, stripe_customer_id, stripe_subscription_id");
+      .select("id, stripe_customer_id, stripe_subscription_id");
     if (lockErr) throw lockErr;
     if (!locked || locked.length === 0) {
       return json({ error: "A checkout is already being prepared for your organization — try again in a moment" }, 409);
     }
-    // v20.0.9r3 — the session id as of the ACQUIRE, not the pre-lock read:
-    // a request that committed between our org fetch and our acquire is
-    // visible here and nowhere else.
-    const priorSessionId = (locked[0].stripe_checkout_session_id as string | null) ?? null;
 
     try {
       // ── Stripe customer (create once, persist before anything else) ────
@@ -210,42 +215,28 @@ Deno.serve(async (req) => {
 
       const origin = req.headers.get("origin") ?? "https://getprovly.com";
 
-      // ── One open Checkout session per org (v20.0.9r1, r5, r6) ──────────
+      // ── Open Checkout sessions: sweep, never reuse (r1, r5, r6, r8, r9) ─
       // Stripe is asked directly which Checkout sessions are OPEN for this
-      // customer. At most one may survive — an open session for the SAME
-      // price, and only when there is no live subscription to route to the
-      // portal instead. Every other open session is expired, whatever our
-      // column remembers (orphans from a refused compensation, sessions
-      // recorded by a request whose lease was taken over, sessions started
-      // on trial before a portal subscription). If an expiry is refused we
-      // do not proceed to hand out anything payable: 409, the next request
-      // sweeps again.
+      // customer. r9: none survive — this request will mint its own session
+      // under its own lease or hand out nothing. Before any mutation, the r8
+      // guard: a session stamped by a LATER lease means a newer holder took
+      // over and its URL may be in the owner's hands — 409, touch nothing.
+      // Older-stamped and unstamped sessions were never returned by a live
+      // request (their creators are gone or will 409 on their own fenced
+      // commit) and are expired here. If an expiry is refused we do not
+      // proceed to hand out anything payable: 409, the next request sweeps.
       const openSessions = await stripe.checkout.sessions.list({
         customer: customerId,
         status: "open",
         limit: 20,
-        expand: ["data.line_items"],
       });
-      const existing = await stripe.subscriptions.list({ customer: customerId, status: "all", limit: 20 });
-      const live = existing.data.find((s) => LIVE_STATUSES.has(s.status));
-
-      // v20.0.9r8 — lease-loss detection BEFORE any mutation: a session
-      // stamped by a later lease means a newer holder is (or was) active and
-      // may have handed its URL to the owner. Nothing here may be expired.
       for (const sess of openSessions.data) {
         const sessToken = sess.metadata?.lock_token ?? "";
         if (sessToken > lockToken) {
           return json({ error: "Checkout took too long to prepare — please try again" }, 409);
         }
       }
-
-      let reuse: Stripe.Checkout.Session | null = null;
       for (const sess of openSessions.data) {
-        const sessPrice = sess.line_items?.data?.[0]?.price?.id ?? null;
-        if (!live && !reuse && sessPrice === priceId && sess.url) {
-          reuse = sess;
-          continue;
-        }
         if (!(await expireSession(sess.id))) {
           console.error("could not expire stray checkout session", sess.id, "for org", org.id);
           return json({ error: "Checkout could not be prepared — please try again" }, 409);
@@ -301,20 +292,6 @@ Deno.serve(async (req) => {
           url = plain.url;
         }
         return json({ url, mode: "portal", subscriptionId: live.id, samePlan });
-      }
-
-      if (reuse) {
-        // Recording the reused id is still fenced; zero rows only means a
-        // newer holder owns the row now, and returning an already-open
-        // same-price session creates nothing new — safe either way.
-        if (reuse.id !== priorSessionId) {
-          await supabaseAdmin
-            .from("organizations")
-            .update({ stripe_checkout_session_id: reuse.id })
-            .eq("id", org.id)
-            .eq("checkout_lock_at", lockToken);
-        }
-        return json({ url: reuse.url, mode: "checkout", reused: true });
       }
 
       // ── Checkout ───────────────────────────────────────────────────────
