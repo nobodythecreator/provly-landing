@@ -124,7 +124,14 @@ async function syncSubscription(subscriptionId: string, origin: string): Promise
   const base = { customerId, subscriptionId: sub.id };
 
   const { org, conflict } = await resolveOrg(sub);
-  const retry = LIVE_STATUSES.has(sub.status); // v20.0.9r1 — live + unattached = retryable failure
+  // v20.0.9r1 — live + unattached = retryable failure (500, Stripe retries).
+  // v20.0.9r12/r13 (Greptile) — "incomplete" joins the RETRY test but NOT the
+  // adoption test above: a payment in recovery can still become billable, so
+  // a resolution failure for it must keep retrying until the mapping is
+  // repaired; yet an abandoned incomplete attempt must never block adoption
+  // of the org's real subscription. Money-consequence and relationship are
+  // different questions.
+  const retry = LIVE_STATUSES.has(sub.status) || sub.status === "incomplete";
   if (conflict) return { ...base, orgId: null, retry, note: `CONFLICT (not applied): ${conflict}` };
   if (!org) return { ...base, orgId: null, retry, note: `unresolved: no org for customer ${customerId ?? "?"} (${origin}, ${sub.status})` };
 
