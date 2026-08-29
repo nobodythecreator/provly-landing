@@ -81,6 +81,19 @@ const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const supabaseAdmin = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
+// v20.0.9r14 (Greptile) — redirect destinations (Checkout success/cancel,
+// Billing Portal return) are chosen from this server-side allowlist, never
+// from the caller's Origin header alone: headers belong to the caller, and
+// where a payment flow RETURNS must not. The request Origin is honored only
+// when it is on the list; anything else gets the canonical origin. Extra
+// origins (e.g. local dev) are added via the ALLOWED_ORIGINS secret,
+// comma-separated.
+const ALLOWED_ORIGINS = new Set(
+  (Deno.env.get("ALLOWED_ORIGINS") ?? "https://getprovly.com,https://www.getprovly.com")
+    .split(",").map((o) => o.trim()).filter(Boolean),
+);
+const DEFAULT_ORIGIN = [...ALLOWED_ORIGINS][0] ?? "https://getprovly.com";
+
 // Stripe statuses under which a subscription is live (a new checkout would
 // create a parallel one). Mirrors stripe-webhook's LIVE_STATUSES.
 const LIVE_STATUSES = new Set<string>([
@@ -220,7 +233,9 @@ Deno.serve(async (req) => {
         customerId = customer.id;
       }
 
-      const origin = req.headers.get("origin") ?? "https://getprovly.com";
+      // v20.0.9r14 — trusted origin only (see allowlist above).
+    const requestOrigin = req.headers.get("origin");
+    const origin = requestOrigin && ALLOWED_ORIGINS.has(requestOrigin) ? requestOrigin : DEFAULT_ORIGIN;
 
       // ── Open Checkout sessions: sweep, never reuse (r1, r5, r6, r8, r9) ─
       // Stripe is asked directly which Checkout sessions are OPEN for this
