@@ -84,10 +84,17 @@ const supabaseAdmin = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_
 // Stripe statuses under which a subscription is live (a new checkout would
 // create a parallel one). Mirrors stripe-webhook's LIVE_STATUSES.
 const LIVE_STATUSES = new Set<string>([
-  "active", "trialing", "past_due", "unpaid", "paused",
+  "active", "trialing", "past_due", "unpaid", "paused", "incomplete",
 ]);
-// NOT live: canceled, incomplete_expired, incomplete — a new checkout is the
-// right recovery for an incomplete one.
+// NOT live: canceled, incomplete_expired.
+// v20.0.9r12 (Greptile): "incomplete" BLOCKS a new checkout — this reverses
+// the r1 call ("a new checkout is the right recovery"). An incomplete
+// subscription is a payment IN RECOVERY: the customer's original
+// confirmation (e.g. 3DS) can still land and make it billable, so a second
+// checkout minted meanwhile risks two billable subscriptions. The portal is
+// where an in-flight payment is finished or abandoned; an abandoned one
+// self-expires to incomplete_expired within a day, after which checkout
+// opens again.
 
 // v20.0.9r5 (Greptile) — compensation is not best-effort. Expire a Checkout
 // session with retries; a session that is already not open counts as done.
