@@ -244,6 +244,8 @@ Deno.serve(async (req) => {
       }
 
       // ── 4. Duplicate-subscription guard (Stripe is the source of truth) ─
+      const existing = await stripe.subscriptions.list({ customer: customerId, status: "all", limit: 20 });
+      const live = existing.data.find((sub) => LIVE_STATUSES.has(sub.status));
       if (live) {
         // Identifier backfill only (the org row may predate parity — e.g. a
         // portal-originated subscription). Status and tier stay the webhook's.
