@@ -166,7 +166,11 @@ Deno.serve(async (req) => {
     // ── Org + census ───────────────────────────────────────────────────
     const { data: org, error: orgErr } = await supabaseAdmin
       .from("organizations")
-      .select("id, legal_name, email, stripe_customer_id, stripe_subscription_id")
+      // v20.0.9r17 (Greptile) — base-schema columns only: legal_name exists in
+      // production but not in the committed schema, and an unknown column
+      // fails the WHOLE select, turning every checkout into a 404 on a fresh
+      // install. `name` is the column both schemas define.
+      .select("id, name, email, stripe_customer_id, stripe_subscription_id")
       .eq("id", orgId)
       .maybeSingle();
     if (orgErr || !org) {
@@ -207,7 +211,7 @@ Deno.serve(async (req) => {
       let customerId = (locked[0].stripe_customer_id as string | null) ?? null;
       if (!customerId) {
         const customer = await stripe.customers.create({
-          name: org.legal_name ?? undefined,
+          name: (org.name as string | null) ?? undefined,
           email: org.email ?? undefined,
           metadata: { org_id: org.id },
         });
