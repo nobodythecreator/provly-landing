@@ -142,6 +142,17 @@ async function syncSubscription(subscriptionId: string, origin: string): Promise
   // subscription can never cancel a live replacement.
   if (org.stripe_subscription_id && org.stripe_subscription_id !== sub.id) {
     if (!LIVE_STATUSES.has(sub.status)) {
+      // v20.0.9r16 (Greptile) — a dead replacement (canceled/incomplete_expired)
+      // is final: ignore with 200. An INCOMPLETE one is not final — it can
+      // still become billable — so it answers 500 and Stripe redelivers; each
+      // delivery re-retrieves current state, so this converges on its own:
+      // to the adoption logic below when it activates, to a final ignore when
+      // it expires. A 200 would make reconciliation depend on the future
+      // activation event being delivered — the single-delivery dependence
+      // this webhook exists to remove.
+      if (sub.status === "incomplete") {
+        return { ...base, orgId: org.id, retry: true, note: `PENDING (retry): ${sub.id} is incomplete; org tracks ${org.stripe_subscription_id}` };
+      }
       return { ...base, orgId: org.id, note: `ignored: ${sub.id} is ${sub.status}; org tracks ${org.stripe_subscription_id}` };
     }
     let trackedLive = false;
@@ -235,7 +246,7 @@ Deno.serve(async (req) => {
     .select("id, note")
     .eq("stripe_event_id", event.id)
     .maybeSingle();
-  const reprocessable = (note: string | null) => /^(ERROR:|CONFLICT|unresolved)/.test(note ?? "");
+  const reprocessable = (note: string | null) => /^(ERROR:|CONFLICT|unresolved|PENDING)/.test(note ?? "");
   if (seen && !reprocessable(seen.note)) {
     return new Response(JSON.stringify({ received: true, duplicate: true }), { status: 200 });
   }

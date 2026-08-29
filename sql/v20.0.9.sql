@@ -30,7 +30,12 @@ begin
   select string_agg(o.name || ' (' || o.id || ')', ', ')
     into missing
     from public.organizations o
-   where exists (select 1 from auth.users u where u.raw_app_meta_data ->> 'org_id' = o.id::text)
+   -- v20.0.9r16 (Greptile): an org is "in use" if users carry its JWT claim OR
+   -- it has org_members rows at all — claim metadata can be absent or stale
+   -- while membership rows are the ground truth create-checkout-session reads.
+   -- Either linkage without an owner row must block the deploy.
+   where (exists (select 1 from auth.users u where u.raw_app_meta_data ->> 'org_id' = o.id::text)
+       or exists (select 1 from public.org_members mm where mm.org_id = o.id))
      and not exists (select 1 from public.org_members m where m.org_id = o.id and m.role = 'owner');
   if missing is not null then
     raise exception 'v20.0.9: organizations with users but no org_members owner row — insert the verified owner by user id before deploying create-checkout-session: %', missing;
