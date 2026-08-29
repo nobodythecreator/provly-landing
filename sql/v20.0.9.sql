@@ -23,7 +23,11 @@ do $$
 declare
   missing text;
 begin
-  select string_agg(coalesce(o.legal_name, o.name) || ' (' || o.id || ')', ', ')
+  -- v20.0.9r15 (Greptile): label by o.name only — the committed base schema
+  -- defines organizations.name but not legal_name (a production-side extension),
+  -- and a missing column is a parse error even inside coalesce. The predicate
+  -- below never used legal_name, so behavior is unchanged on production.
+  select string_agg(o.name || ' (' || o.id || ')', ', ')
     into missing
     from public.organizations o
    where exists (select 1 from auth.users u where u.raw_app_meta_data ->> 'org_id' = o.id::text)
