@@ -10,8 +10,12 @@
 -- ── Item 5: EVV originals live on the visit row, stamped by trigger ──────────
 -- The edit log (evv_edit_log) says what changed and why. The row itself must
 -- still say what was captured at the point of care — that is what an EVV
--- auditor reads. Set-once: written the first time a clock time is corrected,
--- never overwritten afterwards, and immune to any client path that forgets.
+-- auditor reads. The original_* columns are DERIVED ONLY: the trigger discards
+-- any caller-supplied value on INSERT and on UPDATE, then stamps them from the
+-- pre-correction clock values the first time a clock time changes. Write-once
+-- after that. (Greptile r1: the first cut only guarded a non-null original, so
+-- a direct UPDATE could plant an arbitrary "captured" time while it was still
+-- null; now no code path can write these columns at all.)
 
 ALTER TABLE public.evv_sessions
   ADD COLUMN IF NOT EXISTS original_clock_in_at  timestamptz,
@@ -25,9 +29,22 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-  -- First correction of a captured instant: remember what it was.
-  -- (A live clock-out — NULL -> value — copies NULL, so a normal visit never
-  --  acquires a false "edited" marker.)
+  -- INSERT: a new visit has no history. Whatever the caller sent for the
+  -- original_* columns is discarded — they start NULL, always.
+  IF TG_OP = 'INSERT' THEN
+    NEW.original_clock_in_at  := NULL;
+    NEW.original_clock_out_at := NULL;
+    RETURN NEW;
+  END IF;
+
+  -- UPDATE: originals are never accepted from the caller. Start from what the
+  -- row already holds (this also makes an existing original write-once) ...
+  NEW.original_clock_in_at  := OLD.original_clock_in_at;
+  NEW.original_clock_out_at := OLD.original_clock_out_at;
+
+  -- ... then stamp on the FIRST correction of a captured instant, from the
+  -- pre-correction value only. (A live clock-out — NULL -> value — copies
+  -- NULL, so a normal visit never acquires a false "edited" marker.)
   IF NEW.clock_in_at IS DISTINCT FROM OLD.clock_in_at AND OLD.original_clock_in_at IS NULL THEN
     NEW.original_clock_in_at := OLD.clock_in_at;
   END IF;
@@ -35,21 +52,15 @@ BEGIN
     NEW.original_clock_out_at := OLD.clock_out_at;
   END IF;
 
-  -- Write-once: once an original exists, no UPDATE can alter it.
-  IF OLD.original_clock_in_at IS NOT NULL THEN
-    NEW.original_clock_in_at := OLD.original_clock_in_at;
-  END IF;
-  IF OLD.original_clock_out_at IS NOT NULL THEN
-    NEW.original_clock_out_at := OLD.original_clock_out_at;
-  END IF;
-
   RETURN NEW;
 END
 $$;
 
+-- Fires on every INSERT and UPDATE (no column list): the columns are derived
+-- unconditionally, so there is no write that should bypass the function.
 DROP TRIGGER IF EXISTS trg_evv_sessions_preserve_originals ON public.evv_sessions;
 CREATE TRIGGER trg_evv_sessions_preserve_originals
-  BEFORE UPDATE OF clock_in_at, clock_out_at, original_clock_in_at, original_clock_out_at
+  BEFORE INSERT OR UPDATE
   ON public.evv_sessions
   FOR EACH ROW
   EXECUTE FUNCTION public.evv_sessions_preserve_originals();
@@ -72,6 +83,28 @@ WHERE status IN ('pending'::authorization_status, 'approved'::authorization_stat
                                 WHEN end_date IS NOT NULL AND end_date < CURRENT_DATE THEN 'expired'::authorization_status
                                 ELSE 'approved'::authorization_status
                               END;
+
+
+-- ── Items 1/2 (Greptile r1): retry-safe authorization creation ──────────────
+-- The app now sends a client-generated id per row attempt (PK rejects a
+-- replay whose first request committed but lost its response). This index
+-- backs the human-level duplicate the same way: one authorization per
+-- person + service code + start date. Created only when no such duplicates
+-- already exist — the verification block reports the count either way; if it
+-- is non-zero, resolve those rows deliberately, then re-run this file.
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM public.person_service_authorizations
+    GROUP BY person_id, service_code_id, start_date
+    HAVING count(*) > 1
+  ) THEN
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_psa_person_code_start
+      ON public.person_service_authorizations (person_id, service_code_id, start_date);
+  END IF;
+END
+$$;
 
 
 -- ── Item 2: service codes new on DHHS91172 (effective 7/1/2026) ─────────────
@@ -141,5 +174,16 @@ SELECT 'auth status: ' || status::text, count(*)::text
 UNION ALL
 SELECT 'service code present: ' || code, name
   FROM public.service_code_definitions WHERE code IN ('SJD', 'SJR', 'SJP')
+UNION ALL
+SELECT 'psa duplicate groups (want 0)', count(*)::text
+  FROM (SELECT 1 FROM public.person_service_authorizations
+         GROUP BY person_id, service_code_id, start_date HAVING count(*) > 1) d
+UNION ALL
+SELECT 'psa unique index (want 1)', count(*)::text
+  FROM pg_indexes WHERE indexname = 'uq_psa_person_code_start'
+UNION ALL
+SELECT 'evv trigger events', string_agg(event_manipulation, '+' ORDER BY event_manipulation)
+  FROM information_schema.triggers WHERE trigger_name = 'trg_evv_sessions_preserve_originals'
 ORDER BY what;
--- Expect: originals cols = 2, trigger = 1, no 'pending' auth rows, three SJ* codes.
+-- Expect: originals cols = 2, trigger = 1 (events INSERT+UPDATE), no 'pending'
+-- auth rows, three SJ* codes, duplicate groups = 0, unique index = 1.
