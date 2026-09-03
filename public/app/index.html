@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.10: client-form integrity + EVV audit — (1) Update Client absorbs a complete Add Auth row and refuses a partial one (nothing typed is ever silently dropped); (2) rate_per_unit is persisted, worksheet codes (BILLING_RULES.worksheet) REQUIRE a rate — non-rate roles are stopped, rate-holders may tick "Rate pending from SC" (deliberate null; row wears RATE NEEDED; inline Set rate repairs in place without resetting used_units), rates over the DSPD ceiling are blocked; BILLING_RULES refreshed to DHHS91172 eff. 7/1/2026 (PM1/PM2 quarter-hour, SEI fixed $14.54, SJD/SJR/SJP added); (3) authorization status written on create (approved / expired — an APPROVAL enum) + one-time backfill in sql/v20.0.10.sql; (4) retired org units (is_active=false) render dimmed with a Retired tag, no edit/add/delete, and are excluded from the delivery-context picker; (5) EVV clock-IN is correctable on the same audited terms as clock-out (reason required, DST guardrail, in-before-out), with originally captured instants preserved on the row by a set-once DB trigger. DEFERRED: outbound email + internal messaging — after Item 4 (operator logins/RLS), messaging needs per-user identities. -->
   <!-- v20.0.8r6 (Greptile): the 30s confirmation deadline is now exact — each attempt's abort timer is min(8s, time remaining) and inter-attempt sleeps are clamped the same way, so an attempt starting near the limit aborts AT the deadline and the delayed-confirmation guidance always appears by 30s; the finalizing state is also only engaged when the resolving loop can actually run. -->
   <!-- v20.0.8r5 (Greptile): each sequential poll attempt is killed, not abandoned — a per-attempt AbortController (8s) makes a never-responding refresh settle by abortion, so the 30s deadline is always evaluated and the finalizing state cannot hang; cancel()/watcher/unmount abort the in-flight attempt too, so no orphaned request survives cancellation. -->
   <!-- v20.0.8r4 (Greptile): the checkout poll is rewritten as a SEQUENTIAL loop — one request in flight at a time, every result awaited and observed, activation anywhere in the window ends it silently, and the timeout warning is reachable only when every attempt returned non-active with none in flight. This removes the overlapping-request primitive that generated the r1–r3 ordering findings, rather than narrowing another window. -->
@@ -1538,7 +1539,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.9</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.10</span>
               </div>
             </div>
             {isMobile && (
@@ -2505,7 +2506,7 @@
         address: "", city: "", state: "UT", zip: "", phone: "",
       });
       const [auths, setAuths] = useState([]);
-      const [newAuth, setNewAuth] = useState({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "" });
+      const [newAuth, setNewAuth] = useState({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false }); // v20.0.10 — rate_pending: deliberate null-rate attestation (UI-only, never stored)
 
       useEffect(() => {
         supabase.from("service_code_definitions").select("id, code, name").order("code").then(({ data }) => setServiceCodes(data || []));
@@ -2547,7 +2548,7 @@
           });
           setAuths([]);
         }
-        setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "" });
+        setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false });
       }, [editing, open]);
 
       const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
@@ -2557,9 +2558,17 @@
       const newAuthRule = BILLING_RULES[newAuthCode];
       const isWorksheet = newAuthRule?.worksheet;
 
-      const addAuth = async () => {
-        if (!newAuth.service_code_id || !newAuth.authorized_units) return addToast("Select a service code and enter units", "error");
-        if (!editing) return addToast("Save the client first, then add authorizations", "warning");
+      // v20.0.10 (Items 1/2/3) — ONE persistence path for the Add Auth row,
+      // shared by the dashed button and Update. Validates (code + units,
+      // worksheet-rate rules, DSPD ceiling), defaults dates, writes
+      // rate_per_unit and the approval status, reloads, resets. Returns true
+      // on success so callers can sequence (Update saves the person first,
+      // then absorbs the row through this).
+      const persistNewAuth = async () => {
+        if (!newAuth.service_code_id || !newAuth.authorized_units) { addToast("Select a service code and enter units", "error"); return false; }
+        if (!editing) { addToast("Save the client first, then add authorizations", "warning"); return false; }
+        const rateErr = validateNewAuthRate(newAuth, newAuthCode, perms);
+        if (rateErr) { addToast(rateErr, "error"); return false; }
 
         const startDate = newAuth.start_date || new Date().toISOString().split("T")[0];
         let endDate = newAuth.end_date;
@@ -2577,24 +2586,48 @@
           used_units: 0,
           start_date: startDate,
           end_date: endDate,
+          // v20.0.10 (Item 2) — the rate was captured in the row but never
+          // sent; a worksheet auth without it bills amount = null forever.
+          rate_per_unit: newAuth.rate_per_unit ? parseFloat(newAuth.rate_per_unit) : null,
+          // v20.0.10 (Item 3) — authorization_status is an APPROVAL enum
+          // (pending/approved/rejected/expired), not a date-window state. An
+          // auth entered from a DSPD worksheet is approved by definition; a
+          // fully-past window is expired. Nothing lands 'pending' by default.
+          status: deriveAuthStatus(endDate),
         };
 
-        const { error, data: insertData, status, statusText } = await supabase.from("person_service_authorizations").insert(payload).select();
+        const { error, data: insertData } = await supabase.from("person_service_authorizations").insert(payload).select();
+        if (error) { addToast("Failed: " + error.message, "error"); return false; }
+        if (!insertData || insertData.length === 0) { addToast("Insert blocked — check RLS policies on person_service_authorizations", "error"); return false; }
 
-        if (error) {
-          return addToast("Failed: " + error.message, "error");
-        }
+        await reloadAuths();
+        setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false });
+        return true;
+      };
 
-        if (!insertData || insertData.length === 0) {
-          addToast("Insert blocked — check RLS policies on person_service_authorizations", "error");
-        } else {
-          addToast("Authorization added", "success");
-        }
-
-        // Reload auths
+      const reloadAuths = async () => {
         const { data: authData } = await supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code)").eq("person_id", editing.id);
         setAuths(authData || []);
-        setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "" });
+      };
+
+      const addAuth = async () => {
+        if (await persistNewAuth()) addToast("Authorization added", "success");
+      };
+
+      // v20.0.10 (Item 2, 2b) — set the rate on an existing null-rate worksheet
+      // auth IN PLACE. The only repair path before was delete + re-add, which
+      // reset used_units to 0 on an auth actively being billed against.
+      const [rateDraft, setRateDraft] = useState({}); // auth id -> typed rate
+      const saveAuthRate = async (a) => {
+        const code = a.service_code_definitions?.code || serviceCodes.find(sc => sc.id === a.service_code_id)?.code;
+        const typed = String(rateDraft[a.id] || "").trim();
+        const rateErr = validateNewAuthRate({ rate_per_unit: typed, rate_pending: false }, code, perms);
+        if (rateErr) return addToast(rateErr, "error");
+        const { error } = await supabase.from("person_service_authorizations").update({ rate_per_unit: parseFloat(typed) }).eq("id", a.id);
+        if (error) return addToast(error.message, "error");
+        setRateDraft(prev => { const n = { ...prev }; delete n[a.id]; return n; });
+        await reloadAuths();
+        addToast(`Rate set for ${code}`, "success");
       };
 
       const removeAuth = async (authId) => {
@@ -2613,6 +2646,15 @@
         // need it), which is the mirror's job, not the form's.
         const ma = (form.medicaid_number || "").trim();
         if (ma && !/^\d{9,10}$/.test(ma)) return addToast("Medicaid number must be 9–10 digits (numbers only, no spaces or dashes)", "error");
+        // v20.0.10 (Item 1, decision A) — the Add Auth row is part of what the
+        // operator typed. Update used to close over it and the reset effect
+        // wiped it: a filled-in auth vanished with no signal. Now a COMPLETE
+        // row is absorbed after the person saves, and a PARTIAL row refuses
+        // the whole save — ambiguous intent is never dropped and never guessed.
+        const rowTouched = !!(newAuth.service_code_id || newAuth.authorized_units || newAuth.rate_per_unit || newAuth.end_date);
+        const rowComplete = !!(newAuth.service_code_id && newAuth.authorized_units);
+        if (editing && rowTouched && !rowComplete) return addToast("Finish or clear the Add Auth row before updating — service code and units are both required", "error");
+        if (editing && rowComplete) { const rateErr = validateNewAuthRate(newAuth, newAuthCode, perms); if (rateErr) return addToast(rateErr, "error"); }
         setSaving(true);
         const payload = { ...form };
         // v19.4.5 — trim leading/trailing whitespace on every string field before save
@@ -2673,7 +2715,19 @@
         if (result.error) {
           addToast(result.error.message, "error");
         } else {
-          addToast(editing ? "Client updated" : "Client added", "success");
+          if (editing && rowComplete) {
+            // v20.0.10 (Item 1) — person is saved; absorb the row. If the auth
+            // insert fails, stay open with the row intact (no onSaved here: on
+            // the profile page it reloads `editing`, whose effect would reset
+            // the row) so nothing is lost and the person save is reported.
+            setSaving(true);
+            const ok = await persistNewAuth();
+            setSaving(false);
+            if (!ok) return addToast("Client updated, but the authorization was not added — fix the Add Auth row, then press Add Auth or Update again", "warning");
+            addToast("Client updated · authorization added", "success");
+          } else {
+            addToast(editing ? "Client updated" : "Client added", "success");
+          }
           if (!editing) checkTierSoftLimit(orgId, addToast); // v19.8 soft cap nudge
           onSaved();
           onClose();
@@ -2834,8 +2888,21 @@
                         <Badge text={aCode} color={CB.blue} />
                         {aRule && <span style={{ fontSize: 11, color: CB.textLight, fontWeight: 600 }}>{aRule.label}</span>}
                         {aRule?.worksheet && <span style={{ fontSize: 10, color: CB.amber, fontWeight: 700, background: `${CB.amber}12`, padding: "1px 6px", borderRadius: 4 }}>WORKSHEET</span>}
+                        <RateNeededChip code={aCode} rate={a.rate_per_unit} />
                         <span style={{ fontSize: 13, color: CB.text, fontWeight: 600 }}>{a.used_units || 0} / {a.authorized_units} units</span>
                         {perms.viewRates && a.rate_per_unit && <span style={{ fontSize: 12, color: CB.teal, fontWeight: 700 }}>@ ${Number(a.rate_per_unit).toFixed(2)}</span>}
+                        {/* v20.0.10 (Item 2, 2b) — repair in place; used_units untouched */}
+                        {perms.viewRates && aRule?.worksheet && !a.rate_per_unit && (
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                            <input type="number" step="0.01" min="0" placeholder={aRule.max_rate != null ? `≤${aRule.max_rate}` : "rate"}
+                              value={rateDraft[a.id] || ""} onChange={e => setRateDraft(prev => ({ ...prev, [a.id]: e.target.value }))}
+                              style={{ ...fieldStyle, width: 96, padding: "4px 8px", fontSize: 12, borderColor: `${CB.amber}60` }} />
+                            <button onClick={() => saveAuthRate(a)} title="Set the worksheet rate on this authorization" style={{
+                              padding: "4px 8px", borderRadius: 6, border: `1px solid ${CB.amber}`, background: `${CB.amber}12`,
+                              color: CB.amber, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap",
+                            }}>Set rate</button>
+                          </span>
+                        )}
                         {a.end_date && <span style={{ fontSize: 12, color: CB.textLight }}>exp {new Date(a.end_date + "T00:00:00").toLocaleDateString()}</span>}
                       </div>
                       <button onClick={() => removeAuth(a.id)} style={{
@@ -2866,9 +2933,19 @@
                   </label>
                   <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13, borderColor: isWorksheet ? `${CB.amber}40` : CB.border }}
                     type="number" step="0.01" value={newAuth.rate_per_unit}
-                    onChange={e => setNewAuth(p => ({ ...p, rate_per_unit: e.target.value }))}
+                    onChange={e => setNewAuth(p => ({ ...p, rate_per_unit: e.target.value, rate_pending: false }))}
                     placeholder={newAuthRule ? (isWorksheet ? `≤${newAuthRule.max_rate || "?"}` : `$${newAuthRule.rate || "?"}`) : "$0.00"} />
                 </div>
+                )}
+                {/* v20.0.10 (Item 2, 2b) — deliberate deferral. The SC sometimes sends the
+                    rate after the auth itself; the auth must still exist for services to
+                    document against. Ticked = a chosen null, and the row wears RATE NEEDED
+                    until Set rate fills it. Unticked + blank = the save is refused. */}
+                {perms.viewRates && isWorksheet && !newAuth.rate_per_unit && (
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: CB.amber, marginBottom: 16, whiteSpace: "nowrap", cursor: "pointer" }}>
+                    <input type="checkbox" checked={!!newAuth.rate_pending} onChange={e => setNewAuth(p => ({ ...p, rate_pending: e.target.checked }))} />
+                    Rate pending from SC
+                  </label>
                 )}
                 <div style={{ flex: "0 0 130px" }}>
                   <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>Start Date</label>
@@ -2963,6 +3040,7 @@
                       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 8, flexWrap: "wrap" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                           <Badge text={code} color={CB.blue} />
+                          <RateNeededChip code={code} rate={a.rate_per_unit} />
                           <span style={{ fontSize: 13, fontWeight: 600, color: CB.text }}>{a.used_units || 0} / {a.authorized_units} units</span>
                         </div>
                         <span style={{ fontSize: 11, color: CB.textLight }}>
@@ -3003,7 +3081,7 @@
         setLoading(true);
         const [clientRes, scRes, placeRes] = await Promise.all([
           supabase.from("persons")
-            .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, support_coordinator, support_coordinator_phone, support_coordinator_email, support_coordinator_agency, guardian_name, guardian_phone, guardian_relation, emergency_contact_name, emergency_contact_phone, physician_name, physician_phone, address, city, state, zip, phone, person_service_authorizations(id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code))")
+            .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, support_coordinator, support_coordinator_phone, support_coordinator_email, support_coordinator_agency, guardian_name, guardian_phone, guardian_relation, emergency_contact_name, emergency_contact_phone, physician_name, physician_phone, address, city, state, zip, phone, person_service_authorizations(id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code))")
             .order("last_name"),
           supabase.from("service_code_definitions").select("id, code").order("code"),
           supabase.from("person_placements").select("person_id, org_sites(site_type)").is("end_date", null), // v20.0.4
@@ -4370,70 +4448,127 @@
     // worksheet: true = rate varies per person (negotiated by support coordinator)
     // max_rate = SOW ceiling; actual rate stored on person_service_authorizations
     // ═══════════════════════════════════════════════════════════════
+    // v20.0.10 — Rates per DHHS91172 Rate Table, EFFECTIVE 7/1/2026 (Q3 2026
+    // update). Every fixed rate and worksheet ceiling moved up (~1.6%). Structural
+    // corrections from the same table: PM1/PM2 are QUARTER-HOUR (were modeled as
+    // session); SEI is FIXED quarter-hour $14.54 with no asterisk (was tiered
+    // worksheet) — both had zero live auths at the time of change; PN2 gains its
+    // session variant; SJD / SJR / SJP added (rows in service_code_definitions via
+    // sql/v20.0.10.sql). HAP is absent from the 7/1/2026 schedule and is kept for
+    // legacy display only. The over-ceiling block (validateNewAuthRate) reads
+    // max_rate from here — when DSPD reissues, THIS table is the thing to bump.
+    const BILLING_RULES_EFFECTIVE = "2026-07-01";
     const BILLING_RULES = {
       // Behavior Consultation — quarter hour, fixed
-      BC1:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 8.67 },
-      BC2:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 14.83 },
-      BC3:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 22.68 },
+      BC1:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 8.81 },
+      BC2:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 15.07 },
+      BC3:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 23.05 },
       // Homemaker — quarter hour, fixed
-      HSQ:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 6.65 },
-      // Companion — quarter hour, fixed (also has daily $151.04)
-      COM:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 6.30, alt_daily: 151.04 },
+      HSQ:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 6.76 },
+      // Companion — quarter hour, fixed (also has daily $153.47)
+      COM:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 6.40, alt_daily: 153.47 },
       // Day Supports Group — DAILY, *worksheet*
-      DSG:  { unit_type: "daily", label: "Daily", worksheet: true, max_rate: 242.70 },
+      DSG:  { unit_type: "daily", label: "Daily", worksheet: true, max_rate: 246.61 },
       // Day Supports Group (quarter hour variant — DSP code), *worksheet*
-      DSP:  { unit_type: "quarter_hour", label: "Quarter-Hour", worksheet: true, max_rate: 10.09, alt_daily: 397.00 },
+      DSP:  { unit_type: "quarter_hour", label: "Quarter-Hour", worksheet: true, max_rate: 10.25, alt_daily: 403.39 },
       // Day Supports Individual — TIERED DAILY, *worksheet* (rate varies by hours AND person)
       DSI:  { unit_type: "tiered_daily", label: "Daily (Tiered)", worksheet: true,
-              tiers: [ { maxHours: 1, max_rate: 54.18 }, { maxHours: 2, max_rate: 77.68 }, { maxHours: 3, max_rate: 101.14 },
-                        { maxHours: 4, max_rate: 124.64 }, { maxHours: 5, max_rate: 148.12 }, { maxHours: 6, max_rate: 171.60 } ] },
-      // Employment Preparation — *worksheet*
-      EPR:  { unit_type: "quarter_hour", label: "Quarter-Hour", worksheet: true, max_rate: 10.09, alt_daily: 242.70 },
+              tiers: [ { maxHours: 1, max_rate: 55.05 }, { maxHours: 2, max_rate: 78.92 }, { maxHours: 3, max_rate: 102.76 },
+                        { maxHours: 4, max_rate: 126.63 }, { maxHours: 5, max_rate: 150.49 }, { maxHours: 6, max_rate: 174.35 } ] },
+      // Employment Preparation — *worksheet* (also has daily $246.61)
+      EPR:  { unit_type: "quarter_hour", label: "Quarter-Hour", worksheet: true, max_rate: 10.25, alt_daily: 246.61 },
       // Motor Transportation — daily, fixed
-      MTP:  { unit_type: "daily", label: "Daily", rate: 20.80 },
+      MTP:  { unit_type: "daily", label: "Daily", rate: 21.13 },
       // Family & Individual Training — quarter hour, fixed
-      TFB:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 8.67 },
+      TFB:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 8.81 },
       // Host Home Supports — daily, *worksheet*
-      HHS:  { unit_type: "daily", label: "Daily", worksheet: true, max_rate: 372.92 },
+      HHS:  { unit_type: "daily", label: "Daily", worksheet: true, max_rate: 378.92 },
       // Extended Living Supports — quarter hour, fixed
-      ELS:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 6.25 },
-      // Personal Assistance — quarter hour, fixed (also has daily $183.10)
-      PAC:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 5.73, alt_daily: 183.10 },
-      // Personal Budget Assistant — quarter hour, fixed (also has session $18.30)
-      PBA:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 9.16, alt_session: 18.30 },
-      // Professional Medication Monitoring — session, fixed
-      PM1:  { unit_type: "session", label: "Per Session", rate: 8.32 },
-      PM2:  { unit_type: "session", label: "Per Session", rate: 12.03 },
-      // Professional Nursing — daily, fixed
-      PN1:  { unit_type: "daily", label: "Daily", rate: 41.68 },
-      PN2:  { unit_type: "daily", label: "Daily", rate: 117.60 },
+      ELS:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 6.35 },
+      // Personal Assistance — quarter hour, fixed (also has daily $186.05)
+      PAC:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 5.82, alt_daily: 186.05 },
+      // Personal Budget Assistant — quarter hour, fixed (also has session $18.59)
+      PBA:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 9.31, alt_session: 18.59 },
+      // Professional Medication Monitoring (LPN / RN) — QUARTER HOUR per DHHS91172, fixed
+      PM1:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 8.45 },
+      PM2:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 12.22 },
+      // Professional Nursing — daily, fixed (PN2 also has session $29.87)
+      PN1:  { unit_type: "daily", label: "Daily", rate: 42.35 },
+      PN2:  { unit_type: "daily", label: "Daily", rate: 119.49, alt_session: 29.87 },
       // Professional Parent Supports — daily, *worksheet*
-      PPS:  { unit_type: "daily", label: "Daily", worksheet: true, max_rate: 372.92 },
+      PPS:  { unit_type: "daily", label: "Daily", worksheet: true, max_rate: 378.92 },
       // *** RESIDENTIAL HABILITATION SUPPORTS — DAILY, *worksheet* ***
-      RHS:  { unit_type: "daily", label: "Daily", worksheet: true, max_rate: 592.29 },
+      RHS:  { unit_type: "daily", label: "Daily", worksheet: true, max_rate: 601.83 },
       // Respite — various, fixed
-      RP2:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 4.58, alt_daily: 110.42 },
-      RP3:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 5.72, alt_daily: 137.06 },
-      RP4:  { unit_type: "daily", label: "Daily", rate: 123.94 },
-      RP5:  { unit_type: "daily", label: "Daily", rate: 150.58 },
-      RPS:  { unit_type: "session", label: "Per Session", rate: 650.45 },
+      RP2:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 4.65, alt_daily: 112.20 },
+      RP3:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 5.81, alt_daily: 139.27 },
+      RP4:  { unit_type: "daily", label: "Daily", rate: 125.94 },
+      RP5:  { unit_type: "daily", label: "Daily", rate: 153.00 },
+      RPS:  { unit_type: "session", label: "Per Session", rate: 660.92 },
       // Supported Employment
-      SEC:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 1.83 },
-      SED:  { unit_type: "daily", label: "Daily", rate: 55.67 },
+      SEC:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 1.86 },
+      SED:  { unit_type: "daily", label: "Daily", rate: 56.57 },
       SEE:  { unit_type: "tiered_daily", label: "Daily (Tiered)", worksheet: true,
-              tiers: [ { maxHours: 1, max_rate: 54.18 }, { maxHours: 2, max_rate: 77.68 }, { maxHours: 3, max_rate: 101.14 },
-                        { maxHours: 4, max_rate: 124.64 }, { maxHours: 5, max_rate: 148.12 }, { maxHours: 6, max_rate: 171.60 } ] },
-      SEI:  { unit_type: "tiered_daily", label: "Daily (Tiered)", worksheet: true,
-              tiers: [ { maxHours: 1, max_rate: 54.18 }, { maxHours: 2, max_rate: 77.68 }, { maxHours: 3, max_rate: 101.14 },
-                        { maxHours: 4, max_rate: 124.64 }, { maxHours: 5, max_rate: 148.12 }, { maxHours: 6, max_rate: 171.60 } ] },
+              tiers: [ { maxHours: 1, max_rate: 55.05 }, { maxHours: 2, max_rate: 78.92 }, { maxHours: 3, max_rate: 102.76 },
+                        { maxHours: 4, max_rate: 126.63 }, { maxHours: 5, max_rate: 150.49 }, { maxHours: 6, max_rate: 174.35 } ] },
+      // Supported Employment for an Individual — quarter hour, FIXED (no asterisk on DHHS91172)
+      SEI:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 14.54 },
+      // Supported Job Development — quarter hour, fixed
+      SJD:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 17.31 },
+      // Supported Job Retention / Initial Job Placement — milestone payments, per session
+      SJR:  { unit_type: "session", label: "Per Session", rate: 620.00 },
+      SJP:  { unit_type: "session", label: "Per Session", rate: 620.00 },
       // Supported Living — quarter hour, fixed
-      SLH:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 9.16 },
-      SLN:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 8.27 },
+      SLH:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 9.31 },
+      SLN:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 8.40 },
       // Caregiver Compensation — quarter hour, fixed
-      CMS:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 6.85 },
-      CMP:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 6.85 },
-      // Habilitation Aide Plus — monthly, *worksheet*
+      CMS:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 6.96 },
+      CMP:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 6.96 },
+      // Habilitation Aide Plus — monthly, *worksheet* — LEGACY: not on the 7/1/2026 schedule
       HAP:  { unit_type: "monthly", label: "Monthly", worksheet: true, max_rate: 567.00 },
+    };
+
+    // v20.0.10 (Item 2) — worksheet-rate rules, shared by ClientForm, the intake
+    // wizard, and the inline Set rate. Returns an error string, or null when OK.
+    //  - fixed-rate codes: rate optional (billing uses the table rate above)
+    //  - worksheet codes: rate REQUIRED. Roles that can't see rates can't add
+    //    one — the SC's worksheet has the rate; that role just isn't permitted
+    //    to see it. Rate-holders may defer with rate_pending (a deliberate null,
+    //    never a silent one); the row wears RATE NEEDED until it is set.
+    //  - any entered worksheet rate must be > 0 and ≤ the DSPD ceiling (block,
+    //    not warn: over-ceiling is almost always a fat-finger, and it flows
+    //    straight into inflated or deniable claims)
+    const validateNewAuthRate = (auth, code, perms) => {
+      const rule = BILLING_RULES[code];
+      const typed = String(auth?.rate_per_unit ?? "").trim();
+      if (!rule?.worksheet) {
+        if (typed && !(parseFloat(typed) > 0)) return "Rate must be a positive amount";
+        return null;
+      }
+      if (!perms?.viewRates) return `${code} is a worksheet service — an admin or owner must add it with the rate from the support coordinator's worksheet`;
+      if (!typed) return auth?.rate_pending ? null : `${code} is a worksheet service — enter the rate from the SC's worksheet, or tick "Rate pending from SC"`;
+      const rate = parseFloat(typed);
+      if (!(rate > 0)) return "Rate must be a positive amount";
+      const ceiling = rule.max_rate != null ? rule.max_rate : (rule.tiers ? Math.max(...rule.tiers.map(t => t.max_rate)) : null);
+      if (ceiling != null && rate > ceiling + 1e-9) return `Rate exceeds the DSPD max for ${code} ($${ceiling.toFixed(2)}/unit, DHHS91172 effective ${BILLING_RULES_EFFECTIVE})`;
+      return null;
+    };
+
+    // v20.0.10 (Item 3) — person_service_authorizations.status is the enum
+    // authorization_status (pending / approved / rejected / expired): an APPROVAL
+    // vocabulary. An auth entered from a DSPD worksheet is approved by
+    // definition; a window already fully in the past is expired. The date
+    // window stays the source of truth for "active today" everywhere in-app.
+    const deriveAuthStatus = (endDate) => {
+      const today = new Date().toISOString().split("T")[0];
+      return endDate && endDate < today ? "expired" : "approved";
+    };
+
+    // v20.0.10 (Item 2, 2b) — state-driven, so every legacy null-rate worksheet
+    // row from the old addAuth bug lights up too. Discloses no dollar figure.
+    const RateNeededChip = ({ code, rate }) => {
+      if (!BILLING_RULES[code]?.worksheet || rate) return null;
+      return <span title="Worksheet service with no person-specific rate on file — billing amount is unknown until it is set" style={{ fontSize: 10, color: CB.amber, fontWeight: 700, background: `${CB.amber}12`, padding: "1px 6px", borderRadius: 4 }}>RATE NEEDED</span>;
     };
 
     // ═══════════════════════════════════════════════════════════════
@@ -6140,6 +6275,7 @@
       MTP: "day", PAC: "day", COM: "day", ELS: "day",
       PBA: "individual", PM1: "individual", PM2: "individual",
       PN1: "individual", PN2: "individual",
+      SEI: "individual", SJD: "individual", SJR: "individual", SJP: "individual", // v20.0.10
       BC1: "individual", BC2: "individual", BC3: "individual",
       TFB: "individual", HSQ: "individual",
       RP2: "individual", RP3: "individual", RP4: "individual",
@@ -6167,10 +6303,10 @@
         if (!open) return;
         Promise.all([
           supabase.from("service_code_definitions").select("id, code, name").order("code"),
-          supabase.from("org_units").select("id, name, unit_type").order("name"),
+          supabase.from("org_units").select("id, name, unit_type, is_active").order("name"),
         ]).then(([sc, ou]) => {
           setServiceCodes(sc.data || []);
-          setOrgUnits(ou.data || []);
+          setOrgUnits((ou.data || []).filter(u => u.is_active !== false)); // v20.0.10 (Item 4) — a retired unit is not a valid home for a new context
         });
         if (editing) {
           setForm({
@@ -7974,9 +8110,14 @@
       const loadAll = async () => {
         setLoading(true);
         // v19.2 — try to include context join; fall back if column/relationship not present
-        const evvSelect = "id, clock_in_at, clock_out_at, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, geofence_valid, exceptions, context_id, staff(first_name, last_name), persons(first_name, last_name), service_code_definitions(code), service_delivery_contexts(id, name, delivery_type)";
+        // v20.0.10 (Item 5) — original_clock_in_at / original_clock_out_at come from
+        // sql/v20.0.10.sql; until it runs, the select retries without them.
+        const evvSelect = "id, clock_in_at, clock_out_at, original_clock_in_at, original_clock_out_at, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, geofence_valid, exceptions, context_id, staff(first_name, last_name), persons(first_name, last_name), service_code_definitions(code), service_delivery_contexts(id, name, delivery_type)";
         const evvSelectLegacy = "id, clock_in_at, clock_out_at, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, geofence_valid, exceptions, staff(first_name, last_name), persons(first_name, last_name), service_code_definitions(code)";
         let sessRes = await supabase.from("evv_sessions").select(evvSelect).order("clock_in_at", { ascending: false }).limit(50);
+        if (sessRes.error && /original_clock/i.test(sessRes.error.message || "")) {
+          sessRes = await supabase.from("evv_sessions").select(evvSelect.replace("original_clock_in_at, original_clock_out_at, ", "")).order("clock_in_at", { ascending: false }).limit(50);
+        }
         if (sessRes.error && /(column|relationship).*context/i.test(sessRes.error.message || "")) {
           sessRes = await supabase.from("evv_sessions").select(evvSelectLegacy).order("clock_in_at", { ascending: false }).limit(50);
         }
@@ -8483,6 +8624,20 @@
         // can't shift the instant, and the DST fall-back ambiguity (a wall time
         // that maps to two real UTC instants) is only ever reachable when the
         // operator genuinely typed a new time.
+        // v20.0.10 (Item 5) — clock-IN is now correctable on exactly the terms
+        // clock-out has had since v19.10.2: wall-clock change detection, a no-op
+        // keeps the stored instant verbatim, the DST guardrail, a mandatory
+        // reason, and one audit row per changed field. The originally captured
+        // instants are preserved ON THE VISIT ROW by the DB trigger in
+        // sql/v20.0.10.sql (original_clock_in_at / original_clock_out_at, set
+        // once, never overwritten) — the log says what changed and why; the row
+        // itself still says what was captured at the point of care.
+        const origInInput = isoToMTInput(viewing.clock_in_at);
+        const curInInput = evvEditForm.clock_in_at || "";
+        const inChanged = curInInput !== origInInput;
+        const prevInIso = viewing.clock_in_at ? new Date(viewing.clock_in_at).toISOString() : null;
+        const nextInIso = inChanged ? (curInInput ? mtInputToIso(curInInput) : null) : prevInIso;
+
         const origOutInput = isoToMTInput(viewing.clock_out_at);
         const curOutInput = evvEditForm.clock_out_at || "";
         const outChanged = curOutInput !== origOutInput;
@@ -8493,20 +8648,28 @@
         const nextExcText = evvEditForm.exceptions ?? "";
         const excChanged = nextExcText !== prevExcText;
 
-        if (!outChanged && !excChanged) { setEditingEVV(false); return addToast("No changes to save", "info"); }
+        if (!inChanged && !outChanged && !excChanged) { setEditingEVV(false); return addToast("No changes to save", "info"); }
         if (!reason) return addToast("A reason is required for any manual EVV correction", "error");
+        if (inChanged && !nextInIso) return addToast("Clock-in time is required — a visit cannot exist without one", "error");
 
-        // v19.10.2 — DST guardrails on an edited clock-out. Spring-forward
-        // creates a nonexistent wall-clock hour; fall-back creates a repeated
-        // one. In both cases the round-trip through mtInputToIso won't reproduce
-        // what the operator typed. Rather than silently persist a shifted or
-        // ambiguous instant, refuse the save and ask them to pick an
-        // unambiguous minute (e.g. avoid the 1–2am DST hour).
+        // v19.10.2 — DST guardrails on an edited time. Spring-forward creates a
+        // nonexistent wall-clock hour; fall-back creates a repeated one. In both
+        // cases the round-trip through mtInputToIso won't reproduce what the
+        // operator typed. Rather than silently persist a shifted or ambiguous
+        // instant, refuse the save and ask them to pick an unambiguous minute.
+        if (inChanged && nextInIso && isoToMTInput(nextInIso) !== curInInput) {
+          return addToast("That clock-in time is ambiguous or invalid on a daylight-saving transition. Enter a time outside the 1:00–3:00 AM DST window.", "error");
+        }
         if (outChanged && nextOutIso && isoToMTInput(nextOutIso) !== curOutInput) {
           return addToast("That clock-out time is ambiguous or invalid on a daylight-saving transition. Enter a time outside the 1:00–3:00 AM DST window.", "error");
         }
+        // v20.0.10 — the pair must stay ordered whichever side was edited.
+        if ((inChanged || outChanged) && nextInIso && nextOutIso && new Date(nextInIso) >= new Date(nextOutIso)) {
+          return addToast("Clock-in must be earlier than clock-out", "error");
+        }
 
         const updates = {};
+        if (inChanged) updates.clock_in_at = nextInIso;
         if (outChanged) updates.clock_out_at = nextOutIso;
         if (excChanged) {
           // Preserve structured exceptions where the operator supplied JSON;
@@ -8517,9 +8680,12 @@
         }
 
         const who = staffProfile ? `${staffProfile.first_name || ""} ${staffProfile.last_name || ""}`.trim() : (user?.email || null);
+        // v20.0.10 — evv_edit_log.edited_by_user_id existed but was never written; attribution now carries both ids.
+        const editedBy = { edited_by_staff_id: staffProfile?.id || null, edited_by_user_id: user?.id || null, edited_by_name: who };
         const entries = [];
-        if (outChanged) entries.push({ org_id: orgId, session_id: viewing.id, field: "clock_out_at", old_value: prevOutIso, new_value: nextOutIso, reason, edited_by_staff_id: staffProfile?.id || null, edited_by_name: who });
-        if (excChanged) entries.push({ org_id: orgId, session_id: viewing.id, field: "exceptions", old_value: prevExcText || null, new_value: nextExcText || null, reason, edited_by_staff_id: staffProfile?.id || null, edited_by_name: who });
+        if (inChanged) entries.push({ org_id: orgId, session_id: viewing.id, field: "clock_in_at", old_value: prevInIso, new_value: nextInIso, reason, ...editedBy });
+        if (outChanged) entries.push({ org_id: orgId, session_id: viewing.id, field: "clock_out_at", old_value: prevOutIso, new_value: nextOutIso, reason, ...editedBy });
+        if (excChanged) entries.push({ org_id: orgId, session_id: viewing.id, field: "exceptions", old_value: prevExcText || null, new_value: nextExcText || null, reason, ...editedBy });
 
         setSavingEVV(true);
         // v19.10.2 — AUDIT FIRST. The audit row and the correction are two
@@ -8732,8 +8898,21 @@
                 <RGrid cols={2} gap={12} style={{ marginBottom: 16 }}>
                   <div style={{ padding: 14, background: CB.cream, borderRadius: 10, border: `1px solid ${CB.border}` }}>
                     <div style={{ fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 4 }}>Clock In</div>
-                    <div style={{ fontSize: 15, fontWeight: 700, color: CB.navy }}>{formatTime(viewing.clock_in_at)}</div>
-                    <div style={{ fontSize: 12, color: CB.textMid }}>{formatDate(viewing.clock_in_at)}</div>
+                    {/* v20.0.10 (Item 5) — clock-in is editable on the same audited terms as clock-out */}
+                    {editingEVV ? (
+                      <>
+                        <input type="datetime-local" style={{ ...fieldStyle, padding: "8px 10px", fontSize: 13 }} value={evvEditForm.clock_in_at} onChange={e => setEvvEditForm(p => ({ ...p, clock_in_at: e.target.value }))} />
+                        <div style={{ fontSize: 11, color: CB.textMid, marginTop: 4 }}>Mountain Time (Utah)</div>
+                      </>
+                    ) : (
+                      <>
+                        <div style={{ fontSize: 15, fontWeight: 700, color: CB.navy }}>{formatTime(viewing.clock_in_at)}</div>
+                        <div style={{ fontSize: 12, color: CB.textMid }}>{formatDate(viewing.clock_in_at)}</div>
+                        {viewing.original_clock_in_at && (
+                          <div style={{ fontSize: 11, color: CB.amber, fontWeight: 700, marginTop: 4 }}>Edited · captured {formatTime(viewing.original_clock_in_at)} {formatDate(viewing.original_clock_in_at)}</div>
+                        )}
+                      </>
+                    )}
                   </div>
                   <div style={{ padding: 14, background: CB.cream, borderRadius: 10, border: `1px solid ${CB.border}` }}>
                     <div style={{ fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", marginBottom: 4 }}>Clock Out</div>
@@ -8746,6 +8925,9 @@
                       <>
                         <div style={{ fontSize: 15, fontWeight: 700, color: viewing.clock_out_at ? CB.navy : CB.amber }}>{viewing.clock_out_at ? formatTime(viewing.clock_out_at) : "Still active"}</div>
                         {viewing.clock_out_at && <div style={{ fontSize: 12, color: CB.textMid }}>{formatDate(viewing.clock_out_at)}</div>}
+                        {viewing.original_clock_out_at && (
+                          <div style={{ fontSize: 11, color: CB.amber, fontWeight: 700, marginTop: 4 }}>Edited · captured {formatTime(viewing.original_clock_out_at)} {formatDate(viewing.original_clock_out_at)}</div>
+                        )}
                       </>
                     )}
                   </div>
@@ -8823,9 +9005,9 @@
                     {editLog.map(e => (
                       <div key={e.id} style={{ padding: "10px 14px", borderRadius: 10, background: CB.cream, border: `1px solid ${CB.border}`, marginBottom: 8 }}>
                         <div style={{ fontSize: 12.5, color: CB.navy, fontWeight: 700 }}>
-                          {e.field === "clock_out_at" ? "Clock-out time" : e.field} changed
-                          {e.field === "clock_out_at" && e.old_value && e.new_value && (
-                            <span style={{ fontWeight: 600, color: CB.textMid }}> — {formatTime(e.old_value)} → {formatTime(e.new_value)}</span>
+                          {e.field === "clock_out_at" ? "Clock-out time" : e.field === "clock_in_at" ? "Clock-in time" : e.field} changed
+                          {(e.field === "clock_out_at" || e.field === "clock_in_at") && e.old_value && e.new_value && (
+                            <span style={{ fontWeight: 600, color: CB.textMid }}> — {formatDate(e.old_value)} {formatTime(e.old_value)} → {formatDate(e.new_value)} {formatTime(e.new_value)}</span>
                           )}
                         </div>
                         <div style={{ fontSize: 12, color: CB.text, marginTop: 3 }}>{e.reason}</div>
@@ -12547,6 +12729,7 @@
                       padding: "10px 14px", paddingLeft: 14 + unit.depth * 28,
                       borderRadius: 10, animation: `fadeIn 0.2s ease ${i * 0.02}s both`,
                       transition: "all 0.15s", border: "1px solid transparent",
+                      opacity: unit.is_active === false ? 0.55 : 1, // v20.0.10 (Item 4) — retired nodes are history, drawn as such
                     }}
                       onMouseEnter={e => { e.currentTarget.style.background = `${CB.teal}08`; e.currentTarget.style.borderColor = `${CB.teal}20`; }}
                       onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.borderColor = "transparent"; }}
@@ -12563,7 +12746,8 @@
                           {(typeIcons[unit.unit_type] || icons.dashboard)({ size: 14, color: unit.unit_type === "admin" ? CB.navy : unit.unit_type === "program" ? CB.teal : CB.blue })}
                         </div>
                         <div>
-                          <span style={{ fontSize: 14, fontWeight: 600, color: CB.navy }}>{unit.name}</span>
+                          <span style={{ fontSize: 14, fontWeight: 600, color: unit.is_active === false ? CB.textLight : CB.navy, textDecoration: unit.is_active === false ? "line-through" : "none" }}>{unit.name}</span>
+                          {unit.is_active === false && <span style={{ marginLeft: 8, verticalAlign: "middle" }}><Badge text="Retired" color={CB.textLight} /></span>}
                           <span style={{ fontSize: 11, color: CB.textLight, marginLeft: 8 }}>{ORG_UNIT_TYPES.find(t => t.value === unit.unit_type)?.label || unit.unit_type}</span>
                           {unit.city && <span style={{ fontSize: 11, color: CB.textLight, marginLeft: 8 }}>— {unit.city}</span>}
                           {/* v20.0.4 (D6) — the facility truth, worn on the node: type,
@@ -12589,6 +12773,13 @@
                           })()}
                         </div>
                       </div>
+                      {/* v20.0.10 (Item 4, decision A) — no edit / add-child / delete on a
+                          retired node. Edit is hidden too, not just add/delete: the edit path
+                          runs save_site_unit, whose facility payload hardcodes is_active:true —
+                          renaming a retired site would silently re-activate its facility. */}
+                      {unit.is_active === false ? (
+                        <span title="Retired unit — kept for history; nothing can be added, changed, or deleted here" style={{ fontSize: 11, fontWeight: 600, color: CB.textLight }}>read-only</span>
+                      ) : (
                       <div style={{ display: "flex", gap: 4 }}>
                         <button onClick={() => {
                           const s = sites.find(x => x.id === unit.site_id) || {};
@@ -12611,6 +12802,7 @@
                           color: CB.red, cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit",
                         }}>{icons.trash({ size: 12, color: CB.red })}</button>
                       </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -13025,7 +13217,7 @@
         admission_date: new Date().toISOString().split("T")[0],
         auths: [],
       });
-      const [newAuth, setNewAuth] = useState({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "" });
+      const [newAuth, setNewAuth] = useState({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false }); // v20.0.10 — rate_pending: deliberate null-rate attestation (UI-only, never stored)
 
       useEffect(() => {
         supabase.from("service_code_definitions").select("id, code, name").order("code").then(({ data }) => setServiceCodes(data || []));
@@ -13036,8 +13228,12 @@
       const addIntakeAuth = () => {
         if (!newAuth.service_code_id || !newAuth.authorized_units) return addToast("Select code and enter units", "error");
         const sc = serviceCodes.find(s => s.id === newAuth.service_code_id);
+        // v20.0.10 (Item 2) — same worksheet-rate rules as ClientForm; the
+        // requirement holds at both doors or it holds at neither.
+        const rateErr = validateNewAuthRate(newAuth, sc?.code, perms);
+        if (rateErr) return addToast(rateErr, "error");
         setForm(prev => ({ ...prev, auths: [...prev.auths, { ...newAuth, code: sc?.code, name: sc?.name }] }));
-        setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "" });
+        setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false });
       };
 
       const removeIntakeAuth = (idx) => {
@@ -13110,6 +13306,7 @@
               start_date: startDate,
               end_date: endDate,
               rate_per_unit: a.rate_per_unit ? parseFloat(a.rate_per_unit) : null,
+              status: deriveAuthStatus(endDate), // v20.0.10 (Item 3)
             };
           });
           const { error: authErr } = await supabase.from("person_service_authorizations").insert(authPayloads);
@@ -13376,6 +13573,7 @@
                       }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                           <Badge text={a.code} color={CB.blue} />
+                          <RateNeededChip code={a.code} rate={a.rate_per_unit} />
                           <span style={{ fontSize: 13, color: CB.text, fontWeight: 600 }}>{a.authorized_units} units</span>
                           {a.rate_per_unit && perms.viewRates && <span style={{ fontSize: 12, color: CB.teal, fontWeight: 700 }}>@ ${Number(a.rate_per_unit).toFixed(2)}</span>}
                         </div>
@@ -13406,9 +13604,16 @@
                       </label>
                       <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13, borderColor: isWorksheet ? `${CB.amber}40` : CB.border }}
                         type="number" step="0.01" value={newAuth.rate_per_unit}
-                        onChange={e => setNewAuth(p => ({ ...p, rate_per_unit: e.target.value }))}
+                        onChange={e => setNewAuth(p => ({ ...p, rate_per_unit: e.target.value, rate_pending: false }))}
                         placeholder={newAuthRule ? (isWorksheet ? `≤${newAuthRule.max_rate || "?"}` : `$${newAuthRule.rate || "?"}`) : "$0.00"} />
                     </div>
+                  )}
+                  {/* v20.0.10 (Item 2, 2b) — same deliberate-deferral valve as ClientForm */}
+                  {perms.viewRates && isWorksheet && !newAuth.rate_per_unit && (
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: CB.amber, marginBottom: 16, whiteSpace: "nowrap", cursor: "pointer" }}>
+                      <input type="checkbox" checked={!!newAuth.rate_pending} onChange={e => setNewAuth(p => ({ ...p, rate_pending: e.target.checked }))} />
+                      Rate pending from SC
+                    </label>
                   )}
                   <div style={{ flex: "0 0 130px" }}>
                     <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>Start</label>
@@ -15619,6 +15824,7 @@
                       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 8, flexWrap: "wrap" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                           <Badge text={code} color={CB.blue} />
+                          <RateNeededChip code={code} rate={a.rate_per_unit} />
                           <span style={{ fontSize: 13, fontWeight: 600, color: CB.text }}>{a.used_units || 0} / {a.authorized_units} units</span>
                         </div>
                         <span style={{ fontSize: 11, color: CB.textLight }}>
@@ -16431,7 +16637,7 @@
       const loadClient = async () => {
         setLoading(true);
         const { data } = await supabase.from("persons")
-          .select("*, person_service_authorizations(id, service_code_id, authorized_units, used_units, start_date, end_date, service_code_definitions(code))")
+          .select("*, person_service_authorizations(id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code))")
           .eq("id", clientId).single();
         setClient(data);
         setLoading(false);
