@@ -85,26 +85,16 @@ WHERE status IN ('pending'::authorization_status, 'approved'::authorization_stat
                               END;
 
 
--- ── Items 1/2 (Greptile r1): retry-safe authorization creation ──────────────
--- The app now sends a client-generated id per row attempt (PK rejects a
--- replay whose first request committed but lost its response). This index
--- backs the human-level duplicate the same way: one authorization per
--- person + service code + start date. Created only when no such duplicates
--- already exist — the verification block reports the count either way; if it
--- is non-zero, resolve those rows deliberately, then re-run this file.
+-- ── Item 1 (Greptile r1 → r2): retry-safe authorization creation ───────────
+-- Retry safety lives in the app: each row attempt carries a client-generated
+-- id, so a replay of a committed-but-lost request hits the primary key and is
+-- recognized as already on file (confirmed by execution in round 1). Round 1
+-- also added a unique index on (person_id, service_code_id, start_date); round
+-- 2 showed it rejects legitimately distinct authorizations (same code and
+-- start date, different units / end date / negotiated rate), so it is removed.
+-- Re-runnable: drops the index wherever round 1 created it, no-op otherwise.
 
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM public.person_service_authorizations
-    GROUP BY person_id, service_code_id, start_date
-    HAVING count(*) > 1
-  ) THEN
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_psa_person_code_start
-      ON public.person_service_authorizations (person_id, service_code_id, start_date);
-  END IF;
-END
-$$;
+DROP INDEX IF EXISTS public.uq_psa_person_code_start;
 
 
 -- ── Item 2: service codes new on DHHS91172 (effective 7/1/2026) ─────────────
@@ -175,15 +165,11 @@ UNION ALL
 SELECT 'service code present: ' || code, name
   FROM public.service_code_definitions WHERE code IN ('SJD', 'SJR', 'SJP')
 UNION ALL
-SELECT 'psa duplicate groups (want 0)', count(*)::text
-  FROM (SELECT 1 FROM public.person_service_authorizations
-         GROUP BY person_id, service_code_id, start_date HAVING count(*) > 1) d
-UNION ALL
-SELECT 'psa unique index (want 1)', count(*)::text
+SELECT 'psa r1 unique index (want 0 — dropped)', count(*)::text
   FROM pg_indexes WHERE indexname = 'uq_psa_person_code_start'
 UNION ALL
 SELECT 'evv trigger events', string_agg(event_manipulation, '+' ORDER BY event_manipulation)
   FROM information_schema.triggers WHERE trigger_name = 'trg_evv_sessions_preserve_originals'
 ORDER BY what;
 -- Expect: originals cols = 2, trigger = 1 (events INSERT+UPDATE), no 'pending'
--- auth rows, three SJ* codes, duplicate groups = 0, unique index = 1.
+-- auth rows, three SJ* codes, r1 unique index = 0 (dropped).

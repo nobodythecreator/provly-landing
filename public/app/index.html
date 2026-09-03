@@ -2569,8 +2569,12 @@
       // client-generated primary key for its whole life (first click through
       // any retries); if the first request committed but its response was
       // lost, the retry hits the PK and is recognized as "already on file"
-      // instead of inserting a twin. A unique index on (person, code, start)
-      // in sql/v20.0.10.sql catches the human-level duplicate the same way.
+      // instead of inserting a twin.
+      // v20.0.10 (Greptile r2) — ONLY that replay is "already on file". Any
+      // other unique violation is an error that keeps the operator's row
+      // intact; the r1 unique index on (person, code, start) was dropped —
+      // it rejected legitimately distinct authorizations (same code and
+      // start date, different units / end date / negotiated rate).
       const authAttemptId = useRef(null);
       const isDuplicateKey = (err) => err && (err.code === "23505" || /duplicate key/i.test(err.message || ""));
       const persistNewAuth = async () => {
@@ -2609,9 +2613,10 @@
 
         const { error, data: insertData } = await supabase.from("person_service_authorizations").insert(payload).select();
         if (error && isDuplicateKey(error)) {
-          // Either this exact attempt already committed (PK) or an auth with the
-          // same person + code + start date is already on file (unique index).
-          // Nothing is duplicated; show what exists and clear the row.
+          // Verify it is OUR replay (the attempt id landed) rather than some
+          // other unique constraint — never clear a row on an assumption.
+          const { data: mine } = await supabase.from("person_service_authorizations").select("id").eq("id", authAttemptId.current).limit(1);
+          if (!mine || mine.length === 0) { addToast("Failed: " + error.message, "error"); return false; }
           await reloadAuths();
           authAttemptId.current = null;
           setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false });
