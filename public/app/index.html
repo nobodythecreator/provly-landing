@@ -2561,10 +2561,8 @@
         // this client has an unconfirmed attempt: then its key is restored so an
         // unchanged resubmission replays instead of duplicating, and it is
         // re-checked now.
-        const pend = getPending(editing?.id);
-        authAttemptId.current = pend?.id || null;
-        setUnconfirmed(null);
-        if (open && editing && pend) checkUnconfirmed(editing.id, pend);
+        attemptIds.current = {}; // r8 — in-memory identities are per open client
+        if (open && editing) { refreshUnconfirmed(editing.id); checkUnconfirmed(editing.id); } else setUnconfirmed([]);
       }, [editing, open]);
 
       const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
@@ -2590,44 +2588,48 @@
       // intact; the r1 unique index on (person, code, start) was dropped —
       // it rejected legitimately distinct authorizations (same code and
       // start date, different units / end date / negotiated rate).
-      const authAttemptId = useRef(null);
+      // v20.0.10 (Greptile r8) — request identity is keyed per (client, SERVICE
+      // CODE), not per client. Keeping one identity per client meant a second
+      // unconfirmed save for the same person overwrote the first's key; a
+      // retry of the first then minted a fresh id and landed twice. Now every
+      // unresolved attempt keeps its own key for as long as it is unresolved:
+      //   attemptIds (memory)  — one id per code for the open client; survives a
+      //                          not-on-file failure so the retry replays
+      //   pending store (disk) — the UNCONFIRMED subset (insert response lost
+      //                          AND the confirmation check failed); survives
+      //                          reopen + refresh; 24h expiry; re-checked on open
+      // Invariant: at most one live identity per (client, code) — a same-code
+      // resubmission always reuses it, so two identities for one code cannot
+      // exist. A different code never touches another code's key.
       const isDuplicateKey = (err) => err && (err.code === "23505" || /duplicate key/i.test(err.message || ""));
-      // v20.0.10 (Greptile r5) — an UNCONFIRMED attempt (insert response lost
-      // AND the confirmation check failed) must keep its request identity
-      // across a modal reopen and a page refresh, or the operator's unchanged
-      // resubmission gets a fresh primary key and lands twice. Unconfirmed
-      // attempts are kept per person (localStorage-backed idempotency keys,
-      // 24h expiry — NOT render state; the visible notice below is React
-      // state set from these), re-checked on every open, and reused only for
-      // a resubmission of the SAME service code (a different code is a
-      // different authorization, and gets its own key while this one stays
-      // queued for resolution).
+      const attemptIds = useRef({}); // { [code]: id } for the open client
       const PENDING_AUTH_KEY = "provly_pending_auth_attempts";
-      const readPending = () => { try { return JSON.parse(localStorage.getItem(PENDING_AUTH_KEY) || "{}"); } catch (_) { return {}; } };
-      const getPending = (personId) => { const m = readPending(); const p = personId && m[personId]; return (p && Date.now() - (p.at || 0) < 86400000) ? p : null; };
-      const setPending = (personId, entry) => { try { const m = readPending(); if (entry) m[personId] = entry; else delete m[personId]; localStorage.setItem(PENDING_AUTH_KEY, JSON.stringify(m)); } catch (_) {} };
-      const [unconfirmed, setUnconfirmed] = useState(null); // { id, code, onFile? } for the open client, or null
+      const readPendingAll = () => { try { return JSON.parse(localStorage.getItem(PENDING_AUTH_KEY) || "{}"); } catch (_) { return {}; } };
+      // → { [code]: { id, at } } for one client, expired entries dropped
+      const getPendingMap = (personId) => {
+        const m = readPendingAll(); const raw = personId && m[personId]; if (!raw || typeof raw !== "object") return {};
+        const out = {}; Object.entries(raw).forEach(([code, e]) => { if (e && e.id && Date.now() - (e.at || 0) < 86400000) out[code] = e; });
+        return out;
+      };
+      const setPendingCode = (personId, code, entry) => {
+        try {
+          const m = readPendingAll(); const cur = (m[personId] && typeof m[personId] === "object") ? m[personId] : {};
+          if (entry) cur[code] = entry; else delete cur[code];
+          if (Object.keys(cur).length) m[personId] = cur; else delete m[personId];
+          localStorage.setItem(PENDING_AUTH_KEY, JSON.stringify(m));
+        } catch (_) {}
+      };
+      const [unconfirmed, setUnconfirmed] = useState([]); // [{ id, code, onFile? }] for the open client
 
       // v20.0.10 (Greptile r6) — the request identity is never read from a
-      // shared mutable ref mid-flight. Two rules, both by construction:
-      //  (1) a submission captures its attempt id ONCE, in a local, and uses
-      //      that local for the insert, the confirmation and the reconcile —
-      //      the shared ref is only a hand-off between submissions, and a
-      //      submission clears it only if it still holds its own id;
-      //  (2) submissions and confirmation checks are SERIALIZED through one
-      //      in-flight promise — a check can never observe (or clear) the
-      //      identity of a submission that is still running, and a submission
-      //      started during a check waits for the check's verdict.
+      // shared mutable place mid-flight: a submission captures its attempt id
+      // ONCE, in a local, and uses that local for the insert, the confirmation
+      // and the reconcile. Submissions and confirmation checks are SERIALIZED
+      // through one in-flight promise.
       const authBusy = useRef(null);
-      // v20.0.10 (Greptile r7) — a queued submission must act on the row AS IT
-      // IS when it gets its turn, not as it was when the click happened. A rapid
-      // second Add Auth used to wait its turn, then faithfully re-submit the
-      // render-time copy of a row the first submission had already saved and
-      // cleared — with a fresh id, because the first had handed the ref back.
-      // Two rules: (1) a submission that finds another submission in flight is
-      // a double-click and is DROPPED, never queued; (2) every task reads the
-      // row through this live mirror after it acquires its turn, so a row that
-      // was saved and blanked meanwhile is seen as blank.
+      // v20.0.10 (Greptile r7) — a queued task acts on the row AS IT IS when it
+      // gets its turn (live mirror), and a submission that finds another
+      // submission in flight is a double-click: dropped, never queued.
       const newAuthRef = useRef(newAuth); newAuthRef.current = newAuth;
       const submitInFlight = useRef(false);
       const [authSubmitting, setAuthSubmitting] = useState(false);
@@ -2637,8 +2639,6 @@
         authBusy.current = p;
         try { return await p; } finally { if (authBusy.current === p) authBusy.current = null; }
       };
-      // What the row on screen means once defaults are applied — one function
-      // feeds the insert payload AND every "is the stored row the same?" test.
       const authValuesFromRow = (row) => {
         const start_date = row.start_date || new Date().toISOString().split("T")[0];
         let end_date = row.end_date;
@@ -2657,36 +2657,50 @@
         && String(stored.end_date) === vals.end_date
         && numOrNull(stored.rate_per_unit) === numOrNull(vals.rate_per_unit);
       const rowIsEmpty = (row) => !(row.service_code_id || row.authorized_units || row.rate_per_unit || row.end_date);
+      const codeOf = (row) => serviceCodes.find(sc => sc.id === row.service_code_id)?.code;
+      const blankRow = () => setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false });
+      const refreshUnconfirmed = (personId, onFileCodes = []) => {
+        const map = getPendingMap(personId);
+        setUnconfirmed(Object.entries(map).map(([code, e]) => ({ id: e.id, code, onFile: onFileCodes.includes(code) })));
+      };
 
-      // Did the unconfirmed attempt for this client land?
-      //   landed, screen row empty or identical → list reloads, key cleared, told.
-      //   landed, screen row differs → key KEPT: the next Add Auth replays into
-      //     the reconcile path, which applies the edits (or refuses) — the check
-      //     never clears an identity a pending resubmission still needs.
+      // Did the unconfirmed attempts for this client land? Checked ALL AT ONCE.
+      //   landed, screen row is for a different code or empty or identical →
+      //     that key cleared, list reloads, operator told
+      //   landed, screen row is the same code but differs → key KEPT (the next
+      //     Add Auth replays into reconcile, which applies the edits or refuses)
       //   not landed → key kept so a resubmission is idempotent. Unknown → kept.
-      const checkUnconfirmed = (personId, pend) => runExclusive(async () => {
-        if (!pend) { setUnconfirmed(null); return; }
+      const checkUnconfirmed = (personId) => runExclusive(async () => {
+        const map = getPendingMap(personId);
+        const entries = Object.entries(map);
+        if (entries.length === 0) { setUnconfirmed([]); return; }
         const { data, error } = await supabase.from("person_service_authorizations")
           .select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, status")
-          .eq("id", pend.id).limit(1);
-        if (error) { setUnconfirmed({ id: pend.id, code: pend.code }); return; }
-        if (data && data.length > 0) {
-          const row = newAuthRef.current; // live, not the render-time copy
-          const identical = rowIsEmpty(row) || (row.service_code_id && row.authorized_units && storedMatches(data[0], authValuesFromRow(row)));
-          await reloadAuths();
+          .in("id", entries.map(([, e]) => e.id));
+        if (error) { refreshUnconfirmed(personId); return; }
+        const landed = new Map((data || []).map(r => [r.id, r]));
+        const row = newAuthRef.current; // live, not the render-time copy
+        const rowCode = codeOf(row);
+        const onFileCodes = [];
+        let anyLanded = false;
+        for (const [code, e] of entries) {
+          const stored = landed.get(e.id);
+          if (!stored) continue; // not on file; key stays
+          anyLanded = true;
+          const sameCodeOnScreen = !rowIsEmpty(row) && rowCode === code;
+          const identical = !sameCodeOnScreen || (row.service_code_id && row.authorized_units && storedMatches(stored, authValuesFromRow(row)));
           if (identical) {
-            setPending(personId, null);
-            if (authAttemptId.current === pend.id) authAttemptId.current = null;
-            setUnconfirmed(null);
-            if (!rowIsEmpty(row)) setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false });
-            addToast(`The earlier ${pend.code || ""} authorization save did go through — it is in the list below`, "info");
+            setPendingCode(personId, code, null);
+            if (attemptIds.current[code] === e.id) delete attemptIds.current[code];
+            if (sameCodeOnScreen) blankRow();
+            addToast(`The earlier ${code} authorization save did go through — it is in the list below`, "info");
           } else {
-            setUnconfirmed({ id: pend.id, code: pend.code, onFile: true });
-            addToast(`The earlier ${pend.code || ""} authorization is on file — your row differs from it; press Add Auth to apply your edits to that row`, "info");
+            onFileCodes.push(code);
+            addToast(`The earlier ${code} authorization is on file — your row differs from it; press Add Auth to apply your edits to that row`, "info");
           }
-          return;
         }
-        setUnconfirmed({ id: pend.id, code: pend.code }); // not on file; the key stays so a resubmission is idempotent
+        if (anyLanded) await reloadAuths();
+        refreshUnconfirmed(personId, onFileCodes);
       });
 
       const persistNewAuth = () => {
@@ -2698,27 +2712,24 @@
         const row = newAuthRef.current; // the row as it is NOW (after any check/submission that ran before this turn)
         if (!row.service_code_id || !row.authorized_units) { if (!rowIsEmpty(row)) addToast("Select a service code and enter units", "error"); return false; }
         if (!editing) { addToast("Save the client first, then add authorizations", "warning"); return false; }
-        const rowCode = serviceCodes.find(sc => sc.id === row.service_code_id)?.code;
+        const rowCode = codeOf(row) || "";
         const rateErr = validateNewAuthRate(row, rowCode, perms);
         if (rateErr) { addToast(rateErr, "error"); return false; }
 
         const vals = authValuesFromRow(row);
-
-        // Identity: reuse the unconfirmed key only for the same service code (a
-        // different code is a different authorization; that key stays queued).
-        {
-          const pend = getPending(editing.id);
-          if (pend && authAttemptId.current === pend.id && pend.code && pend.code !== rowCode) authAttemptId.current = null;
-        }
-        const attemptId = authAttemptId.current || crypto.randomUUID(); // captured ONCE for this submission
-        authAttemptId.current = attemptId;
         const personId = editing.id;
-        const blankRow = () => setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false });
+
+        // Identity for THIS code: the unconfirmed key if one is on disk, else the
+        // in-memory one from a not-on-file failure, else brand new. Captured
+        // ONCE for this submission (r6).
+        const attemptId = getPendingMap(personId)[rowCode]?.id || attemptIds.current[rowCode] || crypto.randomUUID();
+        attemptIds.current[rowCode] = attemptId;
         const finish = async () => {
-          if (getPending(personId)?.id === attemptId) { setPending(personId, null); setUnconfirmed(null); }
+          setPendingCode(personId, rowCode, null);
+          if (attemptIds.current[rowCode] === attemptId) delete attemptIds.current[rowCode];
           await reloadAuths();
-          if (authAttemptId.current === attemptId) authAttemptId.current = null;
           blankRow();
+          refreshUnconfirmed(personId);
         };
 
         const payload = {
@@ -2739,15 +2750,15 @@
         // v20.0.10 (Greptile r3/r4) — resolve an ambiguous outcome against the
         // DB at the moment it arises instead of carrying it into a later retry
         // or a modal reopen: did THIS attempt id land?
-        //   false   → not on file (a real failure; the row stays on screen)
-        //   null    → could not check (network) — the row stays on screen, key kept
+        //   false   → not on file (a real failure; row stays, in-memory key kept)
+        //   null    → could not check (network) — row stays, key persisted to disk
         //   "kept"  → on file but cannot be reconciled; row kept on screen, toasted
         //   "exists"→ on file and reconciled/identical; row cleared, toasted
         const resolveAttempt = async () => {
           const { data: mine, error: chkErr } = await supabase.from("person_service_authorizations")
             .select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, status")
             .eq("id", attemptId).limit(1);
-          if (chkErr) { setPending(personId, { id: attemptId, code: rowCode, at: Date.now() }); setUnconfirmed({ id: attemptId, code: rowCode }); return null; }
+          if (chkErr) { setPendingCode(personId, rowCode, { id: attemptId, at: Date.now() }); refreshUnconfirmed(personId); return null; }
           if (!mine || mine.length === 0) return false;
           const stored = mine[0];
           const same = storedMatches(stored, vals);
@@ -2792,7 +2803,7 @@
           if (r === "exists") return "exists";
           if (r === "kept") return false;
           if (r === null) { addToast("Failed: " + error.message + " — and it could not be confirmed whether the authorization saved. Leave the row as is and press Add Auth again when the connection is back; it will not be duplicated.", "error"); return false; }
-          addToast("Failed: " + error.message, "error"); // not on file (incl. some other unique constraint); row stays
+          addToast("Failed: " + error.message, "error"); // not on file (incl. some other unique constraint); row stays, key kept for the retry
           return false;
         }
         if (!insertData || insertData.length === 0) { addToast("Insert blocked — check RLS policies on person_service_authorizations", "error"); return false; }
@@ -3071,12 +3082,14 @@
             <div style={{ marginTop: 8, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
               <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 12 }}>Service Authorizations</h3>
               {/* v20.0.10 (Greptile r5) — an unconfirmed attempt is visible state, not a hidden key */}
-              {unconfirmed && (
+              {unconfirmed.length > 0 && (
                 <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", marginBottom: 12, borderRadius: 8, background: `${CB.amber}12`, border: `1px solid ${CB.amber}50`, fontSize: 12, color: CB.text }}>
-                  <span style={{ flex: 1 }}>{unconfirmed.onFile
-                    ? <><strong style={{ color: CB.amber }}>On file:</strong> the earlier {unconfirmed.code || ""} authorization saved; your row differs from it. Press Add Auth to apply your edits to that row — nothing will be duplicated.</>
-                    : <><strong style={{ color: CB.amber }}>Unconfirmed save:</strong> an earlier {unconfirmed.code || ""} authorization could not be confirmed. If it is not in the list, submit it again — it will not be duplicated.</>}</span>
-                  <button onClick={() => checkUnconfirmed(editing.id, getPending(editing.id))} style={{ padding: "4px 10px", borderRadius: 6, border: `1px solid ${CB.amber}`, background: "transparent", color: CB.amber, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>Check now</button>
+                  <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4 }}>
+                    {unconfirmed.map(u => u.onFile
+                      ? <span key={u.id}><strong style={{ color: CB.amber }}>On file:</strong> the earlier {u.code} authorization saved; your row differs from it. Press Add Auth to apply your edits to that row — nothing will be duplicated.</span>
+                      : <span key={u.id}><strong style={{ color: CB.amber }}>Unconfirmed save:</strong> an earlier {u.code} authorization could not be confirmed. If it is not in the list, submit it again — it will not be duplicated.</span>)}
+                  </div>
+                  <button onClick={() => checkUnconfirmed(editing.id)} style={{ padding: "4px 10px", borderRadius: 6, border: `1px solid ${CB.amber}`, background: "transparent", color: CB.amber, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>Check now</button>
                 </div>
               )}
               {auths.length > 0 && (
