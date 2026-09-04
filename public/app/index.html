@@ -2557,7 +2557,14 @@
           setAuths([]);
         }
         setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false });
-        authAttemptId.current = null; // v20.0.10 (Greptile r1) — a new client/modal is a new attempt
+        // v20.0.10 (Greptile r1 → r5) — a new client/modal is a new attempt UNLESS
+        // this client has an unconfirmed attempt: then its key is restored so an
+        // unchanged resubmission replays instead of duplicating, and it is
+        // re-checked now.
+        const pend = getPending(editing?.id);
+        authAttemptId.current = pend?.id || null;
+        setUnconfirmed(null);
+        if (open && editing && pend) checkUnconfirmed(editing.id, pend);
       }, [editing, open]);
 
       const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
@@ -2585,6 +2592,37 @@
       // start date, different units / end date / negotiated rate).
       const authAttemptId = useRef(null);
       const isDuplicateKey = (err) => err && (err.code === "23505" || /duplicate key/i.test(err.message || ""));
+      // v20.0.10 (Greptile r5) — an UNCONFIRMED attempt (insert response lost
+      // AND the confirmation check failed) must keep its request identity
+      // across a modal reopen and a page refresh, or the operator's unchanged
+      // resubmission gets a fresh primary key and lands twice. Unconfirmed
+      // attempts are kept per person (localStorage-backed idempotency keys,
+      // 24h expiry — NOT render state; the visible notice below is React
+      // state set from these), re-checked on every open, and reused only for
+      // a resubmission of the SAME service code (a different code is a
+      // different authorization, and gets its own key while this one stays
+      // queued for resolution).
+      const PENDING_AUTH_KEY = "provly_pending_auth_attempts";
+      const readPending = () => { try { return JSON.parse(localStorage.getItem(PENDING_AUTH_KEY) || "{}"); } catch (_) { return {}; } };
+      const getPending = (personId) => { const m = readPending(); const p = personId && m[personId]; return (p && Date.now() - (p.at || 0) < 86400000) ? p : null; };
+      const setPending = (personId, entry) => { try { const m = readPending(); if (entry) m[personId] = entry; else delete m[personId]; localStorage.setItem(PENDING_AUTH_KEY, JSON.stringify(m)); } catch (_) {} };
+      const [unconfirmed, setUnconfirmed] = useState(null); // { id, code } for the open client, or null
+      // Did the unconfirmed attempt for this client land? Landed → list reloads,
+      // key cleared, operator told. Not landed → key kept for reuse. Unknown → kept.
+      const checkUnconfirmed = async (personId, pend) => {
+        if (!pend) { setUnconfirmed(null); return; }
+        const { data, error } = await supabase.from("person_service_authorizations").select("id").eq("id", pend.id).limit(1);
+        if (error) { setUnconfirmed({ id: pend.id, code: pend.code }); return; }
+        if (data && data.length > 0) {
+          setPending(personId, null);
+          if (authAttemptId.current === pend.id) authAttemptId.current = null;
+          setUnconfirmed(null);
+          await reloadAuths();
+          addToast(`The earlier ${pend.code || ""} authorization save did go through — it is in the list below`, "info");
+          return;
+        }
+        setUnconfirmed({ id: pend.id, code: pend.code }); // not on file; the key stays so a resubmission is idempotent
+      };
       const persistNewAuth = async () => {
         if (!newAuth.service_code_id || !newAuth.authorized_units) { addToast("Select a service code and enter units", "error"); return false; }
         if (!editing) { addToast("Save the client first, then add authorizations", "warning"); return false; }
@@ -2599,6 +2637,10 @@
           endDate = d.toISOString().split("T")[0];
         }
 
+        {
+          const pend = getPending(editing.id);
+          if (pend && authAttemptId.current === pend.id && pend.code && pend.code !== newAuthCode) authAttemptId.current = null; // different auth than the unconfirmed one — fresh key, that one stays queued
+        }
         if (!authAttemptId.current) authAttemptId.current = crypto.randomUUID();
         const payload = {
           id: authAttemptId.current,
@@ -2630,7 +2672,7 @@
           const { data: mine, error: chkErr } = await supabase.from("person_service_authorizations")
             .select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, status")
             .eq("id", authAttemptId.current).limit(1);
-          if (chkErr) return null;
+          if (chkErr) { setPending(editing.id, { id: authAttemptId.current, code: newAuthCode, at: Date.now() }); setUnconfirmed({ id: authAttemptId.current, code: newAuthCode }); return null; }
           if (!mine || mine.length === 0) return false;
           const stored = mine[0];
           const numOrNull = (v) => (v === null || v === undefined || v === "") ? null : Number(v);
@@ -2664,6 +2706,7 @@
               return "kept";
             }
           }
+          if (getPending(editing.id)?.id === authAttemptId.current) { setPending(editing.id, null); setUnconfirmed(null); }
           await reloadAuths();
           authAttemptId.current = null;
           setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false });
@@ -2685,13 +2728,14 @@
           const r = await resolveAttempt();
           if (r === "exists") return "exists";
           if (r === "kept") return false;
-          if (r === null) { addToast("Failed: " + error.message + " — and it could not be confirmed whether the authorization saved. Reopen this client to see the current list before retrying.", "error"); return false; }
+          if (r === null) { addToast("Failed: " + error.message + " — and it could not be confirmed whether the authorization saved. Leave the row as is and press Add Auth again when the connection is back; it will not be duplicated.", "error"); return false; }
           if (isDuplicateKey(error)) { addToast("Failed: " + error.message, "error"); return false; } // some other unique constraint; row stays
           addToast("Failed: " + error.message, "error");
           return false;
         }
         if (!insertData || insertData.length === 0) { addToast("Insert blocked — check RLS policies on person_service_authorizations", "error"); return false; }
 
+        if (getPending(editing.id)?.id === authAttemptId.current) { setPending(editing.id, null); setUnconfirmed(null); }
         await reloadAuths();
         authAttemptId.current = null;
         setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false });
@@ -2966,6 +3010,13 @@
           {editing && (
             <div style={{ marginTop: 8, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
               <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 12 }}>Service Authorizations</h3>
+              {/* v20.0.10 (Greptile r5) — an unconfirmed attempt is visible state, not a hidden key */}
+              {unconfirmed && (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", marginBottom: 12, borderRadius: 8, background: `${CB.amber}12`, border: `1px solid ${CB.amber}50`, fontSize: 12, color: CB.text }}>
+                  <span style={{ flex: 1 }}><strong style={{ color: CB.amber }}>Unconfirmed save:</strong> an earlier {unconfirmed.code || ""} authorization could not be confirmed. If it is not in the list, submit it again — it will not be duplicated.</span>
+                  <button onClick={() => checkUnconfirmed(editing.id, getPending(editing.id))} style={{ padding: "4px 10px", borderRadius: 6, border: `1px solid ${CB.amber}`, background: "transparent", color: CB.amber, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>Check now</button>
+                </div>
+              )}
               {auths.length > 0 && (
                 <div style={{ marginBottom: 16 }}>
                   {auths.map(a => {
