@@ -2619,6 +2619,18 @@
       //      identity of a submission that is still running, and a submission
       //      started during a check waits for the check's verdict.
       const authBusy = useRef(null);
+      // v20.0.10 (Greptile r7) — a queued submission must act on the row AS IT
+      // IS when it gets its turn, not as it was when the click happened. A rapid
+      // second Add Auth used to wait its turn, then faithfully re-submit the
+      // render-time copy of a row the first submission had already saved and
+      // cleared — with a fresh id, because the first had handed the ref back.
+      // Two rules: (1) a submission that finds another submission in flight is
+      // a double-click and is DROPPED, never queued; (2) every task reads the
+      // row through this live mirror after it acquires its turn, so a row that
+      // was saved and blanked meanwhile is seen as blank.
+      const newAuthRef = useRef(newAuth); newAuthRef.current = newAuth;
+      const submitInFlight = useRef(false);
+      const [authSubmitting, setAuthSubmitting] = useState(false);
       const runExclusive = async (fn) => {
         while (authBusy.current) { try { await authBusy.current; } catch (_) { /* the other task reports its own errors */ } }
         const p = (async () => fn())();
@@ -2659,13 +2671,14 @@
           .eq("id", pend.id).limit(1);
         if (error) { setUnconfirmed({ id: pend.id, code: pend.code }); return; }
         if (data && data.length > 0) {
-          const identical = rowIsEmpty(newAuth) || (newAuth.service_code_id && newAuth.authorized_units && storedMatches(data[0], authValuesFromRow(newAuth)));
+          const row = newAuthRef.current; // live, not the render-time copy
+          const identical = rowIsEmpty(row) || (row.service_code_id && row.authorized_units && storedMatches(data[0], authValuesFromRow(row)));
           await reloadAuths();
           if (identical) {
             setPending(personId, null);
             if (authAttemptId.current === pend.id) authAttemptId.current = null;
             setUnconfirmed(null);
-            if (!rowIsEmpty(newAuth)) setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false });
+            if (!rowIsEmpty(row)) setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false });
             addToast(`The earlier ${pend.code || ""} authorization save did go through — it is in the list below`, "info");
           } else {
             setUnconfirmed({ id: pend.id, code: pend.code, onFile: true });
@@ -2676,19 +2689,26 @@
         setUnconfirmed({ id: pend.id, code: pend.code }); // not on file; the key stays so a resubmission is idempotent
       });
 
-      const persistNewAuth = () => runExclusive(async () => {
-        if (!newAuth.service_code_id || !newAuth.authorized_units) { addToast("Select a service code and enter units", "error"); return false; }
+      const persistNewAuth = () => {
+        if (submitInFlight.current) return Promise.resolve(false); // v20.0.10 (Greptile r7) — double-click, not a second authorization
+        submitInFlight.current = true; setAuthSubmitting(true);
+        return runExclusive(persistNewAuthInner).finally(() => { submitInFlight.current = false; setAuthSubmitting(false); });
+      };
+      const persistNewAuthInner = async () => {
+        const row = newAuthRef.current; // the row as it is NOW (after any check/submission that ran before this turn)
+        if (!row.service_code_id || !row.authorized_units) { if (!rowIsEmpty(row)) addToast("Select a service code and enter units", "error"); return false; }
         if (!editing) { addToast("Save the client first, then add authorizations", "warning"); return false; }
-        const rateErr = validateNewAuthRate(newAuth, newAuthCode, perms);
+        const rowCode = serviceCodes.find(sc => sc.id === row.service_code_id)?.code;
+        const rateErr = validateNewAuthRate(row, rowCode, perms);
         if (rateErr) { addToast(rateErr, "error"); return false; }
 
-        const vals = authValuesFromRow(newAuth);
+        const vals = authValuesFromRow(row);
 
         // Identity: reuse the unconfirmed key only for the same service code (a
         // different code is a different authorization; that key stays queued).
         {
           const pend = getPending(editing.id);
-          if (pend && authAttemptId.current === pend.id && pend.code && pend.code !== newAuthCode) authAttemptId.current = null;
+          if (pend && authAttemptId.current === pend.id && pend.code && pend.code !== rowCode) authAttemptId.current = null;
         }
         const attemptId = authAttemptId.current || crypto.randomUUID(); // captured ONCE for this submission
         authAttemptId.current = attemptId;
@@ -2727,7 +2747,7 @@
           const { data: mine, error: chkErr } = await supabase.from("person_service_authorizations")
             .select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, status")
             .eq("id", attemptId).limit(1);
-          if (chkErr) { setPending(personId, { id: attemptId, code: newAuthCode, at: Date.now() }); setUnconfirmed({ id: attemptId, code: newAuthCode }); return null; }
+          if (chkErr) { setPending(personId, { id: attemptId, code: rowCode, at: Date.now() }); setUnconfirmed({ id: attemptId, code: rowCode }); return null; }
           if (!mine || mine.length === 0) return false;
           const stored = mine[0];
           const same = storedMatches(stored, vals);
@@ -2779,7 +2799,7 @@
 
         await finish();
         return true;
-      });
+      };
 
       const reloadAuths = async () => {
         const { data: authData } = await supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code)").eq("person_id", editing.id);
@@ -2814,6 +2834,7 @@
       };
 
       const handleSave = async () => {
+        if (saving) return; // v20.0.10 (Greptile r7) — reentrancy guard; a second click while saving is a double-click
         if (!form.first_name?.trim() || !form.last_name?.trim()) return addToast("First and last name are required", "error");
         // v20.0.6 — medicaid_number is OPTIONAL (Tombé: providers often don't
         // have it yet at intake; blocking the save blocks recording reality —
@@ -3140,7 +3161,7 @@
                   <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>End Date</label>
                   <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} type="date" value={newAuth.end_date} onChange={e => setNewAuth(p => ({ ...p, end_date: e.target.value }))} />
                 </div>
-                <button onClick={addAuth} style={{
+                <button onClick={addAuth} disabled={authSubmitting} style={{ opacity: authSubmitting ? 0.6 : 1,
                   padding: "9px 16px", borderRadius: 10, border: `2px dashed ${CB.blue}`,
                   background: `${CB.blue}08`, color: CB.blue, fontSize: 13, fontWeight: 700,
                   cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap", marginBottom: 16,
