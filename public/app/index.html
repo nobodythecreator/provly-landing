@@ -2615,12 +2615,39 @@
         if (error && isDuplicateKey(error)) {
           // Verify it is OUR replay (the attempt id landed) rather than some
           // other unique constraint — never clear a row on an assumption.
-          const { data: mine } = await supabase.from("person_service_authorizations").select("id").eq("id", authAttemptId.current).limit(1);
+          const { data: mine } = await supabase.from("person_service_authorizations")
+            .select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, status")
+            .eq("id", authAttemptId.current).limit(1);
           if (!mine || mine.length === 0) { addToast("Failed: " + error.message, "error"); return false; }
+          // v20.0.10 (Greptile r3) — a replay is only "equivalent" if the row on
+          // screen still says what the committed row says. The operator may have
+          // edited units / dates / rate between the lost response and the retry;
+          // those edits are what they mean to save. So: identical → done;
+          // different → reconcile the committed row TO the screen (it is their
+          // own row, seconds old, nothing billed against it yet); if it has
+          // already been used against, refuse and keep the row on screen.
+          const stored = mine[0];
+          const numOrNull = (v) => (v === null || v === undefined || v === "") ? null : Number(v);
+          const same = stored.service_code_id === payload.service_code_id
+            && Number(stored.authorized_units) === payload.authorized_units
+            && String(stored.start_date) === payload.start_date
+            && String(stored.end_date) === payload.end_date
+            && numOrNull(stored.rate_per_unit) === numOrNull(payload.rate_per_unit);
+          if (!same) {
+            const { service_code_id, authorized_units, start_date, end_date, rate_per_unit, status } = payload;
+            const { data: fixed, error: fixErr } = await supabase.from("person_service_authorizations")
+              .update({ service_code_id, authorized_units, start_date, end_date, rate_per_unit, status })
+              .eq("id", stored.id).eq("used_units", 0).select("id");
+            if (fixErr) { addToast("Your earlier attempt saved this authorization, but your edits could not be applied: " + fixErr.message, "error"); return false; }
+            if (!fixed || fixed.length === 0) {
+              addToast("Your earlier attempt saved this authorization and units have already been logged against it — your edits were NOT applied. Review the saved row below.", "error");
+              return false; // row stays on screen exactly as typed
+            }
+          }
           await reloadAuths();
           authAttemptId.current = null;
           setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false });
-          addToast("That authorization is already on file — nothing was duplicated", "info");
+          addToast(same ? "Authorization saved — your earlier attempt had already gone through" : "Authorization saved with your latest edits (your earlier attempt had gone through)", "success");
           return "exists";
         }
         if (error) { addToast("Failed: " + error.message, "error"); return false; }
