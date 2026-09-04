@@ -2537,6 +2537,14 @@
             phone: editing.phone || "",
           });
           setAuths(editing.person_service_authorizations || []);
+          // v20.0.10 (Greptile r4) — the prop is a snapshot taken when the list
+          // loaded; an insert whose response was lost is NOT in it. Reopening the
+          // modal must show what is actually on file, or the operator re-enters
+          // an authorization that already landed. Fetch live.
+          if (open) supabase.from("person_service_authorizations")
+            .select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code)")
+            .eq("person_id", editing.id)
+            .then(({ data }) => { if (data) setAuths(data); });
         } else {
           setForm({
             first_name: "", last_name: "", date_of_birth: "", medicaid_number: "", identification_number: "", is_active: true,
@@ -2611,21 +2619,19 @@
           status: deriveAuthStatus(endDate),
         };
 
-        const { error, data: insertData } = await supabase.from("person_service_authorizations").insert(payload).select();
-        if (error && isDuplicateKey(error)) {
-          // Verify it is OUR replay (the attempt id landed) rather than some
-          // other unique constraint — never clear a row on an assumption.
-          const { data: mine } = await supabase.from("person_service_authorizations")
+        // v20.0.10 (Greptile r3/r4) — resolve an ambiguous outcome against the
+        // DB at the moment it arises instead of carrying it into a later retry
+        // or a modal reopen: did THIS attempt id land?
+        //   false   → not on file (a real failure; the row stays on screen)
+        //   null    → could not check (network) — the row stays on screen
+        //   "kept"  → on file but cannot be reconciled; row kept on screen, toasted
+        //   "exists"→ on file and reconciled/identical; row cleared, toasted
+        const resolveAttempt = async () => {
+          const { data: mine, error: chkErr } = await supabase.from("person_service_authorizations")
             .select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, status")
             .eq("id", authAttemptId.current).limit(1);
-          if (!mine || mine.length === 0) { addToast("Failed: " + error.message, "error"); return false; }
-          // v20.0.10 (Greptile r3) — a replay is only "equivalent" if the row on
-          // screen still says what the committed row says. The operator may have
-          // edited units / dates / rate between the lost response and the retry;
-          // those edits are what they mean to save. So: identical → done;
-          // different → reconcile the committed row TO the screen (it is their
-          // own row, seconds old, nothing billed against it yet); if it has
-          // already been used against, refuse and keep the row on screen.
+          if (chkErr) return null;
+          if (!mine || mine.length === 0) return false;
           const stored = mine[0];
           const numOrNull = (v) => (v === null || v === undefined || v === "") ? null : Number(v);
           const same = stored.service_code_id === payload.service_code_id
@@ -2634,14 +2640,28 @@
             && String(stored.end_date) === payload.end_date
             && numOrNull(stored.rate_per_unit) === numOrNull(payload.rate_per_unit);
           if (!same) {
-            const { service_code_id, authorized_units, start_date, end_date, rate_per_unit, status } = payload;
+            // The operator edited units / dates / rate between the lost response
+            // and the retry; those edits are what they mean to save, and the row
+            // is their own, seconds old. Reconcile the committed row TO the
+            // screen — but a reconcile is a data correction, never a decision:
+            // it does not touch a status a human set (rejected / pending), and
+            // it refuses outright on a rejected authorization or one that has
+            // already been used against.
+            if (stored.status === "rejected") {
+              addToast("Your earlier attempt saved this authorization and it has since been REJECTED — your edits were not applied. Review the saved row below.", "error");
+              return "kept";
+            }
+            const { service_code_id, authorized_units, start_date, end_date, rate_per_unit } = payload;
+            const fix = { service_code_id, authorized_units, start_date, end_date, rate_per_unit };
+            // status was written by the app on the original insert (approved / expired);
+            // only re-derive it when it still holds an app-written value.
+            if (stored.status === "approved" || stored.status === "expired") fix.status = deriveAuthStatus(end_date);
             const { data: fixed, error: fixErr } = await supabase.from("person_service_authorizations")
-              .update({ service_code_id, authorized_units, start_date, end_date, rate_per_unit, status })
-              .eq("id", stored.id).eq("used_units", 0).select("id");
-            if (fixErr) { addToast("Your earlier attempt saved this authorization, but your edits could not be applied: " + fixErr.message, "error"); return false; }
+              .update(fix).eq("id", stored.id).eq("used_units", 0).neq("status", "rejected").select("id");
+            if (fixErr) { addToast("Your earlier attempt saved this authorization, but your edits could not be applied: " + fixErr.message, "error"); return "kept"; }
             if (!fixed || fixed.length === 0) {
-              addToast("Your earlier attempt saved this authorization and units have already been logged against it — your edits were NOT applied. Review the saved row below.", "error");
-              return false; // row stays on screen exactly as typed
+              addToast("Your earlier attempt saved this authorization and it has since changed (units logged or status set) — your edits were NOT applied. Review the saved row below.", "error");
+              return "kept";
             }
           }
           await reloadAuths();
@@ -2649,8 +2669,27 @@
           setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false });
           addToast(same ? "Authorization saved — your earlier attempt had already gone through" : "Authorization saved with your latest edits (your earlier attempt had gone through)", "success");
           return "exists";
+        };
+
+        let insertRes;
+        try {
+          insertRes = await supabase.from("person_service_authorizations").insert(payload).select();
+        } catch (netErr) {
+          insertRes = { error: { message: netErr?.message || "network error", code: "NETWORK" } };
         }
-        if (error) { addToast("Failed: " + error.message, "error"); return false; }
+        const { error, data: insertData } = insertRes;
+        if (error) {
+          // Duplicate key on OUR id = replay. Any OTHER error may still have
+          // committed (response lost) — check before declaring failure, so the
+          // truth is known now, not discovered as a twin after a reopen.
+          const r = await resolveAttempt();
+          if (r === "exists") return "exists";
+          if (r === "kept") return false;
+          if (r === null) { addToast("Failed: " + error.message + " — and it could not be confirmed whether the authorization saved. Reopen this client to see the current list before retrying.", "error"); return false; }
+          if (isDuplicateKey(error)) { addToast("Failed: " + error.message, "error"); return false; } // some other unique constraint; row stays
+          addToast("Failed: " + error.message, "error");
+          return false;
+        }
         if (!insertData || insertData.length === 0) { addToast("Insert blocked — check RLS policies on person_service_authorizations", "error"); return false; }
 
         await reloadAuths();
