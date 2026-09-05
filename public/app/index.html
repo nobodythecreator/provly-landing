@@ -2601,6 +2601,10 @@
       // Invariant: at most one live identity per (client, code) — a same-code
       // resubmission always reuses it, so two identities for one code cannot
       // exist. A different code never touches another code's key.
+      // v20.0.10 (Greptile r9) — an identity whose request turns out to have
+      // committed DIFFERENT values than the current row is RELEASED and the
+      // operator decides (correct the committed row, or add a separate one);
+      // it is never reconciled — a same-code row may be a distinct authorization.
       const isDuplicateKey = (err) => err && (err.code === "23505" || /duplicate key/i.test(err.message || ""));
       const attemptIds = useRef({}); // { [code]: id } for the open client
       const PENDING_AUTH_KEY = "provly_pending_auth_attempts";
@@ -2619,7 +2623,7 @@
           localStorage.setItem(PENDING_AUTH_KEY, JSON.stringify(m));
         } catch (_) {}
       };
-      const [unconfirmed, setUnconfirmed] = useState([]); // [{ id, code, onFile? }] for the open client
+      const [unconfirmed, setUnconfirmed] = useState([]); // [{ id, code }] for the open client
 
       // v20.0.10 (Greptile r6) — the request identity is never read from a
       // shared mutable place mid-flight: a submission captures its attempt id
@@ -2659,16 +2663,15 @@
       const rowIsEmpty = (row) => !(row.service_code_id || row.authorized_units || row.rate_per_unit || row.end_date);
       const codeOf = (row) => serviceCodes.find(sc => sc.id === row.service_code_id)?.code;
       const blankRow = () => setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false });
-      const refreshUnconfirmed = (personId, onFileCodes = []) => {
+      const refreshUnconfirmed = (personId) => {
         const map = getPendingMap(personId);
-        setUnconfirmed(Object.entries(map).map(([code, e]) => ({ id: e.id, code, onFile: onFileCodes.includes(code) })));
+        setUnconfirmed(Object.entries(map).map(([code, e]) => ({ id: e.id, code })));
       };
 
       // Did the unconfirmed attempts for this client land? Checked ALL AT ONCE.
-      //   landed, screen row is for a different code or empty or identical →
-      //     that key cleared, list reloads, operator told
-      //   landed, screen row is the same code but differs → key KEPT (the next
-      //     Add Auth replays into reconcile, which applies the edits or refuses)
+      //   landed → that key released, list reloads, operator told; an identical
+      //     same-code row on screen is cleared, a differing one stays with the
+      //     two-option guidance (r9: never reconciled over)
       //   not landed → key kept so a resubmission is idempotent. Unknown → kept.
       const checkUnconfirmed = (personId) => runExclusive(async () => {
         const map = getPendingMap(personId);
@@ -2681,26 +2684,28 @@
         const landed = new Map((data || []).map(r => [r.id, r]));
         const row = newAuthRef.current; // live, not the render-time copy
         const rowCode = codeOf(row);
-        const onFileCodes = [];
         let anyLanded = false;
         for (const [code, e] of entries) {
           const stored = landed.get(e.id);
           if (!stored) continue; // not on file; key stays
           anyLanded = true;
+          // v20.0.10 (Greptile r9) — a landed attempt is RESOLVED: its identity is
+          // released whatever the screen shows. An identical same-code row on
+          // screen is the replay and is cleared; a differing same-code row stays
+          // with the two-option guidance (correct the committed row, or add a
+          // separate one) — never reconciled over it.
+          setPendingCode(personId, code, null);
+          if (attemptIds.current[code] === e.id) delete attemptIds.current[code];
           const sameCodeOnScreen = !rowIsEmpty(row) && rowCode === code;
-          const identical = !sameCodeOnScreen || (row.service_code_id && row.authorized_units && storedMatches(stored, authValuesFromRow(row)));
-          if (identical) {
-            setPendingCode(personId, code, null);
-            if (attemptIds.current[code] === e.id) delete attemptIds.current[code];
-            if (sameCodeOnScreen) blankRow();
-            addToast(`The earlier ${code} authorization save did go through — it is in the list below`, "info");
+          if (sameCodeOnScreen && row.service_code_id && row.authorized_units && storedMatches(stored, authValuesFromRow(row))) blankRow();
+          if (sameCodeOnScreen && !(row.service_code_id && row.authorized_units && storedMatches(stored, authValuesFromRow(row)))) {
+            addToast(`The earlier ${code} authorization is on file (below) and differs from your row. To correct it: remove that row, then press Add Auth. To add a separate ${code} authorization: press Add Auth.`, "warning");
           } else {
-            onFileCodes.push(code);
-            addToast(`The earlier ${code} authorization is on file — your row differs from it; press Add Auth to apply your edits to that row`, "info");
+            addToast(`The earlier ${code} authorization save did go through — it is in the list below`, "info");
           }
         }
         if (anyLanded) await reloadAuths();
-        refreshUnconfirmed(personId, onFileCodes);
+        refreshUnconfirmed(personId);
       });
 
       const persistNewAuth = () => {
@@ -2752,8 +2757,9 @@
         // or a modal reopen: did THIS attempt id land?
         //   false   → not on file (a real failure; row stays, in-memory key kept)
         //   null    → could not check (network) — row stays, key persisted to disk
-        //   "kept"  → on file but cannot be reconciled; row kept on screen, toasted
-        //   "exists"→ on file and reconciled/identical; row cleared, toasted
+        //   "kept"  → on file with DIFFERENT values; identity released, row kept
+        //             on screen, operator told the two options (never reconciled)
+        //   "exists"→ on file and identical; row cleared, toasted
         const resolveAttempt = async () => {
           const { data: mine, error: chkErr } = await supabase.from("person_service_authorizations")
             .select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, status")
@@ -2763,28 +2769,24 @@
           const stored = mine[0];
           const same = storedMatches(stored, vals);
           if (!same) {
-            // The operator edited units / dates / rate between the lost response
-            // and the retry; those edits are what they mean to save, and the row
-            // is their own. Reconcile the committed row TO the screen — but a
-            // reconcile is a data correction, never a decision: it does not
-            // touch a status a human set (rejected / pending), and it refuses
-            // outright on a rejected authorization or one already used against.
-            if (stored.status === "rejected") {
-              addToast("Your earlier attempt saved this authorization and it has since been REJECTED — your edits were not applied. Review the saved row below.", "error");
-              return "kept";
-            }
-            const fix = { ...vals };
-            if (stored.status === "approved" || stored.status === "expired") fix.status = deriveAuthStatus(vals.end_date);
-            const { data: fixed, error: fixErr } = await supabase.from("person_service_authorizations")
-              .update(fix).eq("id", stored.id).eq("used_units", 0).neq("status", "rejected").select("id");
-            if (fixErr) { addToast("Your earlier attempt saved this authorization, but your edits could not be applied: " + fixErr.message, "error"); return "kept"; }
-            if (!fixed || fixed.length === 0) {
-              addToast("Your earlier attempt saved this authorization and it has since changed (units logged or status set) — your edits were NOT applied. Review the saved row below.", "error");
-              return "kept";
-            }
+            // v20.0.10 (Greptile r9) — the earlier request (same identity) committed
+            // DIFFERENT values than the row on screen. That is one of two things
+            // and the app cannot tell which: a correction of that row, or a
+            // DISTINCT authorization with the same code (legitimate — r2). The
+            // r3 reconcile guessed "correction" and could silently REPLACE a
+            // committed authorization. Never guess: release this identity, show
+            // the committed row, keep the operator's row on screen, and say
+            // exactly what the two options are. A following Add Auth gets a
+            // fresh identity and inserts a separate record.
+            setPendingCode(personId, rowCode, null);
+            if (attemptIds.current[rowCode] === attemptId) delete attemptIds.current[rowCode];
+            await reloadAuths();
+            refreshUnconfirmed(personId);
+            addToast(`Your earlier ${rowCode} authorization is on file (shown below) and differs from this row. To CORRECT it: remove that row, then press Add Auth. To add this as a SEPARATE ${rowCode} authorization: press Add Auth again.`, "warning");
+            return "kept";
           }
           await finish();
-          addToast(same ? "Authorization saved — your earlier attempt had already gone through" : "Authorization saved with your latest edits (your earlier attempt had gone through)", "success");
+          addToast("Authorization saved — your earlier attempt had already gone through", "success");
           return "exists";
         };
 
@@ -3085,9 +3087,7 @@
               {unconfirmed.length > 0 && (
                 <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", marginBottom: 12, borderRadius: 8, background: `${CB.amber}12`, border: `1px solid ${CB.amber}50`, fontSize: 12, color: CB.text }}>
                   <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4 }}>
-                    {unconfirmed.map(u => u.onFile
-                      ? <span key={u.id}><strong style={{ color: CB.amber }}>On file:</strong> the earlier {u.code} authorization saved; your row differs from it. Press Add Auth to apply your edits to that row — nothing will be duplicated.</span>
-                      : <span key={u.id}><strong style={{ color: CB.amber }}>Unconfirmed save:</strong> an earlier {u.code} authorization could not be confirmed. If it is not in the list, submit it again — it will not be duplicated.</span>)}
+                    {unconfirmed.map(u => <span key={u.id}><strong style={{ color: CB.amber }}>Unconfirmed save:</strong> an earlier {u.code} authorization could not be confirmed. If it is not in the list, submit it again exactly as before — it will not be duplicated.</span>)}
                   </div>
                   <button onClick={() => checkUnconfirmed(editing.id)} style={{ padding: "4px 10px", borderRadius: 6, border: `1px solid ${CB.amber}`, background: "transparent", color: CB.amber, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>Check now</button>
                 </div>
