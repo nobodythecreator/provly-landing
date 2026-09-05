@@ -2615,13 +2615,21 @@
         const out = {}; Object.entries(raw).forEach(([code, e]) => { if (e && e.id && Date.now() - (e.at || 0) < 86400000) out[code] = e; });
         return out;
       };
+      // v20.0.10 (Greptile r15) — the write-ahead key is only worth anything if
+      // it actually persisted. Storage can refuse (quota, private mode, site
+      // storage blocked); a swallowed failure would let the request go out
+      // with no durable identity — the exact state r13 exists to prevent.
+      // So the write is VERIFIED by reading it back, and reports success; the
+      // caller refuses to dispatch when it is false.
       const setPendingCode = (personId, code, entry) => {
         try {
           const m = readPendingAll(); const cur = (m[personId] && typeof m[personId] === "object") ? m[personId] : {};
           if (entry) cur[code] = entry; else delete cur[code];
           if (Object.keys(cur).length) m[personId] = cur; else delete m[personId];
           localStorage.setItem(PENDING_AUTH_KEY, JSON.stringify(m));
-        } catch (_) {}
+          const back = readPendingAll()[personId]?.[code];
+          return entry ? (!!back && back.id === entry.id) : !back;
+        } catch (_) { return false; }
       };
       const [unconfirmed, setUnconfirmed] = useState([]); // [{ id, code }] for the open client
 
@@ -2752,7 +2760,12 @@
         // BEFORE the request goes out (r13) — from this point the key exists
         // until proof of outcome, whatever happens to this tab.
         const attemptId = getPendingMap(personId)[rowCode]?.id || crypto.randomUUID();
-        setPendingCode(personId, rowCode, { id: attemptId, at: Date.now() });
+        if (!setPendingCode(personId, rowCode, { id: attemptId, at: Date.now() })) {
+          // r15 — no durable identity → no request. Sending anyway would make a
+          // lost-response retry unrecognizable, i.e. a duplicate.
+          addToast("This browser cannot store the save-safety key (site storage is blocked or full), so the authorization was NOT sent — it could otherwise be duplicated on a retry. Enable site storage or free some space, then press Add Auth again.", "error");
+          return false;
+        }
         const finish = async (provenRow) => {
           mergeAuthRow(personId, provenRow); // r14 — visible from the proof itself; a failed refresh cannot hide it
           setPendingCode(personId, rowCode, null); // proof: on file
