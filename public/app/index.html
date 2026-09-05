@@ -2558,7 +2558,6 @@
         // this client has an unconfirmed attempt: then its key is restored so an
         // unchanged resubmission replays instead of duplicating, and it is
         // re-checked now.
-        attemptIds.current = {}; // r8 — in-memory identities are per open client
         if (open && editing) { refreshUnconfirmed(editing.id); checkUnconfirmed(editing.id); } else setUnconfirmed([]);
       }, [editing, open]);
 
@@ -2585,16 +2584,21 @@
       // intact; the r1 unique index on (person, code, start) was dropped —
       // it rejected legitimately distinct authorizations (same code and
       // start date, different units / end date / negotiated rate).
-      // v20.0.10 (Greptile r8) — request identity is keyed per (client, SERVICE
-      // CODE), not per client. Keeping one identity per client meant a second
-      // unconfirmed save for the same person overwrote the first's key; a
-      // retry of the first then minted a fresh id and landed twice. Now every
-      // unresolved attempt keeps its own key for as long as it is unresolved:
-      //   attemptIds (memory)  — one id per code for the open client; survives a
-      //                          not-on-file failure so the retry replays
-      //   pending store (disk) — the UNCONFIRMED subset (insert response lost
-      //                          AND the confirmation check failed); survives
-      //                          reopen + refresh; 24h expiry; re-checked on open
+      // v20.0.10 (Greptile r13) — WRITE-AHEAD request identity. The rounds
+      // before this one all patched the same flaw from different angles: the
+      // client decided WHEN it was safe to forget a request identity (after a
+      // "not on file" check, after a reopen, after a client switch...). No
+      // client-side check can ever decide that — a request can commit AFTER
+      // any check. So the client no longer decides. Rule:
+      //   the key for a submission is written to disk BEFORE the request is
+      //   sent, and is removed only on PROOF of outcome: the row is confirmed
+      //   on file (success response, replay, or the on-open check), or the
+      //   server answered with a definitive rejection (a DB error is returned
+      //   only after the statement failed — it cannot have committed).
+      //   A request with NO answer (network / timeout) keeps its key, full
+      //   stop — across retries, reopen, refresh — until one of the above.
+      // Keys are per (client, SERVICE CODE) (r8): a second unconfirmed save for
+      // the same person never overwrites the first's key. 24h expiry.
       // Invariant: at most one live identity per (client, code) — a same-code
       // resubmission always reuses it, so two identities for one code cannot
       // exist. A different code never touches another code's key.
@@ -2603,7 +2607,6 @@
       // operator decides (correct the committed row, or add a separate one);
       // it is never reconciled — a same-code row may be a distinct authorization.
       const isDuplicateKey = (err) => err && (err.code === "23505" || /duplicate key/i.test(err.message || ""));
-      const attemptIds = useRef({}); // { [code]: id } for the open client
       const PENDING_AUTH_KEY = "provly_pending_auth_attempts";
       const readPendingAll = () => { try { return JSON.parse(localStorage.getItem(PENDING_AUTH_KEY) || "{}"); } catch (_) { return {}; } };
       // → { [code]: { id, at } } for one client, expired entries dropped
@@ -2703,7 +2706,6 @@
           // with the two-option guidance (correct the committed row, or add a
           // separate one) — never reconciled over it.
           setPendingCode(personId, code, null);
-          if (attemptIds.current[code] === e.id) delete attemptIds.current[code];
           const sameCodeOnScreen = !rowIsEmpty(row) && rowCode === code;
           if (sameCodeOnScreen && row.service_code_id && row.authorized_units && storedMatches(stored, authValuesFromRow(row))) blankRow();
           if (sameCodeOnScreen && !(row.service_code_id && row.authorized_units && storedMatches(stored, authValuesFromRow(row)))) {
@@ -2743,14 +2745,15 @@
         const vals = authValuesFromRow(row);
         const personId = snapshot.personId;
 
-        // Identity for THIS code: the unconfirmed key if one is on disk, else the
-        // in-memory one from a not-on-file failure, else brand new. Captured
-        // ONCE for this submission (r6).
-        const attemptId = getPendingMap(personId)[rowCode]?.id || attemptIds.current[rowCode] || crypto.randomUUID();
-        attemptIds.current[rowCode] = attemptId;
+        // Identity for THIS code: the key already on disk for (client, code) if
+        // one exists (an earlier attempt without proof of outcome), else brand
+        // new. Captured ONCE for this submission (r6) and WRITTEN TO DISK
+        // BEFORE the request goes out (r13) — from this point the key exists
+        // until proof of outcome, whatever happens to this tab.
+        const attemptId = getPendingMap(personId)[rowCode]?.id || crypto.randomUUID();
+        setPendingCode(personId, rowCode, { id: attemptId, at: Date.now() });
         const finish = async () => {
-          setPendingCode(personId, rowCode, null);
-          if (attemptIds.current[rowCode] === attemptId) delete attemptIds.current[rowCode];
+          setPendingCode(personId, rowCode, null); // proof: on file
           await reloadAuths(personId);
           if (editingRef.current?.id === personId) blankRow(); // r11 — never blank another client's row
           refreshUnconfirmed(personId);
@@ -2783,8 +2786,8 @@
           const { data: mine, error: chkErr } = await supabase.from("person_service_authorizations")
             .select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, status")
             .eq("id", attemptId).limit(1);
-          if (chkErr) { setPendingCode(personId, rowCode, { id: attemptId, at: Date.now() }); refreshUnconfirmed(personId); return null; }
-          if (!mine || mine.length === 0) return false;
+          if (chkErr) { refreshUnconfirmed(personId); return null; } // key already on disk (write-ahead)
+          if (!mine || mine.length === 0) return false; // not on file NOW — not proof it never will be; key stays
           const stored = mine[0];
           const same = storedMatches(stored, vals);
           if (!same) {
@@ -2797,8 +2800,7 @@
             // the committed row, keep the operator's row on screen, and say
             // exactly what the two options are. A following Add Auth gets a
             // fresh identity and inserts a separate record.
-            setPendingCode(personId, rowCode, null);
-            if (attemptIds.current[rowCode] === attemptId) delete attemptIds.current[rowCode];
+            setPendingCode(personId, rowCode, null); // proof: on file (as different values)
             await reloadAuths(personId);
             refreshUnconfirmed(personId);
             addToast(`Your earlier ${rowCode} authorization is on file (shown below) and differs from this row. To CORRECT it: remove that row, then press Add Auth. To add this as a SEPARATE ${rowCode} authorization: press Add Auth again.`, "warning");
@@ -2817,14 +2819,29 @@
         }
         const { error, data: insertData } = insertRes;
         if (error) {
-          // Duplicate key on OUR id = replay. Any OTHER error may still have
-          // committed (response lost) — check before declaring failure, so the
-          // truth is known now, not discovered as a twin after a reopen.
+          if (isDuplicateKey(error)) {
+            // Replay of OUR key (or another unique constraint) — resolve against the DB.
+            const r = await resolveAttempt();
+            if (r === "exists") return "exists";
+            if (r === "kept") return false;
+            if (r === false) { setPendingCode(personId, rowCode, null); addToast("Failed: " + error.message, "error"); return false; } // some other unique constraint: definitive, nothing committed
+            addToast("Failed: " + error.message + " — and it could not be confirmed whether the authorization saved. Leave the row as is and press Add Auth again; it will not be duplicated.", "error");
+            return false;
+          }
+          if (error.code && error.code !== "NETWORK") {
+            // The server ANSWERED with an error: the statement failed, nothing
+            // committed. That is proof of outcome — release the key.
+            setPendingCode(personId, rowCode, null);
+            addToast("Failed: " + error.message, "error");
+            return false;
+          }
+          // NO ANSWER (network / timeout). It may have committed. Try to find out
+          // now; but whatever the answer, the key stays until proof (r13).
           const r = await resolveAttempt();
           if (r === "exists") return "exists";
           if (r === "kept") return false;
-          if (r === null) { addToast("Failed: " + error.message + " — and it could not be confirmed whether the authorization saved. Leave the row as is and press Add Auth again when the connection is back; it will not be duplicated.", "error"); return false; }
-          addToast("Failed: " + error.message, "error"); // not on file (incl. some other unique constraint); row stays, key kept for the retry
+          refreshUnconfirmed(personId);
+          addToast("Failed: " + error.message + " — it could not be confirmed whether the authorization saved. Leave the row as is and press Add Auth again when the connection is back; it will not be duplicated.", "error");
           return false;
         }
         if (!insertData || insertData.length === 0) { addToast("Insert blocked — check RLS policies on person_service_authorizations", "error"); return false; }
