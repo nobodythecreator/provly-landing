@@ -2838,10 +2838,20 @@
       // after the operator switched clients must not replace (or clear) the
       // list of the client now open. The person id is captured at call time
       // and checked against the live open client at write time.
+      // v20.0.10 (Greptile r12) — reloads for the SAME client can resolve out
+      // of order (the on-open fetch is slow; the post-save reload is fast). An
+      // older result must never paint over a newer one, or a just-saved
+      // authorization vanishes from the list and gets re-entered. Every reload
+      // takes a sequence number when it STARTS; a result is applied only if no
+      // newer reload has started since. Any local list edit bumps the sequence
+      // so an in-flight older reload cannot resurrect what was removed.
+      const authListSeq = useRef(0);
       const reloadAuths = async (personId = editingRef.current?.id) => {
         if (!personId) return;
+        const seq = ++authListSeq.current;
         const { data: authData, error } = await supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code)").eq("person_id", personId);
         if (error) return; // keep what is shown rather than blank the list on a failed refresh
+        if (seq !== authListSeq.current) return; // superseded — a newer reload started; its result wins
         if (editingRef.current?.id !== personId) return; // stale — a different client is open now
         setAuths(authData || []);
       };
@@ -2870,8 +2880,10 @@
         const personId = editingRef.current?.id; // r11 — the client this row was removed from
         const { error } = await supabase.from("person_service_authorizations").delete().eq("id", authId);
         if (error) return addToast(error.message, "error");
+        authListSeq.current++; // r12 — invalidate any in-flight reload that could resurrect the removed row
         if (editingRef.current?.id === personId) setAuths(prev => prev.filter(a => a.id !== authId));
         addToast("Authorization removed", "success");
+        reloadAuths(personId); // converge on the server's list
       };
 
       const handleSave = async () => {
