@@ -2541,10 +2541,7 @@
           // loaded; an insert whose response was lost is NOT in it. Reopening the
           // modal must show what is actually on file, or the operator re-enters
           // an authorization that already landed. Fetch live.
-          if (open) supabase.from("person_service_authorizations")
-            .select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code)")
-            .eq("person_id", editing.id)
-            .then(({ data }) => { if (data) setAuths(data); });
+          if (open) reloadAuths(editing.id); // r11 — bound to this client; ignored if another is open by the time it resolves
         } else {
           setForm({
             first_name: "", last_name: "", date_of_birth: "", medicaid_number: "", identification_number: "", is_active: true,
@@ -2673,6 +2670,7 @@
       const codeOf = (row) => serviceCodes.find(sc => sc.id === row.service_code_id)?.code;
       const blankRow = () => setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false });
       const refreshUnconfirmed = (personId) => {
+        if (editingRef.current?.id !== personId) return; // r11 — never paint another client's notice
         const map = getPendingMap(personId);
         setUnconfirmed(Object.entries(map).map(([code, e]) => ({ id: e.id, code })));
       };
@@ -2714,7 +2712,7 @@
             addToast(`The earlier ${code} authorization save did go through — it is in the list below`, "info");
           }
         }
-        if (anyLanded) await reloadAuths();
+        if (anyLanded) await reloadAuths(personId);
         refreshUnconfirmed(personId);
       });
 
@@ -2753,8 +2751,8 @@
         const finish = async () => {
           setPendingCode(personId, rowCode, null);
           if (attemptIds.current[rowCode] === attemptId) delete attemptIds.current[rowCode];
-          await reloadAuths();
-          blankRow();
+          await reloadAuths(personId);
+          if (editingRef.current?.id === personId) blankRow(); // r11 — never blank another client's row
           refreshUnconfirmed(personId);
         };
 
@@ -2801,7 +2799,7 @@
             // fresh identity and inserts a separate record.
             setPendingCode(personId, rowCode, null);
             if (attemptIds.current[rowCode] === attemptId) delete attemptIds.current[rowCode];
-            await reloadAuths();
+            await reloadAuths(personId);
             refreshUnconfirmed(personId);
             addToast(`Your earlier ${rowCode} authorization is on file (shown below) and differs from this row. To CORRECT it: remove that row, then press Add Auth. To add this as a SEPARATE ${rowCode} authorization: press Add Auth again.`, "warning");
             return "kept";
@@ -2835,8 +2833,16 @@
         return true;
       };
 
-      const reloadAuths = async () => {
-        const { data: authData } = await supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code)").eq("person_id", editing.id);
+      // v20.0.10 (Greptile r11) — every write to the on-screen authorization
+      // list is bound to the client it was fetched for. A reload that resolves
+      // after the operator switched clients must not replace (or clear) the
+      // list of the client now open. The person id is captured at call time
+      // and checked against the live open client at write time.
+      const reloadAuths = async (personId = editingRef.current?.id) => {
+        if (!personId) return;
+        const { data: authData, error } = await supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code)").eq("person_id", personId);
+        if (error) return; // keep what is shown rather than blank the list on a failed refresh
+        if (editingRef.current?.id !== personId) return; // stale — a different client is open now
         setAuths(authData || []);
       };
 
@@ -2856,14 +2862,15 @@
         const { error } = await supabase.from("person_service_authorizations").update({ rate_per_unit: parseFloat(typed) }).eq("id", a.id);
         if (error) return addToast(error.message, "error");
         setRateDraft(prev => { const n = { ...prev }; delete n[a.id]; return n; });
-        await reloadAuths();
+        await reloadAuths(a.person_id || editingRef.current?.id);
         addToast(`Rate set for ${code}`, "success");
       };
 
       const removeAuth = async (authId) => {
+        const personId = editingRef.current?.id; // r11 — the client this row was removed from
         const { error } = await supabase.from("person_service_authorizations").delete().eq("id", authId);
         if (error) return addToast(error.message, "error");
-        setAuths(prev => prev.filter(a => a.id !== authId));
+        if (editingRef.current?.id === personId) setAuths(prev => prev.filter(a => a.id !== authId));
         addToast("Authorization removed", "success");
       };
 
