@@ -2635,6 +2635,15 @@
       // gets its turn (live mirror), and a submission that finds another
       // submission in flight is a double-click: dropped, never queued.
       const newAuthRef = useRef(newAuth); newAuthRef.current = newAuth;
+      // v20.0.10 (Greptile r10) — a queued task is bound to the CLIENT and the
+      // ROW that were on screen when the operator acted. r7 made queued work
+      // read the live row so a saved-and-blanked row is not re-sent; r10 closes
+      // the other half: the live row must belong to the SAME client the click
+      // was for, and must still equal what the click saw. A submission whose
+      // context changed while it waited (client switched, row edited/cleared)
+      // is dropped without a write — never a live row under a captured person,
+      // never a captured row under a live person.
+      const editingRef = useRef(editing); editingRef.current = editing;
       const submitInFlight = useRef(false);
       const [authSubmitting, setAuthSubmitting] = useState(false);
       const runExclusive = async (fn) => {
@@ -2674,6 +2683,7 @@
       //     two-option guidance (r9: never reconciled over)
       //   not landed → key kept so a resubmission is idempotent. Unknown → kept.
       const checkUnconfirmed = (personId) => runExclusive(async () => {
+        if (editingRef.current?.id !== personId) return; // r10 — client changed while queued; that client's own open-check handles its keys
         const map = getPendingMap(personId);
         const entries = Object.entries(map);
         if (entries.length === 0) { setUnconfirmed([]); return; }
@@ -2710,19 +2720,30 @@
 
       const persistNewAuth = () => {
         if (submitInFlight.current) return Promise.resolve(false); // v20.0.10 (Greptile r7) — double-click, not a second authorization
+        // r10 — capture what the operator acted on, at the moment they acted
+        const snapshot = { personId: editingRef.current?.id || null, row: { ...newAuthRef.current } };
         submitInFlight.current = true; setAuthSubmitting(true);
-        return runExclusive(persistNewAuthInner).finally(() => { submitInFlight.current = false; setAuthSubmitting(false); });
+        return runExclusive(() => persistNewAuthInner(snapshot)).finally(() => { submitInFlight.current = false; setAuthSubmitting(false); });
       };
-      const persistNewAuthInner = async () => {
-        const row = newAuthRef.current; // the row as it is NOW (after any check/submission that ran before this turn)
+      const rowFields = ["service_code_id", "authorized_units", "start_date", "end_date", "rate_per_unit", "rate_pending"];
+      const sameRow = (a, b) => rowFields.every(k => String(a?.[k] ?? "") === String(b?.[k] ?? ""));
+      const persistNewAuthInner = async (snapshot) => {
+        // r10 — the context this click was made in must still be the context on
+        // screen when its turn comes. Client switched → drop, say so. Row no
+        // longer what the click saw → drop (silently if it is now blank, i.e.
+        // a prior task already saved it; with a toast if it was edited).
+        const liveClient = editingRef.current;
+        const live = newAuthRef.current;
+        if (!snapshot.personId || liveClient?.id !== snapshot.personId) { addToast("The client changed since you pressed Add Auth — nothing was saved. Press Add Auth again for this client.", "warning"); return false; }
+        if (!sameRow(live, snapshot.row)) { if (!rowIsEmpty(live)) addToast("The authorization row changed since you pressed Add Auth — nothing was saved. Press Add Auth again.", "warning"); return false; }
+        const row = snapshot.row; // == live, and known to belong to snapshot.personId
         if (!row.service_code_id || !row.authorized_units) { if (!rowIsEmpty(row)) addToast("Select a service code and enter units", "error"); return false; }
-        if (!editing) { addToast("Save the client first, then add authorizations", "warning"); return false; }
         const rowCode = codeOf(row) || "";
         const rateErr = validateNewAuthRate(row, rowCode, perms);
         if (rateErr) { addToast(rateErr, "error"); return false; }
 
         const vals = authValuesFromRow(row);
-        const personId = editing.id;
+        const personId = snapshot.personId;
 
         // Identity for THIS code: the unconfirmed key if one is on disk, else the
         // in-memory one from a not-on-file failure, else brand new. Captured
