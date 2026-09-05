@@ -97,6 +97,32 @@ WHERE status IN ('pending'::authorization_status, 'approved'::authorization_stat
 DROP INDEX IF EXISTS public.uq_psa_person_code_start;
 
 
+-- ── Greptile r16: server-side identical-row guard (authoritative dedupe) ────
+-- The client's write-ahead identity covers a lost-response retry from the
+-- same browser. It cannot cover a retry after the operator dismissed the key,
+-- a second tab that raced identity allocation where Web Locks is unavailable,
+-- or a second operator. The database can: two authorizations that are
+-- IDENTICAL in every material field — client, service code, start, end,
+-- units, rate — are a duplicate by definition (r2's legitimately distinct
+-- rows differ in at least one of those). rate_per_unit is nullable, so it is
+-- indexed as coalesce(rate, -1) to make two null-rate twins collide too.
+-- Created only when no such identical groups already exist; the verification
+-- block reports the count — resolve those rows deliberately, then re-run.
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM public.person_service_authorizations
+    GROUP BY person_id, service_code_id, start_date, end_date, authorized_units, coalesce(rate_per_unit, -1)
+    HAVING count(*) > 1
+  ) THEN
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_psa_identical
+      ON public.person_service_authorizations (person_id, service_code_id, start_date, end_date, authorized_units, (coalesce(rate_per_unit, -1)));
+  END IF;
+END
+$$;
+
+
 -- ── Item 2: service codes new on DHHS91172 (effective 7/1/2026) ─────────────
 -- The service-code dropdowns read service_code_definitions, so BILLING_RULES
 -- entries alone don't make SJD / SJR / SJP selectable. Several columns are
@@ -167,6 +193,14 @@ SELECT 'service code present: ' || code, name
 UNION ALL
 SELECT 'psa r1 unique index (want 0 — dropped)', count(*)::text
   FROM pg_indexes WHERE indexname = 'uq_psa_person_code_start'
+UNION ALL
+SELECT 'psa identical duplicate groups (want 0)', count(*)::text
+  FROM (SELECT 1 FROM public.person_service_authorizations
+         GROUP BY person_id, service_code_id, start_date, end_date, authorized_units, coalesce(rate_per_unit, -1)
+         HAVING count(*) > 1) d
+UNION ALL
+SELECT 'psa identical guard index (want 1)', count(*)::text
+  FROM pg_indexes WHERE indexname = 'uq_psa_identical'
 UNION ALL
 SELECT 'evv trigger events', string_agg(event_manipulation, '+' ORDER BY event_manipulation)
   FROM information_schema.triggers WHERE trigger_name = 'trg_evv_sessions_preserve_originals'

@@ -2612,7 +2612,10 @@
       // → { [code]: { id, at } } for one client, expired entries dropped
       const getPendingMap = (personId) => {
         const m = readPendingAll(); const raw = personId && m[personId]; if (!raw || typeof raw !== "object") return {};
-        const out = {}; Object.entries(raw).forEach(([code, e]) => { if (e && e.id && Date.now() - (e.at || 0) < 86400000) out[code] = e; });
+        // r16 — no age-based expiry: elapsed time is not proof of outcome. A key
+        // is released by proof (on file / definitive rejection) or by the
+        // operator's explicit Dismiss — never by the clock.
+        const out = {}; Object.entries(raw).forEach(([code, e]) => { if (e && e.id) out[code] = e; });
         return out;
       };
       // v20.0.10 (Greptile r15) — the write-ahead key is only worth anything if
@@ -2736,6 +2739,18 @@
       };
       const rowFields = ["service_code_id", "authorized_units", "start_date", "end_date", "rate_per_unit", "rate_pending"];
       const sameRow = (a, b) => rowFields.every(k => String(a?.[k] ?? "") === String(b?.[k] ?? ""));
+      // v20.0.10 (Greptile r16) — two TABS can race the same (client, code):
+      // both read an empty key, mint different ids, both pass their own
+      // read-back, both insert. authBusy/submitInFlight are per component
+      // instance and cannot see another tab. The Web Locks API can: identity
+      // allocation + dispatch run under a lock named for (client, code), so a
+      // second tab re-reads storage under the lock, finds the first tab's key,
+      // and replays it (PK conflict → the established resolve path). Where the
+      // API is absent the code runs unlocked; the identical-row guard index in
+      // sql/v20.0.10.sql is the authoritative backstop either way.
+      const withCrossTabLock = (key, fn) => (typeof navigator !== "undefined" && navigator.locks && navigator.locks.request)
+        ? navigator.locks.request(key, fn)
+        : fn();
       const persistNewAuthInner = async (snapshot) => {
         // r10 — the context this click was made in must still be the context on
         // screen when its turn comes. Client switched → drop, say so. Row no
@@ -2753,12 +2768,12 @@
 
         const vals = authValuesFromRow(row);
         const personId = snapshot.personId;
-
+        return withCrossTabLock(`provly-auth:${personId}:${rowCode}`, async () => {
         // Identity for THIS code: the key already on disk for (client, code) if
         // one exists (an earlier attempt without proof of outcome), else brand
-        // new. Captured ONCE for this submission (r6) and WRITTEN TO DISK
-        // BEFORE the request goes out (r13) — from this point the key exists
-        // until proof of outcome, whatever happens to this tab.
+        // new. Captured ONCE for this submission (r6), WRITTEN TO DISK BEFORE
+        // the request goes out (r13), and — under the cross-tab lock (r16) —
+        // re-read here so a key another tab just wrote is reused, not raced.
         const attemptId = getPendingMap(personId)[rowCode]?.id || crypto.randomUUID();
         if (!setPendingCode(personId, rowCode, { id: attemptId, at: Date.now() })) {
           // r15 — no durable identity → no request. Sending anyway would make a
@@ -2835,6 +2850,18 @@
         }
         const { error, data: insertData } = insertRes;
         if (error) {
+          if (isDuplicateKey(error) && /uq_psa_identical/i.test(error.message || "")) {
+            // r16 — the server's identical-row guard: an authorization identical in
+            // every material field is already on file for this client (a lost-
+            // response retry after the key was dismissed, another tab, another
+            // operator). That IS the row the operator meant; nothing to add.
+            const { data: twin } = await supabase.from("person_service_authorizations")
+              .select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code)")
+              .eq("person_id", personId).eq("service_code_id", vals.service_code_id).eq("start_date", vals.start_date).eq("end_date", vals.end_date).eq("authorized_units", vals.authorized_units).limit(1);
+            await finish(twin?.[0]);
+            addToast(`An identical ${rowCode} authorization is already on file for this client — nothing was duplicated`, "info");
+            return "exists";
+          }
           if (isDuplicateKey(error)) {
             // Replay of OUR key (or another unique constraint) — resolve against the DB.
             const r = await resolveAttempt();
@@ -2864,6 +2891,7 @@
 
         await finish(insertData[0]);
         return true;
+        }); // withCrossTabLock
       };
 
       // v20.0.10 (Greptile r11) — every write to the on-screen authorization
@@ -3175,6 +3203,8 @@
                     {unconfirmed.map(u => <span key={u.id}><strong style={{ color: CB.amber }}>Unconfirmed save:</strong> an earlier {u.code} authorization could not be confirmed. If it is not in the list, submit it again exactly as before — it will not be duplicated.</span>)}
                   </div>
                   <button onClick={() => checkUnconfirmed(editing.id)} style={{ padding: "4px 10px", borderRadius: 6, border: `1px solid ${CB.amber}`, background: "transparent", color: CB.amber, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>Check now</button>
+                  {/* r16 — keys never expire by age; an operator may discard one deliberately. The identical-row guard still stops a duplicate if the save had in fact gone through. */}
+                  <button onClick={() => { if (window.confirm("Discard the unconfirmed save key(s) for this client? If that save had actually gone through, the identical-row guard will still stop a duplicate when you re-enter it.")) { unconfirmed.forEach(u => setPendingCode(editing.id, u.code, null)); refreshUnconfirmed(editing.id); } }} style={{ padding: "4px 10px", borderRadius: 6, border: `1px solid ${CB.border}`, background: "transparent", color: CB.textLight, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>Dismiss</button>
                 </div>
               )}
               {auths.length > 0 && (
