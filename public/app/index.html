@@ -2704,13 +2704,18 @@
           .in("id", entries.map(([, e]) => e.id));
         if (error) { refreshUnconfirmed(personId); return; }
         const landed = new Map((data || []).map(r => [r.id, r]));
-        const row = newAuthRef.current; // live, not the render-time copy
+        // r18 — the client may have changed DURING the await above. Keys are
+        // per-person data and may be released on proof for that person, but no
+        // screen effect (blank row, toast, list) may touch a different client.
+        const screenIsThisClient = editingRef.current?.id === personId;
+        const row = screenIsThisClient ? newAuthRef.current : { service_code_id: "", authorized_units: "", start_date: "", end_date: "", rate_per_unit: "", rate_pending: false };
         const rowCode = codeOf(row);
         let anyLanded = false;
         for (const [code, e] of entries) {
           const stored = landed.get(e.id);
           if (!stored) continue; // not on file; key stays
           anyLanded = true;
+          if (!screenIsThisClient) { setPendingCode(personId, code, null); continue; } // proof → release; nothing on screen is ours
           // v20.0.10 (Greptile r9) — a landed attempt is RESOLVED: its identity is
           // released whatever the screen shows. An identical same-code row on
           // screen is the replay and is cleared; a differing same-code row stays
@@ -2855,12 +2860,28 @@
             // every material field is already on file for this client (a lost-
             // response retry after the key was dismissed, another tab, another
             // operator). That IS the row the operator meant; nothing to add.
-            const { data: twin } = await supabase.from("person_service_authorizations")
+            // r18 — the lookup must match the FULL material tuple, rate included:
+            // a same-tuple row with a DIFFERENT rate is a legitimately distinct
+            // authorization (r2) and must never be presented as "the match".
+            let twinQ = supabase.from("person_service_authorizations")
               .select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code)")
-              .eq("person_id", personId).eq("service_code_id", vals.service_code_id).eq("start_date", vals.start_date).eq("end_date", vals.end_date).eq("authorized_units", vals.authorized_units).limit(1);
-            await finish(twin?.[0]);
-            addToast(`An identical ${rowCode} authorization is already on file for this client — nothing was duplicated`, "info");
-            return "exists";
+              .eq("person_id", personId).eq("service_code_id", vals.service_code_id).eq("start_date", vals.start_date).eq("end_date", vals.end_date).eq("authorized_units", vals.authorized_units);
+            twinQ = vals.rate_per_unit === null ? twinQ.is("rate_per_unit", null) : twinQ.eq("rate_per_unit", vals.rate_per_unit);
+            const { data: twin } = await twinQ.limit(1);
+            // The rejection is a DEFINITIVE server answer (nothing committed under
+            // this id) — the key is released (r13). But the on-screen row is only
+            // cleared when the identical row was actually RETRIEVED and shown;
+            // an empty lookup (RLS, transient error) clears nothing.
+            setPendingCode(personId, rowCode, null);
+            if (twin && twin.length > 0) {
+              await finish(twin[0]);
+              addToast(`An identical ${rowCode} authorization is already on file for this client — nothing was duplicated`, "info");
+              return "exists";
+            }
+            refreshUnconfirmed(personId);
+            await reloadAuths(personId);
+            addToast(`An identical ${rowCode} authorization is already on file for this client (nothing was duplicated), but it could not be retrieved just now — your row was left as typed. Check the list below.`, "warning");
+            return false;
           }
           if (isDuplicateKey(error)) {
             // Replay of OUR key (or another unique constraint) — resolve against the DB.
