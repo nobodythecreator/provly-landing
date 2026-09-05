@@ -2705,6 +2705,7 @@
           // screen is the replay and is cleared; a differing same-code row stays
           // with the two-option guidance (correct the committed row, or add a
           // separate one) — never reconciled over it.
+          mergeAuthRow(personId, stored); // r14 — shown from the check's own result
           setPendingCode(personId, code, null);
           const sameCodeOnScreen = !rowIsEmpty(row) && rowCode === code;
           if (sameCodeOnScreen && row.service_code_id && row.authorized_units && storedMatches(stored, authValuesFromRow(row))) blankRow();
@@ -2752,11 +2753,12 @@
         // until proof of outcome, whatever happens to this tab.
         const attemptId = getPendingMap(personId)[rowCode]?.id || crypto.randomUUID();
         setPendingCode(personId, rowCode, { id: attemptId, at: Date.now() });
-        const finish = async () => {
+        const finish = async (provenRow) => {
+          mergeAuthRow(personId, provenRow); // r14 — visible from the proof itself; a failed refresh cannot hide it
           setPendingCode(personId, rowCode, null); // proof: on file
-          await reloadAuths(personId);
           if (editingRef.current?.id === personId) blankRow(); // r11 — never blank another client's row
           refreshUnconfirmed(personId);
+          await reloadAuths(personId); // converge (may fail harmlessly — the row is already shown)
         };
 
         const payload = {
@@ -2800,13 +2802,14 @@
             // the committed row, keep the operator's row on screen, and say
             // exactly what the two options are. A following Add Auth gets a
             // fresh identity and inserts a separate record.
+            mergeAuthRow(personId, stored); // r14 — shown from the lookup itself
             setPendingCode(personId, rowCode, null); // proof: on file (as different values)
-            await reloadAuths(personId);
             refreshUnconfirmed(personId);
+            await reloadAuths(personId);
             addToast(`Your earlier ${rowCode} authorization is on file (shown below) and differs from this row. To CORRECT it: remove that row, then press Add Auth. To add this as a SEPARATE ${rowCode} authorization: press Add Auth again.`, "warning");
             return "kept";
           }
-          await finish();
+          await finish(stored);
           addToast("Authorization saved — your earlier attempt had already gone through", "success");
           return "exists";
         };
@@ -2846,7 +2849,7 @@
         }
         if (!insertData || insertData.length === 0) { addToast("Insert blocked — check RLS policies on person_service_authorizations", "error"); return false; }
 
-        await finish();
+        await finish(insertData[0]);
         return true;
       };
 
@@ -2863,6 +2866,18 @@
       // newer reload has started since. Any local list edit bumps the sequence
       // so an in-flight older reload cannot resurrect what was removed.
       const authListSeq = useRef(0);
+      // v20.0.10 (Greptile r14) — a row the client has PROOF of (the insert
+      // response, a replay lookup, or the on-open check) goes into the list
+      // from that proof, immediately and locally — never via a refresh that
+      // can fail. A failed post-save refresh used to leave the list stale, so
+      // the just-saved authorization was invisible and got re-entered. The
+      // merge also bumps the list sequence so an older in-flight reload cannot
+      // paint the row back out; a fresh reload then converges on the server.
+      const mergeAuthRow = (personId, row) => {
+        if (!row || editingRef.current?.id !== personId) return;
+        authListSeq.current++;
+        setAuths(prev => prev.some(a => a.id === row.id) ? prev.map(a => a.id === row.id ? { ...a, ...row } : a) : [...prev, row]);
+      };
       const reloadAuths = async (personId = editingRef.current?.id) => {
         if (!personId) return;
         const seq = ++authListSeq.current;
