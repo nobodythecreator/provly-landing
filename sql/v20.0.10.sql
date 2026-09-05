@@ -97,27 +97,79 @@ WHERE status IN ('pending'::authorization_status, 'approved'::authorization_stat
 DROP INDEX IF EXISTS public.uq_psa_person_code_start;
 
 
--- ── Greptile r16: server-side identical-row guard (authoritative dedupe) ────
+-- ── Greptile r16/r17: server-side identical-row guard (authoritative dedupe) ─
 -- The client's write-ahead identity covers a lost-response retry from the
 -- same browser. It cannot cover a retry after the operator dismissed the key,
--- a second tab that raced identity allocation where Web Locks is unavailable,
--- or a second operator. The database can: two authorizations that are
--- IDENTICAL in every material field — client, service code, start, end,
--- units, rate — are a duplicate by definition (r2's legitimately distinct
--- rows differ in at least one of those). rate_per_unit is nullable, so it is
--- indexed as coalesce(rate, -1) to make two null-rate twins collide too.
--- Created only when no such identical groups already exist; the verification
--- block reports the count — resolve those rows deliberately, then re-run.
+-- a second tab where Web Locks is unavailable, or a second operator. The
+-- database can: two authorizations IDENTICAL in every material field —
+-- client, service code, start, end, units, rate — are a duplicate by
+-- definition (r2's legitimately distinct rows differ in at least one).
+-- rate_per_unit is nullable, so it is compared as coalesce(rate, -1).
+--
+-- Two layers (r17): a unique index can only be created on a table with no
+-- legacy identical groups, and an install that HAS them must not be left
+-- unguarded. So:
+--   1. a BEFORE INSERT trigger is ALWAYS installed. It serializes identical
+--      tuples with a transaction-scoped advisory lock (so two concurrent
+--      inserts cannot both pass the check) and raises unique_violation
+--      (SQLSTATE 23505) with the same message shape as the index, so the
+--      app handles both identically. It guards NEW rows regardless of
+--      legacy data.
+--   2. the unique index is created when no identical groups exist; when
+--      they do, a NOTICE names the count and the migration continues — the
+--      trigger holds the line until the groups are resolved and this file is
+--      re-run.
+
+CREATE OR REPLACE FUNCTION public.psa_reject_identical()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  -- Serialize on the material tuple: a concurrent identical insert waits here
+  -- until this transaction ends, then sees the committed row in its own check.
+  PERFORM pg_advisory_xact_lock(hashtext(
+    NEW.person_id::text || '|' || NEW.service_code_id::text || '|' ||
+    NEW.start_date::text || '|' || coalesce(NEW.end_date::text, '') || '|' ||
+    NEW.authorized_units::text || '|' || coalesce(NEW.rate_per_unit, -1)::text));
+
+  IF EXISTS (
+    SELECT 1 FROM public.person_service_authorizations p
+     WHERE p.person_id = NEW.person_id
+       AND p.service_code_id = NEW.service_code_id
+       AND p.start_date = NEW.start_date
+       AND p.end_date IS NOT DISTINCT FROM NEW.end_date
+       AND p.authorized_units = NEW.authorized_units
+       AND coalesce(p.rate_per_unit, -1) = coalesce(NEW.rate_per_unit, -1)
+       AND p.id <> NEW.id
+  ) THEN
+    RAISE unique_violation
+      USING MESSAGE = 'duplicate key value violates unique constraint "uq_psa_identical"',
+            DETAIL  = 'An authorization identical in every material field already exists for this client.';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+DROP TRIGGER IF EXISTS trg_psa_reject_identical ON public.person_service_authorizations;
+CREATE TRIGGER trg_psa_reject_identical
+  BEFORE INSERT ON public.person_service_authorizations
+  FOR EACH ROW
+  EXECUTE FUNCTION public.psa_reject_identical();
 
 DO $$
+DECLARE
+  dup_groups integer;
 BEGIN
-  IF NOT EXISTS (
+  SELECT count(*) INTO dup_groups FROM (
     SELECT 1 FROM public.person_service_authorizations
     GROUP BY person_id, service_code_id, start_date, end_date, authorized_units, coalesce(rate_per_unit, -1)
     HAVING count(*) > 1
-  ) THEN
+  ) d;
+  IF dup_groups = 0 THEN
     CREATE UNIQUE INDEX IF NOT EXISTS uq_psa_identical
       ON public.person_service_authorizations (person_id, service_code_id, start_date, end_date, authorized_units, (coalesce(rate_per_unit, -1)));
+  ELSE
+    RAISE NOTICE 'uq_psa_identical NOT created: % identical authorization group(s) already exist. The trg_psa_reject_identical trigger guards new rows meanwhile. Resolve the groups (see the verification block), then re-run this file.', dup_groups;
   END IF;
 END
 $$;
@@ -201,6 +253,9 @@ SELECT 'psa identical duplicate groups (want 0)', count(*)::text
 UNION ALL
 SELECT 'psa identical guard index (want 1)', count(*)::text
   FROM pg_indexes WHERE indexname = 'uq_psa_identical'
+UNION ALL
+SELECT 'psa identical guard trigger (want 1)', count(*)::text
+  FROM pg_trigger WHERE tgname = 'trg_psa_reject_identical'
 UNION ALL
 SELECT 'evv trigger events', string_agg(event_manipulation, '+' ORDER BY event_manipulation)
   FROM information_schema.triggers WHERE trigger_name = 'trg_evv_sessions_preserve_originals'
