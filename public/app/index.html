@@ -2934,7 +2934,15 @@
       // takes a sequence number when it STARTS; a result is applied only if no
       // newer reload has started since. Any local list edit bumps the sequence
       // so an in-flight older reload cannot resurrect what was removed.
-      const authListSeq = useRef(0);
+      // r22 — list generations are PER CLIENT. A single shared counter let a
+      // stale reload for client A (invoked late, after B was opened) bump the
+      // generation and thereby supersede B's own in-flight reload: A's result
+      // was rejected as stale, B's valid result was rejected as superseded, and
+      // B kept an outdated list. Now a reload for a client that is no longer
+      // open is rejected BEFORE it spends a generation, and generations never
+      // cross clients.
+      const authListSeq = useRef({}); // { [personId]: generation }
+      const nextListGen = (personId) => { authListSeq.current[personId] = (authListSeq.current[personId] || 0) + 1; return authListSeq.current[personId]; };
       // v20.0.10 (Greptile r14) — a row the client has PROOF of (the insert
       // response, a replay lookup, or the on-open check) goes into the list
       // from that proof, immediately and locally — never via a refresh that
@@ -2944,15 +2952,16 @@
       // paint the row back out; a fresh reload then converges on the server.
       const mergeAuthRow = (personId, row) => {
         if (!row || editingRef.current?.id !== personId) return;
-        authListSeq.current++;
+        nextListGen(personId);
         setAuths(prev => prev.some(a => a.id === row.id) ? prev.map(a => a.id === row.id ? { ...a, ...row } : a) : [...prev, row]);
       };
       const reloadAuths = async (personId = editingRef.current?.id) => {
         if (!personId) return;
-        const seq = ++authListSeq.current;
+        if (editingRef.current?.id !== personId) return; // r22 — stale before it starts: spend no generation, touch nothing
+        const seq = nextListGen(personId);
         const { data: authData, error } = await supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code)").eq("person_id", personId);
         if (error) return; // keep what is shown rather than blank the list on a failed refresh
-        if (seq !== authListSeq.current) return; // superseded — a newer reload started; its result wins
+        if (seq !== authListSeq.current[personId]) return; // superseded — a newer reload for THIS client started; its result wins
         if (editingRef.current?.id !== personId) return; // stale — a different client is open now
         setAuths(authData || []);
       };
@@ -2981,7 +2990,7 @@
         const personId = editingRef.current?.id; // r11 — the client this row was removed from
         const { error } = await supabase.from("person_service_authorizations").delete().eq("id", authId);
         if (error) return addToast(error.message, "error");
-        authListSeq.current++; // r12 — invalidate any in-flight reload that could resurrect the removed row
+        if (personId) nextListGen(personId); // r12/r22 — invalidate any in-flight reload for THIS client that could resurrect the removed row
         if (editingRef.current?.id === personId) setAuths(prev => prev.filter(a => a.id !== authId));
         addToast("Authorization removed", "success");
         reloadAuths(personId); // converge on the server's list
