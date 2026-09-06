@@ -2789,7 +2789,14 @@
         const finish = async (provenRow) => {
           mergeAuthRow(personId, provenRow); // r14 — visible from the proof itself; a failed refresh cannot hide it
           setPendingCode(personId, rowCode, null); // proof: on file
-          if (editingRef.current?.id === personId) blankRow(); // r11 — never blank another client's row
+          // r11 — never blank another client's row. r20 — and never blank a row
+          // the operator has EDITED while this request was in flight: the row is
+          // cleared only if it still says exactly what this submission sent;
+          // otherwise the newer values stay on screen and the operator is told.
+          if (editingRef.current?.id === personId) {
+            if (sameRow(newAuthRef.current, snapshot.row)) blankRow();
+            else addToast(`The ${rowCode} authorization you submitted is saved (below). The changes you made to the row since then were kept — press Add Auth when that row is ready.`, "info");
+          }
           refreshUnconfirmed(personId);
           await reloadAuths(personId); // converge (may fail harmlessly — the row is already shown)
         };
