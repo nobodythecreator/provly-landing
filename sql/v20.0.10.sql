@@ -109,12 +109,14 @@ DROP INDEX IF EXISTS public.uq_psa_person_code_start;
 -- Two layers (r17): a unique index can only be created on a table with no
 -- legacy identical groups, and an install that HAS them must not be left
 -- unguarded. So:
---   1. a BEFORE INSERT trigger is ALWAYS installed. It serializes identical
---      tuples with a transaction-scoped advisory lock (so two concurrent
---      inserts cannot both pass the check) and raises unique_violation
---      (SQLSTATE 23505) with the same message shape as the index, so the
---      app handles both identically. It guards NEW rows regardless of
---      legacy data.
+--   1. a BEFORE INSERT OR UPDATE trigger is ALWAYS installed (r19: UPDATE
+--      too — an in-place rate/units/date correction can turn a row into an
+--      identical twin just as an insert can). It serializes identical tuples
+--      with a transaction-scoped advisory lock (so two concurrent writes
+--      cannot both pass the check) and raises unique_violation (SQLSTATE
+--      23505) with the same message shape as the index, so the app handles
+--      both identically. It guards every path that can PRODUCE an identical
+--      tuple, regardless of legacy data.
 --   2. the unique index is created when no identical groups exist; when
 --      they do, a NOTICE names the count and the migration continues — the
 --      trigger holds the line until the groups are resolved and this file is
@@ -152,7 +154,8 @@ $$;
 
 DROP TRIGGER IF EXISTS trg_psa_reject_identical ON public.person_service_authorizations;
 CREATE TRIGGER trg_psa_reject_identical
-  BEFORE INSERT ON public.person_service_authorizations
+  BEFORE INSERT OR UPDATE OF person_id, service_code_id, start_date, end_date, authorized_units, rate_per_unit
+  ON public.person_service_authorizations
   FOR EACH ROW
   EXECUTE FUNCTION public.psa_reject_identical();
 
@@ -256,6 +259,9 @@ SELECT 'psa identical guard index (want 1)', count(*)::text
 UNION ALL
 SELECT 'psa identical guard trigger (want 1)', count(*)::text
   FROM pg_trigger WHERE tgname = 'trg_psa_reject_identical'
+UNION ALL
+SELECT 'psa identical guard events (want INSERT+UPDATE)', string_agg(DISTINCT event_manipulation, '+' ORDER BY event_manipulation)
+  FROM information_schema.triggers WHERE trigger_name = 'trg_psa_reject_identical'
 UNION ALL
 SELECT 'evv trigger events', string_agg(event_manipulation, '+' ORDER BY event_manipulation)
   FROM information_schema.triggers WHERE trigger_name = 'trg_evv_sessions_preserve_originals'
