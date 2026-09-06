@@ -104,7 +104,11 @@ DROP INDEX IF EXISTS public.uq_psa_person_code_start;
 -- database can: two authorizations IDENTICAL in every material field —
 -- client, service code, start, end, units, rate — are a duplicate by
 -- definition (r2's legitimately distinct rows differ in at least one).
--- rate_per_unit is nullable, so it is compared as coalesce(rate, -1).
+-- rate_per_unit is nullable. r21: NO sentinel — NULL is compared with
+-- IS NOT DISTINCT FROM, the lock key renders it as the text 'NULL' (which no
+-- numeric can equal), and uniqueness is two partial indexes (rate present /
+-- rate null) so a real -1.00 can never collide with "no rate". A domain
+-- constraint also makes negative rates invalid outright.
 --
 -- Two layers (r17): a unique index can only be created on a table with no
 -- legacy identical groups, and an install that HAS them must not be left
@@ -131,8 +135,8 @@ BEGIN
   -- until this transaction ends, then sees the committed row in its own check.
   PERFORM pg_advisory_xact_lock(hashtext(
     NEW.person_id::text || '|' || NEW.service_code_id::text || '|' ||
-    NEW.start_date::text || '|' || coalesce(NEW.end_date::text, '') || '|' ||
-    NEW.authorized_units::text || '|' || coalesce(NEW.rate_per_unit, -1)::text));
+    NEW.start_date::text || '|' || coalesce(NEW.end_date::text, 'NULL') || '|' ||
+    NEW.authorized_units::text || '|' || coalesce(NEW.rate_per_unit::text, 'NULL')));
 
   IF EXISTS (
     SELECT 1 FROM public.person_service_authorizations p
@@ -141,7 +145,7 @@ BEGIN
        AND p.start_date = NEW.start_date
        AND p.end_date IS NOT DISTINCT FROM NEW.end_date
        AND p.authorized_units = NEW.authorized_units
-       AND coalesce(p.rate_per_unit, -1) = coalesce(NEW.rate_per_unit, -1)
+       AND p.rate_per_unit IS NOT DISTINCT FROM NEW.rate_per_unit
        AND p.id <> NEW.id
   ) THEN
     RAISE unique_violation
@@ -159,18 +163,37 @@ CREATE TRIGGER trg_psa_reject_identical
   FOR EACH ROW
   EXECUTE FUNCTION public.psa_reject_identical();
 
+-- r21 — negative rates are invalid by domain (NOT VALID: enforced on every new
+-- write, existing rows are not re-checked, so the migration cannot fail on
+-- legacy data; the app already refuses non-positive rates).
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'psa_rate_nonneg') THEN
+    ALTER TABLE public.person_service_authorizations
+      ADD CONSTRAINT psa_rate_nonneg CHECK (rate_per_unit IS NULL OR rate_per_unit >= 0) NOT VALID;
+  END IF;
+END
+$$;
+
+-- r21 — the r16 coalesce-sentinel index is replaced by two partial indexes.
+DROP INDEX IF EXISTS public.uq_psa_identical;
+
 DO $$
 DECLARE
   dup_groups integer;
 BEGIN
   SELECT count(*) INTO dup_groups FROM (
     SELECT 1 FROM public.person_service_authorizations
-    GROUP BY person_id, service_code_id, start_date, end_date, authorized_units, coalesce(rate_per_unit, -1)
+    GROUP BY person_id, service_code_id, start_date, end_date, authorized_units, rate_per_unit
     HAVING count(*) > 1
   ) d;
   IF dup_groups = 0 THEN
     CREATE UNIQUE INDEX IF NOT EXISTS uq_psa_identical
-      ON public.person_service_authorizations (person_id, service_code_id, start_date, end_date, authorized_units, (coalesce(rate_per_unit, -1)));
+      ON public.person_service_authorizations (person_id, service_code_id, start_date, end_date, authorized_units, rate_per_unit)
+      WHERE rate_per_unit IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_psa_identical_nullrate
+      ON public.person_service_authorizations (person_id, service_code_id, start_date, end_date, authorized_units)
+      WHERE rate_per_unit IS NULL;
   ELSE
     RAISE NOTICE 'uq_psa_identical NOT created: % identical authorization group(s) already exist. The trg_psa_reject_identical trigger guards new rows meanwhile. Resolve the groups (see the verification block), then re-run this file.', dup_groups;
   END IF;
@@ -251,11 +274,14 @@ SELECT 'psa r1 unique index (want 0 — dropped)', count(*)::text
 UNION ALL
 SELECT 'psa identical duplicate groups (want 0)', count(*)::text
   FROM (SELECT 1 FROM public.person_service_authorizations
-         GROUP BY person_id, service_code_id, start_date, end_date, authorized_units, coalesce(rate_per_unit, -1)
+         GROUP BY person_id, service_code_id, start_date, end_date, authorized_units, rate_per_unit
          HAVING count(*) > 1) d
 UNION ALL
-SELECT 'psa identical guard index (want 1)', count(*)::text
-  FROM pg_indexes WHERE indexname = 'uq_psa_identical'
+SELECT 'psa identical guard indexes (want 2)', count(*)::text
+  FROM pg_indexes WHERE indexname IN ('uq_psa_identical', 'uq_psa_identical_nullrate')
+UNION ALL
+SELECT 'psa rate non-negative constraint (want 1)', count(*)::text
+  FROM pg_constraint WHERE conname = 'psa_rate_nonneg'
 UNION ALL
 SELECT 'psa identical guard trigger (want 1)', count(*)::text
   FROM pg_trigger WHERE tgname = 'trg_psa_reject_identical'
