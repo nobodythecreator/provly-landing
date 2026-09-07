@@ -37,16 +37,21 @@ COMMENT ON COLUMN public.organizations.legal_name            IS 'Legal entity na
 COMMENT ON COLUMN public.organizations.display_name          IS 'Name shown in the app header / white-label surfaces.';
 COMMENT ON COLUMN public.organizations.contract_award_number IS 'DHHS/DSPD contract award number.';
 COMMENT ON COLUMN public.organizations.fein                  IS 'Federal Employer Identification Number.';
-COMMENT ON COLUMN public.organizations.primary_color_hex     IS 'White-label primary brand color (#rrggbb).';
-COMMENT ON COLUMN public.organizations.accent_color_hex      IS 'White-label accent brand color (#rrggbb).';
+COMMENT ON COLUMN public.organizations.primary_color_hex     IS 'White-label primary brand color: six hex characters, uppercase, NO leading # (the app strips it on save, e.g. 0F2A4B).';
+COMMENT ON COLUMN public.organizations.accent_color_hex      IS 'White-label accent brand color: six hex characters, uppercase, NO leading # (the app strips it on save).';
 COMMENT ON COLUMN public.organizations.logo_url              IS 'White-label logo URL.';
-COMMENT ON COLUMN public.organizations.enforcement_role      IS 'Role-permission enforcement: soft (default) | hard.';
-COMMENT ON COLUMN public.organizations.enforcement_training  IS 'Training-compliance enforcement at documentation time: warn (default) | block | off.';
-COMMENT ON COLUMN public.organizations.enforcement_person_specific IS 'Person-specific-training enforcement at documentation time: warn (default) | block | off.';
+COMMENT ON COLUMN public.organizations.enforcement_role      IS 'Role-permission enforcement (app ENFORCE_ROLE_LEVELS, stored verbatim): loose | soft (default) | strict.';
+COMMENT ON COLUMN public.organizations.enforcement_training  IS 'Training-compliance enforcement at shift/clock-in time (app ENFORCE_TRAIN_LEVELS, stored verbatim): warn (default) | block.';
+COMMENT ON COLUMN public.organizations.enforcement_person_specific IS 'Person-specific-training enforcement at shift/clock-in time (app ENFORCE_TRAIN_LEVELS, stored verbatim): warn (default) | block.';
 
 
 -- ── Verification (single statement — the SQL editor shows only the last result) ──
--- Every expected column present with production's type and default; total = 27.
+-- Every expected column present with production's type and default. The total
+-- is reported for information only, NOT asserted: production reads 27, while a
+-- fresh install from the committed base schema reads 30 — the base schema
+-- carries 18 columns against production's 15 pre-drift columns, i.e. three
+-- committed columns production does not have. That reverse drift is out of
+-- scope here and is filed as a follow-up to reconcile before Item 4 RLS.
 WITH expected(column_name, data_type, column_default) AS (VALUES
   ('legal_name',                  'text', NULL),
   ('display_name',                'text', NULL),
@@ -70,8 +75,8 @@ FROM expected e
 LEFT JOIN information_schema.columns c
   ON c.table_schema = 'public' AND c.table_name = 'organizations' AND c.column_name = e.column_name
 UNION ALL
-SELECT 'organizations column count (want 27)', count(*)::text
+SELECT 'organizations column count (info: 27 on production, 30 on a fresh install)', count(*)::text
   FROM information_schema.columns
  WHERE table_schema = 'public' AND table_name = 'organizations'
 ORDER BY what;
--- Expect: ten 'ok' rows and count = 27.
+-- Expect: ten 'ok' rows. The count line is informational (see note above).
