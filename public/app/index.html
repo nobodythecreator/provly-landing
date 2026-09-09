@@ -17306,7 +17306,12 @@
             </div>
             <div style={{ marginTop: 8, fontSize: 12, color: CB.textMid }}>
               {usage ? `${usage.clients} active client${usage.clients === 1 ? "" : "s"} · staff unlimited (${usage.staff} active)` : "Counting…"}
-              {over && <span style={{ color: CB.red, fontWeight: 700 }}> · over plan limit — upgrade to add more</span>}
+              {over && (tierKey === "enterprise"
+                // v20.0.10br1 (Greptile r1) — Enterprise is the top tier: nothing to upgrade to, so the
+                // over-cap guidance is an actionable contact, mirroring the at-cap toast.
+                ? <span style={{ color: CB.red, fontWeight: 700 }}> · at your Enterprise limit — <a href="mailto:sales@getprovly.com?subject=Provly%20Enterprise%20plan%20extension" style={{ color: CB.red }}>email sales@getprovly.com</a> to extend your plan</span>
+                : <span style={{ color: CB.red, fontWeight: 700 }}> · over plan limit — upgrade to add more</span>
+              )}
             </div>
           </div>
 
