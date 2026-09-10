@@ -24,6 +24,10 @@ CREATE TYPE user_role AS ENUM (
   'owner', 'admin', 'supervisor', 'dsp', 'billing', 'readonly'
 );
 
+-- v20.0.11 annotation: production's live labels are starter, growth, SCALE, enterprise
+-- (verified Sep 10 2026 from pg_enum). 'professional' below is the March name for the
+-- $599 tier; the Stripe webhook (_shared/stripe.ts) writes 'scale', which matches production.
+-- tier_cap() in sql/v20.0.11.sql accepts both labels. Comment only — enum edits land as migrations.
 CREATE TYPE subscription_tier AS ENUM (
   'starter', 'growth', 'professional', 'enterprise'
 );
@@ -140,15 +144,26 @@ CREATE TABLE compliance_deadline_definitions (
 -- ============================================================================
 
 -- 3.1 Organizations (tenants)
+-- v20.0.11 annotation (comments only — this file is the March 2026 base snapshot and
+-- is never rewritten; fixes land as new migrations):
+--   * city / state / zip below never existed on production (the app reads and writes a
+--     single address column); sql/v20.0.11.sql DROPs them IF EXISTS so a fresh build
+--     converges with production (27 columns after v20.0.10a).
+--   * max_clients: production default was 50; v20.0.11 sets DEFAULT 10 and derives the
+--     value from subscription_tier by trigger (10 / 50 / 250 / 500).
+--   * VARCHAR(n) on the March columns vs text on the later ones is a known, harmless
+--     inconsistency (Postgres treats both identically); left as-is on purpose. The app
+--     does not enforce these lengths — phone VARCHAR(20) is the one that could reject
+--     a long value; schema-wide varchar->text is a separate chore.
 CREATE TABLE organizations (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   name VARCHAR(200) NOT NULL,
   contract_number VARCHAR(50),
   medicaid_provider_id VARCHAR(50),
   address VARCHAR(200),
-  city VARCHAR(100),
-  state VARCHAR(2) DEFAULT 'UT',
-  zip VARCHAR(10),
+  city VARCHAR(100),                           -- DROPPED by v20.0.11 (never on production)
+  state VARCHAR(2) DEFAULT 'UT',               -- DROPPED by v20.0.11 (never on production)
+  zip VARCHAR(10),                             -- DROPPED by v20.0.11 (never on production)
   phone VARCHAR(20),
   email VARCHAR(200),
   subscription_tier subscription_tier NOT NULL DEFAULT 'starter',
@@ -156,7 +171,7 @@ CREATE TABLE organizations (
   trial_ends_at TIMESTAMPTZ,
   stripe_customer_id VARCHAR(100),
   stripe_subscription_id VARCHAR(100),
-  max_clients INTEGER NOT NULL DEFAULT 10,  -- Based on tier
+  max_clients INTEGER NOT NULL DEFAULT 10,     -- v20.0.11: DEFAULT 10 on production too; DERIVED from subscription_tier by trigger  -- Based on tier
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -523,6 +538,9 @@ CREATE TABLE day_activity_absence_days (
 );
 
 -- 3.21 Person Staff Assignments
+-- v20.0.11 annotation: RENAMED to staff_assignments by sql/v20.0.4d (site XOR person
+-- edges; person_id nullable; site_id added). Item 4 relationship-scoped RLS reads that
+-- table. This is not a dead table — it is the same table under its new name.
 CREATE TABLE person_staff_assignments (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,

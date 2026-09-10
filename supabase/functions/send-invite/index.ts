@@ -37,6 +37,19 @@ const ALLOWED_INVITE_ROLES = [
 // Roles allowed to SEND invites.
 const CAN_INVITE = ["owner", "admin"];
 
+// v20.0.11 (Item 4 R6) — the ceiling rule, mirroring role_rank() in
+// sql/v20.0.11.sql: a caller may grant only roles ranked strictly below
+// their own; owner may grant any invitable role. Roles absent from the map
+// rank 0 and are never grantable by a non-owner.
+const ROLE_RANK: Record<string, number> = {
+  owner: 4, admin: 3, compliance_director: 3,
+  residential_director: 2, day_program_director: 2, house_manager: 2, supervisor: 2, rn: 2, bcba: 2,
+  dsp: 1, hhs_operator: 1,
+};
+const roleRank = (r: string) => ROLE_RANK[r] ?? 0;
+const canGrant = (callerRole: string, targetRole: string) =>
+  callerRole === "owner" ? true : roleRank(targetRole) < roleRank(callerRole);
+
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 Deno.serve(async (req) => {
@@ -64,28 +77,62 @@ Deno.serve(async (req) => {
     if (userErr || !userData?.user) return json({ error: "Not authenticated" }, 401);
     const caller = userData.user;
 
-    // Caller's staff record -> org + role gate.
-    const { data: callerStaff } = await admin
-      .from("staff")
-      .select("org_id, role, first_name, last_name")
+    // v20.0.11 (Item 4 R1) — the caller's org and role come from org_members,
+    // the identity-bound membership table (fail-closed: no row, no invite).
+    // The staff row is read only for the sender's display name.
+    const { data: member } = await admin
+      .from("org_members")
+      .select("org_id, role")
       .eq("user_id", caller.id)
-      .eq("is_active", true)
       .maybeSingle();
-    if (!callerStaff) return json({ error: "No active staff record" }, 403);
-    if (!CAN_INVITE.includes(callerStaff.role)) {
+    if (!member) return json({ error: "No organization membership for this login" }, 403);
+    if (!CAN_INVITE.includes(member.role)) {
       return json({ error: "Only owners and admins can send invites" }, 403);
     }
+    const { data: callerStaffRow } = await admin
+      .from("staff")
+      .select("first_name, last_name")
+      .eq("user_id", caller.id)
+      .eq("org_id", member.org_id)
+      .maybeSingle();
+    const callerStaff = { org_id: member.org_id, role: member.role,
+      first_name: callerStaffRow?.first_name ?? "", last_name: callerStaffRow?.last_name ?? "" };
 
     // Payload.
     const body = await req.json().catch(() => ({}));
-    const email = String(body.email ?? "").trim().toLowerCase();
-    const role = String(body.role ?? "dsp").trim();
-    const firstName = String(body.firstName ?? "").trim();
-    const lastName = String(body.lastName ?? "").trim();
+    let email = String(body.email ?? "").trim().toLowerCase();
+    let role = String(body.role ?? "dsp").trim();
+    let firstName = String(body.firstName ?? "").trim();
+    let lastName = String(body.lastName ?? "").trim();
+
+    // v20.0.11 (Item 4 R7) — Invite to app: the invitee is an EXISTING staff
+    // record in the caller's org with no login yet. Name and role come from
+    // the record (the caller cannot re-role someone through an invite);
+    // the email on the record wins, the payload email fills a blank one.
+    const staffId = body.staffId ? String(body.staffId) : null;
+    if (staffId) {
+      const { data: target } = await admin
+        .from("staff")
+        .select("id, org_id, email, first_name, last_name, role, user_id, is_active")
+        .eq("id", staffId)
+        .eq("org_id", callerStaff.org_id)
+        .maybeSingle();
+      if (!target) return json({ error: "Staff record not found in your organization" }, 404);
+      if (target.user_id) return json({ error: "That staff record already has a login" }, 409);
+      if (!target.is_active) return json({ error: "That staff record is inactive" }, 409);
+      email = String(target.email || email).trim().toLowerCase();
+      role = String(target.role);
+      firstName = String(target.first_name ?? "");
+      lastName = String(target.last_name ?? "");
+    }
 
     if (!EMAIL_RE.test(email)) return json({ error: "Invalid email address" }, 400);
     if (!ALLOWED_INVITE_ROLES.includes(role)) {
       return json({ error: `Role must be one of: ${ALLOWED_INVITE_ROLES.join(", ")}` }, 400);
+    }
+    // v20.0.11 (Item 4 R6) — the ceiling: you cannot invite at or above your own rank.
+    if (!canGrant(callerStaff.role, role)) {
+      return json({ error: "You may only invite roles below your own" }, 403);
     }
 
     // Org identity for the email body (name only — no PHI ever leaves here).
@@ -126,6 +173,7 @@ Deno.serve(async (req) => {
         last_name: lastName || null,
         role,
         invited_by: caller.id,
+        staff_id: staffId,               // v20.0.11 — null for a brand-new invitee
       })
       .select("id, expires_at, created_at")
       .single();
