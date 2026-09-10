@@ -2,7 +2,10 @@
 <!-- v20.0.10d — Provly landing page (public/index.html). Replaces the v20.0.10c root→/app redirect.
      Black and white with one accent (--care, red) used for exactly two jobs: the "You Got Care." line and the primary action.
      Self-serve: every "Start free trial" goes to /app/signup; Enterprise goes to sales@. Team messaging and Secure email are
-     shown as coming soon on purpose — they ship after Item 4. -->
+     shown as coming soon on purpose — they ship after Item 4.
+     v20.0.10dr1 (Greptile r1): claims are built and tracked here, submitted in PRISM; isolation is row-level security in shared Postgres,
+     not a dedicated database; smooth anchor scrolling only when motion is welcome; migration and AI rows worded to what the app does.
+     v20.0.10dr2: DSPD claims are submitted in UPI, not PRISM (PRISM is Medicaid provider enrollment). Corrected per Tombé. -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -24,7 +27,7 @@
     --w:1120px;
   }
   *{box-sizing:border-box;margin:0;padding:0}
-  html{scroll-behavior:smooth}
+  @media (prefers-reduced-motion:no-preference){html{scroll-behavior:smooth}}
   body{font-family:var(--body);color:var(--ink);background:var(--paper);font-size:17px;line-height:1.55;-webkit-font-smoothing:antialiased}
   a{color:inherit;text-decoration:none}
   .wrap{max-width:var(--w);margin:0 auto;padding:0 28px}
@@ -208,10 +211,10 @@
       <div class="row"><div class="box on"></div><div class="name">Incident management</div><div class="desc">SOW 1.27 workflow with reporting deadlines built in.</div></div>
       <div class="row"><div class="box on"></div><div class="name">Medications and PCSP goals</div><div class="desc">Medication logs and person-centered goals with progress notes, tied to the client record.</div></div>
       <div class="row"><div class="box on"></div><div class="name">Training</div><div class="desc">Required topics, completion tracking, and overdue alerts for every staff member.</div></div>
-      <div class="row"><div class="box on"></div><div class="name">Billing and finance</div><div class="desc">Rates by service code, claim submissions, and payments in one place.</div></div>
+      <div class="row"><div class="box on"></div><div class="name">Billing and finance</div><div class="desc">Rates by service code, claims built from your service notes and tracked through payment. You submit in UPI, as today.</div></div>
       <div class="row"><div class="box on"></div><div class="name">Audit center and documents</div><div class="desc">Change history, document storage, and formatted exports that match what DSPD expects.</div></div>
-      <div class="row"><div class="box on"></div><div class="name">Migration from Therap</div><div class="desc">Import your clients and staff so switching doesn't mean re-typing.</div></div>
-      <div class="row"><div class="box on"></div><div class="name">AI drafting</div><div class="desc">Draft summaries from your own service notes, then review and sign.</div></div>
+      <div class="row"><div class="box on"></div><div class="name">Migration from Therap</div><div class="desc">CSV import for clients and staff, so switching doesn't mean re-typing.</div></div>
+      <div class="row"><div class="box on"></div><div class="name">AI drafting</div><div class="desc">Draft quarterly PCSP summaries from your goal progress notes, then review before you file.</div></div>
       <div class="row soon"><div class="box"></div><div class="name">Team messaging</div><div class="desc">Site channels and shift handoffs, so PHI stops living in personal text threads.</div></div>
       <div class="row soon"><div class="box"></div><div class="name">Secure email</div><div class="desc">Encrypted email to support coordinators, families, and the state.</div></div>
     </div>
@@ -291,9 +294,9 @@
     <h2>Questions providers ask.</h2>
     <div class="faq">
       <details><summary>Do I need a card to start?</summary><p>No. Create your organization, use every module for 30 days, then choose a plan from inside the app when you're ready.</p></details>
-      <details><summary>Can I bring my data over from Therap?</summary><p>Yes. The migration module imports your clients and staff so you're not re-typing records to switch.</p></details>
+      <details><summary>Can I bring my data over from Therap?</summary><p>Yes. Export clients and staff from Therap as CSV and the migration module maps and imports them, so you're not re-typing records to switch.</p></details>
       <details><summary>Does EVV really replace my vendor?</summary><p>Clock in and out is built into the service note for EVV-required codes, with original times preserved and any edit reason-coded. There is no separate EVV subscription.</p></details>
-      <details><summary>Where does my data live, and who can see it?</summary><p>Your data is stored in a dedicated Postgres database with each organization isolated at the database level. Nobody outside your organization can read your records.</p></details>
+      <details><summary>Where does my data live, and who can see it?</summary><p>In Postgres, behind row-level security: the database itself scopes every query to your organization, so nobody outside it can read your records. Access rules live in the database, not just in the app.</p></details>
       <details><summary>What happens when my census grows past my plan?</summary><p>Nothing stops. You'll see a nudge that you've outgrown the plan and a one-click path to move up. Caps are guidance, not walls.</p></details>
       <details><summary>How do I cancel?</summary><p>From your billing portal, any time. Your data stays yours.</p></details>
     </div>
