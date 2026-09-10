@@ -220,9 +220,10 @@ SECURITY DEFINER
 SET search_path = public
 AS $$
 BEGIN
-  -- A login that was unlinked (user_id changed away) loses the old membership.
+  -- v20.0.11r1 (Greptile r1) — a login that was unlinked OR moved to another
+  -- org loses the OLD membership; the new one (if any) is written below.
   IF TG_OP = 'UPDATE' AND OLD.user_id IS NOT NULL
-     AND OLD.user_id IS DISTINCT FROM NEW.user_id THEN
+     AND (OLD.user_id IS DISTINCT FROM NEW.user_id OR OLD.org_id IS DISTINCT FROM NEW.org_id) THEN
     DELETE FROM public.org_members WHERE user_id = OLD.user_id AND org_id = OLD.org_id;
   END IF;
 
@@ -263,12 +264,21 @@ BEGIN
   ELSIF OLD.role = 'owner' THEN
     v_losing := (NEW.role <> 'owner' OR NEW.org_id <> OLD.org_id OR NEW.user_id <> OLD.user_id);
   END IF;
-  IF v_losing AND NOT EXISTS (
-       SELECT 1 FROM public.org_members m
-       WHERE m.org_id = OLD.org_id AND m.role = 'owner' AND m.id <> OLD.id
-     ) THEN
-    RAISE EXCEPTION 'An organization must keep at least one owner'
-      USING ERRCODE = 'P0001';
+  IF v_losing THEN
+    -- v20.0.11r1 (Greptile r1) — two concurrent removals of different owners
+    -- could each see the other and both pass. Serialize per org on an
+    -- advisory lock (same pattern as v20.0.10's trg_psa_reject_identical),
+    -- then take a LOCKING read: FOR UPDATE re-checks each candidate row
+    -- against its latest committed version, so an owner removed by the
+    -- transaction we just waited for is not counted.
+    PERFORM pg_advisory_xact_lock(hashtext('org_members_last_owner:' || OLD.org_id::text));
+    PERFORM 1 FROM public.org_members m
+     WHERE m.org_id = OLD.org_id AND m.role = 'owner' AND m.id <> OLD.id
+     FOR UPDATE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'An organization must keep at least one owner'
+        USING ERRCODE = 'P0001';
+    END IF;
   END IF;
   IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
   RETURN NEW;
@@ -279,6 +289,25 @@ DROP TRIGGER IF EXISTS org_members_last_owner ON public.org_members;
 CREATE TRIGGER org_members_last_owner
   BEFORE UPDATE OR DELETE ON public.org_members
   FOR EACH ROW EXECUTE FUNCTION public.trg_org_members_last_owner();
+
+-- v20.0.11r1 (Greptile r1) — one-time reconciliation so the invariant holds
+-- for rows that predate the trigger, not only for future writes:
+--   (i)  every active, linked staff row has a membership row (missing ones
+--        are created at the staff role; existing rows are NOT re-roled here —
+--        a role mismatch is reported by the verification for a human call);
+--   (ii) no inactive or terminated linked staff row keeps a membership
+--        (the last-owner guard above still applies and will stop the
+--        migration rather than orphan an org).
+INSERT INTO public.org_members (user_id, org_id, role, is_default_org)
+SELECT s.user_id, s.org_id, s.role, true
+FROM public.staff s
+WHERE s.user_id IS NOT NULL AND s.is_active AND s.termination_date IS NULL
+ON CONFLICT (user_id, org_id) DO NOTHING;
+
+DELETE FROM public.org_members m
+USING public.staff s
+WHERE s.user_id = m.user_id AND s.org_id = m.org_id
+  AND (NOT s.is_active OR s.termination_date IS NOT NULL);
 
 -- The app may read membership; only triggers/RPCs (SECURITY DEFINER, owned by
 -- postgres) and the service role may write it.
@@ -347,6 +376,12 @@ BEGIN
     RAISE EXCEPTION 'Staff record not found in your organization'
       USING ERRCODE = 'P0002';
   END IF;
+  -- v20.0.11r1 (Greptile r1) — a role with no tier (rank 0) is never grantable,
+  -- by anyone: it would mint a login that PR (b)'s policies cannot place.
+  IF p_new_role IS NOT NULL AND public.role_rank(p_new_role) = 0 THEN
+    RAISE EXCEPTION 'Role % has no access tier and cannot be granted', p_new_role
+      USING ERRCODE = '22023';
+  END IF;
   IF v_caller::text <> 'owner' THEN
     IF public.role_rank(v_target.role) >= public.role_rank(v_caller) THEN
       RAISE EXCEPTION 'You may only change staff whose role is below your own'
@@ -413,6 +448,79 @@ BEGIN
 END;
 $$;
 GRANT EXECUTE ON FUNCTION public.reactivate_staff(uuid) TO authenticated;
+
+-- v20.0.11r1 (Greptile r1) — ONE transaction for a staff edit. The app used to
+-- send the ordinary fields, then the role RPC, then the active-state RPC as
+-- three requests; a failure in the second or third left the first committed.
+-- save_staff applies all of it atomically: any refused part rolls back all of it.
+--   p_patch keys allowed: first_name, last_name, email, phone, hire_date,
+--   date_of_birth, employment_type, w9_received_at, role, is_active.
+--   Unknown keys are refused (never silently ignored).
+CREATE OR REPLACE FUNCTION public.save_staff(p_staff_id uuid, p_patch jsonb)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_caller  public.user_role := public.member_role();
+  v_target  public.staff;
+  v_key     text;
+  v_role    public.user_role;
+  v_active  boolean;
+BEGIN
+  IF v_caller IS NULL OR v_caller::text NOT IN ('owner', 'admin') THEN
+    RAISE EXCEPTION 'Only owners and admins may edit staff records'
+      USING ERRCODE = '42501';
+  END IF;
+  FOR v_key IN SELECT jsonb_object_keys(p_patch) LOOP
+    IF v_key NOT IN ('first_name','last_name','email','phone','hire_date','date_of_birth',
+                     'employment_type','w9_received_at','role','is_active') THEN
+      RAISE EXCEPTION 'save_staff: field % is not editable here', v_key
+        USING ERRCODE = '22023';
+    END IF;
+  END LOOP;
+
+  SELECT * INTO v_target FROM public.staff
+  WHERE id = p_staff_id AND org_id = public.org_id()
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Staff record not found in your organization'
+      USING ERRCODE = 'P0002';
+  END IF;
+
+  -- Lifecycle parts go through the same ceiling as the standalone RPCs.
+  IF p_patch ? 'role' THEN
+    v_role := (p_patch->>'role')::public.user_role;
+    IF public.role_tier(v_role) IS NULL THEN
+      RAISE EXCEPTION 'Role % has no access tier and cannot be assigned', v_role
+        USING ERRCODE = '22023';
+    END IF;
+    PERFORM public.assert_staff_ceiling(p_staff_id, v_role);
+  END IF;
+  IF p_patch ? 'is_active' THEN
+    v_active := (p_patch->>'is_active')::boolean;
+    PERFORM public.assert_staff_ceiling(p_staff_id, NULL);
+  END IF;
+
+  UPDATE public.staff SET
+    first_name       = CASE WHEN p_patch ? 'first_name'      THEN p_patch->>'first_name'                ELSE first_name       END,
+    last_name        = CASE WHEN p_patch ? 'last_name'       THEN p_patch->>'last_name'                 ELSE last_name        END,
+    email            = CASE WHEN p_patch ? 'email'           THEN p_patch->>'email'                     ELSE email            END,
+    phone            = CASE WHEN p_patch ? 'phone'           THEN p_patch->>'phone'                     ELSE phone            END,
+    hire_date        = CASE WHEN p_patch ? 'hire_date'       THEN (p_patch->>'hire_date')::date         ELSE hire_date        END,
+    date_of_birth    = CASE WHEN p_patch ? 'date_of_birth'   THEN (p_patch->>'date_of_birth')::date     ELSE date_of_birth    END,
+    employment_type  = CASE WHEN p_patch ? 'employment_type' THEN p_patch->>'employment_type'           ELSE employment_type  END,
+    w9_received_at   = CASE WHEN p_patch ? 'w9_received_at'  THEN (p_patch->>'w9_received_at')::date    ELSE w9_received_at   END,
+    role             = COALESCE(v_role, role),
+    is_active        = COALESCE(v_active, is_active),
+    termination_date = CASE WHEN v_active IS NULL THEN termination_date
+                            WHEN v_active THEN NULL
+                            ELSE COALESCE(termination_date, CURRENT_DATE) END
+  WHERE id = v_target.id;                                            -- one statement, one trigger pass
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.save_staff(uuid, jsonb) TO authenticated;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- R7 — invites carry an optional staff_id (Invite to app for an existing record)
@@ -621,11 +729,30 @@ SELECT check_name, value, want FROM (
              AND p.proname IN ('member_role','access_tier','my_staff_id','can_see_person','role_tier','role_rank','tier_cap')),
          '7'
   UNION ALL
-  SELECT 31, 'RPCs present (set_staff_role, terminate_staff, reactivate_staff, accept_invite, signup_create_organization)',
+  SELECT 31, 'RPCs present (set_staff_role, terminate_staff, reactivate_staff, save_staff, accept_invite, signup_create_organization)',
          (SELECT count(*)::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
            WHERE n.nspname = 'public'
-             AND p.proname IN ('set_staff_role','terminate_staff','reactivate_staff','accept_invite','signup_create_organization')),
-         '5'
+             AND p.proname IN ('set_staff_role','terminate_staff','reactivate_staff','save_staff','accept_invite','signup_create_organization')),
+         '6'
+  UNION ALL
+  SELECT 32, 'active linked staff WITHOUT a membership row (reconciled)',
+         (SELECT count(*)::text FROM public.staff s
+           WHERE s.user_id IS NOT NULL AND s.is_active AND s.termination_date IS NULL
+             AND NOT EXISTS (SELECT 1 FROM public.org_members m WHERE m.user_id = s.user_id AND m.org_id = s.org_id)),
+         '0'
+  UNION ALL
+  SELECT 33, 'inactive/terminated linked staff WITH a membership row (reconciled)',
+         (SELECT count(*)::text FROM public.org_members m JOIN public.staff s
+             ON s.user_id = m.user_id AND s.org_id = m.org_id
+           WHERE NOT s.is_active OR s.termination_date IS NOT NULL),
+         '0'
+  UNION ALL
+  SELECT 34, '(info) membership role differs from staff role (human call: which is right?)',
+         (SELECT coalesce(string_agg(s.first_name || ' ' || s.last_name || ': staff=' || s.role::text || ' member=' || m.role::text, '; '), 'none')
+           FROM public.org_members m JOIN public.staff s
+             ON s.user_id = m.user_id AND s.org_id = m.org_id
+           WHERE s.is_active AND s.role <> m.role),
+         'none'
   UNION ALL
   SELECT 40, 'triggers present (staff_sync_membership, org_members_last_owner, org_derive_max_clients)',
          (SELECT count(*)::text FROM pg_trigger

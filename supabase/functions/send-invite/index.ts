@@ -47,8 +47,12 @@ const ROLE_RANK: Record<string, number> = {
   dsp: 1, hhs_operator: 1,
 };
 const roleRank = (r: string) => ROLE_RANK[r] ?? 0;
+// v20.0.11r1 (Greptile r1) — a role with no tier (rank 0: billing, readonly,
+// anything unmapped) is never grantable, by ANY caller: it would mint a login
+// that PR (b)'s tier policies cannot place. Mirrors assert_staff_ceiling().
 const canGrant = (callerRole: string, targetRole: string) =>
-  callerRole === "owner" ? true : roleRank(targetRole) < roleRank(callerRole);
+  roleRank(targetRole) > 0 &&
+  (callerRole === "owner" ? true : roleRank(targetRole) < roleRank(callerRole));
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 

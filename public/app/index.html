@@ -208,7 +208,8 @@
     const ROLE_RANK = { owner: 4, admin: 3, compliance_director: 3, residential_director: 2, day_program_director: 2,
                         house_manager: 2, supervisor: 2, rn: 2, bcba: 2, dsp: 1, hhs_operator: 1 };
     const roleRank = (r) => ROLE_RANK[r] || 0;
-    const canGrantRole   = (callerRole, targetRole) => callerRole === "owner" ? true : (callerRole === "admin" && roleRank(targetRole) < roleRank(callerRole));
+    // v20.0.11r1 — a role with no tier (rank 0) is never grantable, by anyone.
+    const canGrantRole   = (callerRole, targetRole) => roleRank(targetRole) > 0 && (callerRole === "owner" ? true : (callerRole === "admin" && roleRank(targetRole) < roleRank(callerRole)));
     const canManageStaff = (callerRole, targetRole) => callerRole === "owner" ? true : (callerRole === "admin" && roleRank(targetRole) < roleRank(callerRole));
 
     const ROLE_PERMISSIONS = {
@@ -2259,22 +2260,12 @@
             return;
           }
           // v20.0.11 (Item 4 R6) — role and active status are not app-writable
-          // columns any more. They travel through the RPCs, which enforce the
-          // ceiling rule and keep org_members in sync; everything else is a
-          // plain column update as before.
-          const hasKey = (k) => Object.prototype.hasOwnProperty.call(diff, k);
-          const roleChange = hasKey("role") ? diff.role : undefined;       delete diff.role;
-          const activeChange = hasKey("is_active") ? diff.is_active : undefined; delete diff.is_active;
-          result = { error: null };
-          if (Object.keys(diff).length) result = await supabase.from("staff").update(diff).eq("id", editing.id);
-          if (!result.error && roleChange !== undefined) {
-            const { error } = await supabase.rpc("set_staff_role", { p_staff_id: editing.id, p_role: roleChange });
-            if (error) result = { error };
-          }
-          if (!result.error && activeChange !== undefined) {
-            const { error } = await supabase.rpc(activeChange ? "reactivate_staff" : "terminate_staff", { p_staff_id: editing.id });
-            if (error) result = { error };
-          }
+          // columns any more. v20.0.11r1 (Greptile r1): the whole edit is ONE
+          // request — save_staff applies ordinary fields, role, and active
+          // state in a single transaction, so a refused ceiling, stale target,
+          // or last-owner check rolls back everything. No partial saves.
+          const { error: saveErr } = await supabase.rpc("save_staff", { p_staff_id: editing.id, p_patch: diff });
+          result = { error: saveErr };
         } else {
           const payload = { ...clean, org_id: orgId };
           if (!payload.email) delete payload.email;
