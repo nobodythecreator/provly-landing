@@ -10,6 +10,7 @@
 --   service_delivery_contexts, service_delivery_context_members,
 --   generated_documents (all commands); training_topic_definitions (read);
 --   waitlist (read by any user, insert by anonymous).
+-- r1 (Greptile r1, Sep 11): verification asserts exact policy shape; DDL unchanged.
 -- Production counts (Sep 11): no table holds shared rows (org_id IS NULL = 0
 -- everywhere), so the fix is straight org scoping. No app change: the app
 -- only ever displayed the caller's own org; other orgs' rows were reachable,
@@ -105,14 +106,44 @@ SELECT check_name, value, want FROM (
            WHERE schemaname = 'public' AND cmd IN ('SELECT','ALL') AND qual = 'true'),
          'service_code_definitions.Allow authenticated users to read service codes'
   UNION ALL
-  SELECT 3, 'tables among the seven with an org-scoped policy',
-         (SELECT count(DISTINCT tablename)::text FROM pg_policies
+  -- v20.0.11a r1 (Greptile r1): assert the exact policy SHAPE, not a mention of org_id():
+  -- (table, policy name, command ALL, applies-to role, USING scoped, WITH CHECK scoped).
+  SELECT 3, 'seven org-scoped policies with the expected name / cmd=ALL / role / USING / WITH CHECK',
+         (SELECT count(*)::text FROM pg_policies p
+           WHERE p.schemaname = 'public' AND p.cmd = 'ALL'
+             AND (p.tablename, p.policyname, p.roles::text) IN (
+                   ('training_decks',                   'training_decks_org',                  '{authenticated}'),
+                   ('staff_deck_completions',           'staff_deck_completions_org',          '{authenticated}'),
+                   ('generated_documents',              'generated_documents_org',             '{authenticated}'),
+                   ('training_deck_service_codes',      'training_deck_service_codes_org',     '{authenticated}'),
+                   ('service_delivery_contexts',        'Contexts visible to org',             '{public}'),
+                   ('service_delivery_context_members', 'Members visible to org',              '{public}'),
+                   ('training_topic_definitions',       'ttd_isolation',                       '{authenticated}'))
+             AND p.qual       LIKE '%org_id()%'
+             AND p.with_check LIKE '%org_id()%'
+             AND (p.tablename <> 'training_deck_service_codes'
+                  OR (p.qual LIKE '%training_decks%' AND p.with_check LIKE '%training_decks%'))),
+         '7'
+  UNION ALL
+  SELECT 31, 'write-capable policies on the seven tables with NO WITH CHECK (silent write hole)',
+         (SELECT count(*)::text FROM pg_policies
+           WHERE schemaname = 'public' AND cmd IN ('INSERT','UPDATE','ALL')
+             AND tablename IN ('training_decks','training_deck_service_codes','staff_deck_completions',
+                               'service_delivery_contexts','service_delivery_context_members',
+                               'generated_documents','training_topic_definitions')
+             AND with_check IS NULL),
+         '0'
+  UNION ALL
+  SELECT 32, 'policies on the seven tables that are NOT the expected one (stragglers)',
+         (SELECT coalesce(string_agg(tablename || '.' || policyname, '; '), 'none') FROM pg_policies
            WHERE schemaname = 'public'
              AND tablename IN ('training_decks','training_deck_service_codes','staff_deck_completions',
                                'service_delivery_contexts','service_delivery_context_members',
                                'generated_documents','training_topic_definitions')
-             AND qual LIKE '%org_id()%'),
-         '7'
+             AND policyname NOT IN ('training_decks_org','staff_deck_completions_org','generated_documents_org',
+                                    'training_deck_service_codes_org','Contexts visible to org',
+                                    'Members visible to org','ttd_isolation')),
+         'none'
   UNION ALL
   SELECT 4, 'waitlist policies',
          (SELECT count(*)::text FROM pg_policies WHERE schemaname = 'public' AND tablename = 'waitlist'),
