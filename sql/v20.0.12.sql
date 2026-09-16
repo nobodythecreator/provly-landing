@@ -2,6 +2,13 @@
 -- Provly v20.0.12 — Item 4 PR (b): READ POLICIES
 -- Run in the Supabase SQL editor (production) BEFORE the app ships.
 -- Additive and idempotent: re-running yields the same policies, views, trigger.
+-- r1 (Greptile r1, Sep 16) — RE-RUN REQUIRED: writes that CONFER SIGHT are
+-- office-tier now, not in (c). staff_assignments and shifts INSERT/UPDATE/
+-- DELETE require manage or operate; person_placements writes require manage
+-- (§5). The shifts trigger also verifies the WRITER may grant sight (office
+-- tier, and can see the person) before it mints an edge. Reason: once an open
+-- assignment or a shift grants reads, an org-wide write policy on either
+-- table is a self-grant path for a deliver-tier login.
 --
 -- Design: docs/item4-rls-design.md v1.2 (§3.1 amended by B1; §4 table→class
 -- sheet = B2; staff_directory_v = B3; schedule-edge window = B4; nav = B5).
@@ -229,7 +236,8 @@ REVOKE ALL ON FUNCTION public.provly_v12_apply(text, text, text, text) FROM PUBL
 SELECT public.provly_v12_apply('persons',
   $q$(SELECT public.access_tier()) IN ('manage','operate') OR public.can_see_person(id)$q$);
 SELECT public.provly_v12_apply('person_placements',
-  $q$(SELECT public.access_tier()) IN ('manage','operate') OR public.can_see_person(person_id)$q$);
+  $q$(SELECT public.access_tier()) IN ('manage','operate') OR public.can_see_person(person_id)$q$,
+  NULL, 'none');                       -- r1: writes recreated in section 4b (manage only)
 SELECT public.provly_v12_apply('service_notes',
   $q$(SELECT public.access_tier()) IN ('manage','operate') OR public.can_see_person(person_id)$q$);
 SELECT public.provly_v12_apply('evv_sessions',
@@ -281,7 +289,8 @@ SELECT public.provly_v12_apply('person_service_authorizations',
 
 -- Staff-scoped (4) -----------------------------------------------------------
 SELECT public.provly_v12_apply('shifts',
-  $q$(SELECT public.access_tier()) IN ('manage','operate') OR staff_id = (SELECT public.my_staff_id())$q$);
+  $q$(SELECT public.access_tier()) IN ('manage','operate') OR staff_id = (SELECT public.my_staff_id())$q$,
+  NULL, 'none');                       -- r1: writes recreated in section 4b (office tiers)
 SELECT public.provly_v12_apply('staff_trainings',
   $q$(SELECT public.access_tier()) IN ('manage','operate') OR staff_id = (SELECT public.my_staff_id())$q$);
 SELECT public.provly_v12_apply('staff_deck_completions',
@@ -308,7 +317,8 @@ DROP POLICY IF EXISTS "person_staff_assignments_insert" ON public.staff_assignme
 DROP POLICY IF EXISTS "person_staff_assignments_update" ON public.staff_assignments;
 DROP POLICY IF EXISTS "person_staff_assignments_delete" ON public.staff_assignments;
 SELECT public.provly_v12_apply('staff_assignments',
-  $q$(SELECT public.access_tier()) IN ('manage','operate') OR staff_id = (SELECT public.my_staff_id())$q$);
+  $q$(SELECT public.access_tier()) IN ('manage','operate') OR staff_id = (SELECT public.my_staff_id())$q$,
+  NULL, 'none');                       -- r1: writes recreated in section 4b (office tiers)
 -- deliver: sites they hold an open site edge to, or where a person they can see is placed
 SELECT public.provly_v12_apply('org_sites',
   $q$(SELECT public.access_tier()) IN ('manage','operate')
@@ -367,6 +377,42 @@ SELECT public.provly_v12_apply('audit_log', $q$(SELECT public.access_tier()) = '
 
 -- RPC-only: guard, no read policy (0 permissive policies = deny) ------------
 SELECT public.provly_v12_apply('invites', NULL);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 4b. r1 (Greptile r1) — writes that CONFER SIGHT are office-tier NOW.
+--    An open person edge, a site edge, a placement, or a shift (via the
+--    trigger below) grants reads of protected person records. Leaving these
+--    three tables org-wide-writable until PR (c) would let a deliver-tier
+--    login grant itself sight. Everything else keeps org-wide writes until (c).
+--      staff_assignments  INSERT/UPDATE/DELETE → manage or operate
+--      shifts             INSERT/UPDATE/DELETE → manage or operate
+--                         ((c) adds the deliver own-row status-only UPDATE;
+--                          the trigger ignores status changes by column list)
+--      person_placements  INSERT/UPDATE/DELETE → manage (§5)
+-- ─────────────────────────────────────────────────────────────────────────────
+DO $$
+DECLARE
+  r record;
+  v_cmd text;
+BEGIN
+  FOR r IN SELECT * FROM (VALUES
+      ('staff_assignments', $w$org_id = (SELECT public.org_id()) AND (SELECT public.access_tier()) IN ('manage','operate')$w$),
+      ('shifts',            $w$org_id = (SELECT public.org_id()) AND (SELECT public.access_tier()) IN ('manage','operate')$w$),
+      ('person_placements', $w$org_id = (SELECT public.org_id()) AND (SELECT public.access_tier()) = 'manage'$w$)
+    ) AS t(tbl, pred)
+  LOOP
+    FOREACH v_cmd IN ARRAY ARRAY['INSERT', 'UPDATE', 'DELETE'] LOOP
+      EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', r.tbl || '_' || lower(v_cmd) || '_office', r.tbl);
+      EXECUTE format(
+        CASE v_cmd
+          WHEN 'INSERT' THEN 'CREATE POLICY %1$I ON public.%2$I AS PERMISSIVE FOR INSERT TO authenticated WITH CHECK (%3$s)'
+          WHEN 'UPDATE' THEN 'CREATE POLICY %1$I ON public.%2$I AS PERMISSIVE FOR UPDATE TO authenticated USING (%3$s) WITH CHECK (%3$s)'
+          ELSE               'CREATE POLICY %1$I ON public.%2$I AS PERMISSIVE FOR DELETE TO authenticated USING (%3$s)'
+        END,
+        r.tbl || '_' || lower(v_cmd) || '_office', r.tbl, r.pred);
+    END LOOP;
+  END LOOP;
+END $$;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 5. Cross-org tables (out of Item 4 scope): existing policies untouched; they
@@ -466,6 +512,19 @@ BEGIN
   WHERE s.id = NEW.staff_id AND s.org_id = NEW.org_id;
   IF v_role IS NULL OR public.role_tier(v_role) IS DISTINCT FROM 'deliver' THEN
     RETURN NEW;                                   -- office tiers see the org already
+  END IF;
+
+  -- r1 (Greptile r1): only a WRITER who may grant sight mints an edge. The
+  -- write policies above already limit shift writes to office tiers; this is
+  -- the backstop for every other path (a future deliver own-row update,
+  -- service role, the SQL editor): no office-tier writer who can see the
+  -- person → the shift is saved, no sight edge is opened. auth.uid() is the
+  -- caller's even inside a SECURITY DEFINER function.
+  IF public.access_tier() IS DISTINCT FROM 'manage' AND public.access_tier() IS DISTINCT FROM 'operate' THEN
+    RETURN NEW;
+  END IF;
+  IF NOT public.can_see_person(NEW.person_id) THEN
+    RETURN NEW;                                   -- you can only grant what you can see
   END IF;
 
   v_start := coalesce(NEW.scheduled_date, CURRENT_DATE);
@@ -583,9 +642,11 @@ SELECT check_name, value, want FROM (
              AND qual LIKE '%access_tier()%' AND qual LIKE '%manage%' AND qual NOT LIKE '%operate%' AND qual NOT LIKE '%can_see_person%'),
          '1'
   UNION ALL
-  SELECT 11, 'org_members write policies (must be 0 — membership is trigger/RPC written)',
+  -- (first prod run counted the RESTRICTIVE guard itself here — permissive only)
+  SELECT 11, 'org_members PERMISSIVE write policies (must be 0 — membership is trigger/RPC written)',
          (SELECT count(*)::text FROM pg_policies
-           WHERE schemaname = 'public' AND tablename = 'org_members' AND cmd IN ('INSERT','UPDATE','DELETE','ALL')),
+           WHERE schemaname = 'public' AND tablename = 'org_members'
+             AND permissive = 'PERMISSIVE' AND cmd IN ('INSERT','UPDATE','DELETE','ALL')),
          '0'
   UNION ALL
   SELECT 12, 'person_staff_assignments_* policies left on staff_assignments (v20.0.4d rename residue)',
@@ -593,13 +654,14 @@ SELECT check_name, value, want FROM (
            WHERE schemaname = 'public' AND tablename = 'staff_assignments' AND policyname LIKE 'person_staff_assignments%'),
          '0'
   UNION ALL
-  SELECT 13, 'guarded tables with NO permissive INSERT policy (writes stay org-wide until PR c; these three take no app writes)',
+  -- organizations never had an INSERT policy: orgs are created only by the signup RPC (SECURITY DEFINER)
+  SELECT 13, 'guarded tables with NO permissive INSERT policy (writes stay org-wide until PR c; these four take no app inserts)',
          (SELECT coalesce(string_agg(t.tablename, '; ' ORDER BY t.tablename COLLATE "C"), 'none') FROM pg_tables t
            WHERE t.schemaname = 'public'
              AND EXISTS (SELECT 1 FROM pg_policies g WHERE g.schemaname = 'public' AND g.tablename = t.tablename AND g.policyname = t.tablename || '_tenant_guard')
              AND NOT EXISTS (SELECT 1 FROM pg_policies p WHERE p.schemaname = 'public' AND p.tablename = t.tablename
                              AND p.permissive = 'PERMISSIVE' AND p.cmd IN ('INSERT','ALL'))),
-         'invites; org_members; subscription_events'
+         'invites; org_members; organizations; subscription_events'
   UNION ALL
   SELECT 14, 'guarded tables with NO permissive UPDATE policy',
          (SELECT coalesce(string_agg(t.tablename, '; ' ORDER BY t.tablename COLLATE "C"), 'none') FROM pg_tables t
@@ -668,4 +730,29 @@ SELECT check_name, value, want FROM (
          (SELECT coalesce(string_agg(s.first_name || ' ' || s.last_name || ' (' || s.role::text || ')', '; '), 'none')
             FROM public.staff s WHERE s.is_active AND public.role_tier(s.role) IS NULL),
          'none'
+  UNION ALL
+  SELECT 23, 'r1: office-tier write policies on the three sight-conferring tables (3 tables × INSERT/UPDATE/DELETE, all binding access_tier(); placements = manage)',
+         (SELECT count(*)::text FROM pg_policies p
+           WHERE p.schemaname = 'public' AND p.permissive = 'PERMISSIVE'
+             AND p.policyname = p.tablename || '_' || lower(p.cmd) || '_office'
+             AND p.roles::text = '{authenticated}'
+             AND coalesce(p.qual, p.with_check) LIKE '%access_tier()%'
+             AND (p.cmd = 'INSERT' OR p.qual LIKE '%org_id()%')
+             AND (p.cmd = 'DELETE' OR p.with_check LIKE '%access_tier()%')
+             AND (p.tablename <> 'person_placements' OR coalesce(p.qual, p.with_check) NOT LIKE '%operate%')),
+         '9'
+  UNION ALL
+  SELECT 24, 'r1: write policies on staff_assignments / shifts / person_placements that do NOT bind access_tier() (self-grant path)',
+         (SELECT coalesce(string_agg(tablename || '.' || policyname, '; ' ORDER BY tablename COLLATE "C"), 'none') FROM pg_policies
+           WHERE schemaname = 'public' AND permissive = 'PERMISSIVE' AND cmd IN ('INSERT','UPDATE','DELETE','ALL')
+             AND tablename IN ('staff_assignments','shifts','person_placements')
+             AND coalesce(qual, '') NOT LIKE '%access_tier()%' AND coalesce(with_check, '') NOT LIKE '%access_tier()%'),
+         'none'
+  UNION ALL
+  SELECT 25, 'r1: shifts trigger verifies the WRITER may grant sight before minting an edge',
+         (SELECT count(*)::text FROM pg_proc p
+           WHERE p.pronamespace = 'public'::regnamespace AND p.proname = 'trg_shift_open_sight_edge'
+             AND p.prosrc LIKE '%public.can_see_person(NEW.person_id)%'
+             AND p.prosrc LIKE '%access_tier() IS DISTINCT FROM ''manage''%'),
+         '1'
 ) v ORDER BY ord;
