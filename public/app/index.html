@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.12 (Item 4 PR b — read policies): identity comes from MEMBERSHIP. Role and tier are read from member_role() / access_tier() (org_members, written only by the staff trigger and RPCs); the email-matched staff lookup and the "no staff row = owner" fallback are gone — no membership means a no-access screen, never a role. Navigation falls back by TIER (manage → owner set, operate → supervisor set, deliver → dsp set + training) instead of every unmapped role landing on the DSP menu. Every authorization READ goes through person_service_authorizations_v (rate hidden below manage; sight via can_see_person); the Add Auth write path stays on the base table. Staff → Assignments lists person edges (manual and schedule-opened, with their window) and can end them. Database side: sql/v20.0.12.sql — RESTRICTIVE tenant guard (org claim + live membership) on 44 tables, one tier read policy per table, staff_directory_v, the shifts → sight-edge trigger. -->
   <!-- v20.0.11 (Item 4 PR a — identity + membership): the database now owns who may change staff access. staff.role / is_active / user_id / termination_date and the organizations subscription columns are no longer app-writable (column privileges, sql/v20.0.11.sql); role changes and terminations go through set_staff_role / terminate_staff / reactivate_staff, which enforce the ceiling rule (act on and grant only roles below your own; owner anything; last owner protected). org_members is derived from staff by trigger. Invite modal offers only roles the caller may grant; existing staff records get 'Invite to app' (invite carries staff_id, accept_invite binds the login to that record). No visibility change yet — that is PR (b). Design: docs/item4-rls-design.md -->
   <!-- v20.0.10b: Enterprise cap 500 (was 1,000) — tiers now 10 / 50 / 250 / 500 active clients; Enterprise stays contact-sales and caps stay soft (advisory toast, never a wall). The at-cap toast on an Enterprise org now points to sales@getprovly.com instead of an upgrade button that doesn't exist. App-only; no SQL. Precedes Item 4 (v20.0.11+) so the DB tier→cap trigger and the app agree on 500. -->
   <!-- v20.0.10: client-form integrity + EVV audit — (1) Update Client absorbs a complete Add Auth row and refuses a partial one (nothing typed is ever silently dropped); (2) rate_per_unit is persisted, worksheet codes (BILLING_RULES.worksheet) REQUIRE a rate — non-rate roles are stopped, rate-holders may tick "Rate pending from SC" (deliberate null; row wears RATE NEEDED; inline Set rate repairs in place without resetting used_units), rates over the DSPD ceiling are blocked; BILLING_RULES refreshed to DHHS91172 eff. 7/1/2026 (PM1/PM2 quarter-hour, SEI fixed $14.54, SJD/SJR/SJP added); (3) authorization status written on create (approved / expired — an APPROVAL enum) + one-time backfill in sql/v20.0.10.sql; (4) retired org units (is_active=false) render dimmed with a Retired tag, no edit/add/delete, and are excluded from the delivery-context picker; (5) EVV clock-IN is correctable on the same audited terms as clock-out (reason required, DST guardrail, in-before-out), with originally captured instants preserved on the row by a set-once DB trigger. DEFERRED: outbound email + internal messaging — after Item 4 (operator logins/RLS), messaging needs per-user identities. -->
@@ -297,8 +298,23 @@
       // RN — clinical view: clients, schedules, medical workflows.
       rn:                  ["dashboard", "clients", "schedule", "training", "notes", "compliance", "incidents", "medications", "goals", "docs", "messages"],
       // DSP — minimal: their schedule, their work, their alerts.
-      dsp:                 ["dashboard", "schedule", "notes", "evv", "incidents", "medications", "goals", "messages"],
+      // v20.0.12 (B5) — training added: staff can see their own trainings and
+      // certification expirations (own-row reads on staff_trainings / deck completions).
+      dsp:                 ["dashboard", "schedule", "training", "notes", "evv", "incidents", "medications", "goals", "messages"],
     };
+
+    // v20.0.12 (B5) — nav and permissions fall back by ACCESS TIER, not to the DSP
+    // set. Roles with an explicit map above keep it (compliance_director, rn);
+    // every other role lands on its tier's anchor: residential_director /
+    // day_program_director / house_manager / bcba → supervisor set; hhs_operator
+    // → dsp set. The tier comes from access_tier() in the database.
+    const TIER_NAV_ANCHOR = { manage: "owner", operate: "supervisor", deliver: "dsp" };
+
+    // v20.0.12 (R3) — every authorization READ goes through the masked view
+    // (rate_per_unit is NULL below the manage tier; rows limited by
+    // can_see_person). The Add Auth write path — insert, read-back, twin check,
+    // set-rate — stays on the base table, which only the manage tier can read.
+    const AUTH_VIEW = "person_service_authorizations_v";
 
 
     function AuthProvider({ children }) {
@@ -307,6 +323,12 @@
       const [loading, setLoading] = useState(true);
       const [orgId, setOrgId] = useState(null);
       const [staffProfile, setStaffProfile] = useState(null);
+      // v20.0.12 — identity from MEMBERSHIP: { role, tier, staffId } straight from
+      // member_role() / access_tier() / my_staff_id(). identityState: pending →
+      // ok | failed. A resolved membership with no role is NO ACCESS (App shows
+      // the no-membership screen); it is never turned into a role.
+      const [membership, setMembership] = useState(null);
+      const [identityState, setIdentityState] = useState("pending");
       // v19.3 — org-level enforcement settings (defaults match Soft/Warn/Warn)
       const [enforcement, setEnforcement] = useState({
         role: "soft", training: "warn", person_specific: "warn",
@@ -475,20 +497,40 @@
         }
       };
 
-      const fetchStaffProfile = async (email) => {
+      const fetchStaffProfile = async () => {
         // v20.0.5r4 — GENERATION-SCOPED, the same guard fetchOrgId has
         // carried since v20.0.1. Every run belongs to the auth generation it
         // started in (brandFetchEpoch); sign-out and user change bump the
         // generation, so a delayed response from a previous session cannot
-        // write ANY state into the current one — the cross-user race is
-        // dead by construction, not by timing.
-        // Three-valued identity stands: success-no-row = legacy owner
-        // fallback; FAILURE clears any stale profile and fails DOWN to dsp
-        // (staffOkRef stays false, so every same-user auth event retries).
+        // write ANY state into the current one.
+        // v20.0.12 (Item 4 R1) — identity is MEMBERSHIP, read from the database:
+        //   member_role()  → the caller's role in org_members (NULL = no access)
+        //   access_tier()  → manage | operate | deliver (NULL = no tier = no access)
+        //   my_staff_id()  → the caller's own staff row, for display fields only
+        // Nothing is matched by email and nothing falls back to a role: a
+        // successful lookup with no membership resolves to NO ACCESS. A FAILED
+        // lookup still fails DOWN to dsp (v20.0.5r2) and keeps retrying on every
+        // same-user auth event (staffOkRef stays false).
         const epoch = brandFetchEpoch;
         const stale = () => epoch !== brandFetchEpoch;
         staffOkRef.current = false;
-        const attempt = () => supabase.from("staff").select("id, first_name, last_name, role, is_active").eq("email", email).maybeSingle();
+        setIdentityState("pending");
+        const attempt = async () => {
+          const [r, t, m] = await Promise.all([
+            supabase.rpc("member_role"),
+            supabase.rpc("access_tier"),
+            supabase.rpc("my_staff_id"),
+          ]);
+          const error = r.error || t.error || m.error;
+          if (error) return { error };
+          let profile = null;
+          if (m.data) {
+            const p = await supabase.from("staff").select("id, first_name, last_name, role, is_active").eq("id", m.data).maybeSingle();
+            if (p.error) return { error: p.error };
+            profile = p.data;
+          }
+          return { data: { role: r.data || null, tier: t.data || null, staffId: m.data || null, profile } };
+        };
         let { data, error } = await attempt();
         if (stale()) return;
         if (error) {
@@ -499,13 +541,19 @@
         }
         if (error) {
           setStaffProfile(null); // v20.0.5r3 — never retain a stale privileged identity
+          setMembership(null);
           setStaffLoadFailed(true);
+          setIdentityState("failed");
           return;
         }
         staffOkRef.current = true;
         setStaffLoadFailed(false);
-        // If no staff record found, default to owner (for the main admin account)
-        setStaffProfile(data || { role: "owner", first_name: "Admin", last_name: "" });
+        setMembership({ role: data.role, tier: data.tier, staffId: data.staffId });
+        // The profile row carries display fields; its role column is the same
+        // value the membership trigger wrote, but the app's role comes from
+        // membership, never from this row.
+        setStaffProfile(data.profile ? { ...data.profile, role: data.role || data.profile.role } : null);
+        setIdentityState("ok");
       };
 
       // v20.0.8r2 — purpose-built subscription refetch. The old context value
@@ -537,7 +585,7 @@
           if (session?.user) {
             lastUserIdRef.current = session.user.id; // v20.0.5
             fetchOrgId();
-            fetchStaffProfile(session.user.email);
+            fetchStaffProfile();
           } else {
             // Signed out at startup — no brand to wait for
             setBrandReady(true);
@@ -569,12 +617,14 @@
             setBrand(DEFAULT_BRAND);
             applyBrandToPDF(DEFAULT_BRAND); // v20.0.1 — singleton resets with the gate
             fetchOrgId();
-            fetchStaffProfile(session.user.email);
+            fetchStaffProfile();
           } else {
             lastUserIdRef.current = null; // v20.0.5 — next sign-in is genuinely new
             brandFetchEpoch++; // v20.0.1 — invalidate any in-flight hydration
             staffOkRef.current = false;   // v20.0.5r4 — identity fully reset on sign-out
             setStaffProfile(null);
+            setMembership(null);         // v20.0.12 — membership resets with the session
+            setIdentityState("pending");
             setStaffLoadFailed(false);
             setOrgId(null);
             setStaffProfile(null);
@@ -586,19 +636,21 @@
         return () => subscription.unsubscribe();
       }, []);
 
-      // v20.0.5r2 — if the staff-profile query FAILED, identity is unknown:
-      // degrade to the minimal dsp toolkit until a retry succeeds. The owner
-      // fallback applies only when the query succeeded and found no row
-      // (fetchStaffProfile sets that profile explicitly).
-      const role = staffProfile?.role || (staffLoadFailed ? "dsp" : "owner");
-      const permissions = ROLE_PERMISSIONS[role] || ROLE_PERMISSIONS.dsp;
-      const navItems = ROLE_NAV[role] || ROLE_NAV.dsp;
+      // v20.0.12 (Item 4 R1/R2/B5) — role and tier come from membership. No
+      // membership → role null (App renders the no-access screen; nothing here
+      // invents a role). v20.0.5r2 still holds for a FAILED lookup: degrade to
+      // the dsp toolkit until a retry succeeds — the database decides anyway.
+      const role = membership?.role || (staffLoadFailed ? "dsp" : null);
+      const accessTier = membership?.tier || (staffLoadFailed ? "deliver" : null);
+      const tierAnchor = TIER_NAV_ANCHOR[accessTier] || null;
+      const permissions = (role && ROLE_PERMISSIONS[role]) || (tierAnchor && ROLE_PERMISSIONS[tierAnchor]) || ROLE_PERMISSIONS.dsp;
+      const navItems = (role && ROLE_NAV[role]) || (tierAnchor && ROLE_NAV[tierAnchor]) || [];
 
       const signIn = (email, password) => supabase.auth.signInWithPassword({ email, password });
       const signOut = () => supabase.auth.signOut();
 
       return (
-        <AuthContext.Provider value={{ user, session, loading, brandReady, signIn, signOut, orgId, staffProfile, role, permissions, navItems, enforcement, brand, refetchBrand: fetchOrgId, subscription, refetchSubscription }}>
+        <AuthContext.Provider value={{ user, session, loading, brandReady, signIn, signOut, orgId, staffProfile, role, accessTier, identityState, permissions, navItems, enforcement, brand, refetchBrand: fetchOrgId, subscription, refetchSubscription }}>
           {children}
         </AuthContext.Provider>
       );
@@ -1555,7 +1607,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.11</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.12</span>
               </div>
             </div>
             {isMobile && (
@@ -1811,9 +1863,9 @@
             supabase.from("staff").select("id", { count: "exact", head: true }).eq("is_active", true),
             supabase.from("persons").select("id", { count: "exact", head: true }).eq("is_active", true),
             supabase.from("staff_trainings").select("id, expires_at").lt("expires_at", nowISO),
-            supabase.from("person_service_authorizations").select("id", { count: "exact", head: true }),
+            supabase.from(AUTH_VIEW).select("id", { count: "exact", head: true }),
             supabase.from("staff_trainings").select("id, expires_at, staff(first_name, last_name), training_topic_definitions(topic_name)").lt("expires_at", in30.toISOString()).order("expires_at", { ascending: true }).limit(5),
-            supabase.from("person_service_authorizations").select("id, end_date, service_code_definitions(code), persons(first_name, last_name)").lt("end_date", in30.toISOString().split("T")[0]).order("end_date", { ascending: true }).limit(5),
+            supabase.from(AUTH_VIEW).select("id, end_date, service_code_definitions(code), persons(first_name, last_name)").lt("end_date", in30.toISOString().split("T")[0]).order("end_date", { ascending: true }).limit(5),
             // v19.2.1 hotfix: split the join — some FKs weren't resolvable by PostgREST, causing 400
             // v19.5.3 fix: documents.expires_at is a `date` column (not timestamp), so the
             //   lt comparison must use a date-only string (YYYY-MM-DD) rather than a full
@@ -3004,6 +3056,10 @@
         if (!personId) return;
         if (editingRef.current?.id !== personId) return; // r22 — stale before it starts: spend no generation, touch nothing
         const seq = nextListGen(personId);
+        // v20.0.12 (R3) — this list is the Add Auth / Set rate working set and
+        // reads the BASE table on purpose: it must show the true stored rate
+        // and the exact rows the v20.0.10 identity guard compares against.
+        // Only the manage tier can read it; everyone else reads AUTH_VIEW.
         const { data: authData, error } = await supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code)").eq("person_id", personId);
         if (error) return; // keep what is shown rather than blank the list on a failed refresh
         if (seq !== authListSeq.current[personId]) return; // superseded — a newer reload for THIS client started; its result wins
@@ -3497,7 +3553,7 @@
         setLoading(true);
         const [clientRes, scRes, placeRes] = await Promise.all([
           supabase.from("persons")
-            .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, support_coordinator, support_coordinator_phone, support_coordinator_email, support_coordinator_agency, guardian_name, guardian_phone, guardian_relation, emergency_contact_name, emergency_contact_phone, physician_name, physician_phone, address, city, state, zip, phone, person_service_authorizations(id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code))")
+            .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, support_coordinator, support_coordinator_phone, support_coordinator_email, support_coordinator_agency, guardian_name, guardian_phone, guardian_relation, emergency_contact_name, emergency_contact_phone, physician_name, physician_phone, address, city, state, zip, phone, person_service_authorizations:person_service_authorizations_v(id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code))")
             .order("last_name"),
           supabase.from("service_code_definitions").select("id, code").order("code"),
           supabase.from("person_placements").select("person_id, org_sites(site_type)").is("end_date", null), // v20.0.4
@@ -5787,7 +5843,7 @@
         setForm(prev => ({ ...prev, person_id: personId, goal_id: "" }));
         if (personId) {
           const [authData, goalData] = await Promise.all([
-            supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, service_code_definitions(code)").eq("person_id", personId),
+            supabase.from(AUTH_VIEW).select("id, service_code_id, authorized_units, used_units, service_code_definitions(code)").eq("person_id", personId),
             supabase.from("pcsp_goals").select("id, domain, goal_description, status").eq("person_id", personId).in("status", ["active", "in_progress"]).order("domain"),
           ]);
           setClientAuths(authData.data || []);
@@ -8584,7 +8640,7 @@
         setClockForm(p => ({ ...p, person_id: personId, service_code_id: "", context_id: "" }));
         if (personId) {
           const [authRes, ctxRes] = await Promise.all([
-            supabase.from("person_service_authorizations")
+            supabase.from(AUTH_VIEW)
               .select("service_code_id, service_code_definitions(id, code, name, evv_required)")
               .eq("person_id", personId),
             // v19.2 — pull active context memberships for this client
@@ -9646,7 +9702,7 @@
             supabase.from("persons").select("id, first_name, last_name, is_active, medicaid_number").eq("is_active", true), // v20.0.6 — the audit fetches the field it flags
             supabase.from("staff_trainings").select("id, staff_id, training_topic_id, completed_at, expires_at"),
             supabase.from("training_topic_definitions").select("id, topic_name, category, deadline_days, renewal_months, requires_certification"),
-            supabase.from("person_service_authorizations").select("id, person_id, service_code_id, authorized_units, used_units, end_date, service_code_definitions(code)"),
+            supabase.from(AUTH_VIEW).select("id, person_id, service_code_id, authorized_units, used_units, end_date, service_code_definitions(code)"),
             supabase.from("service_notes").select("id, person_id, service_code_id, service_date, status").order("service_date", { ascending: false }).limit(500),
             supabase.from("evv_sessions").select("id, staff_id, person_id, clock_in_at, clock_out_at, clock_in_lat, clock_in_lng, geofence_valid").order("clock_in_at", { ascending: false }).limit(200),
             supabase.from("org_sites").select("id, name, site_type, credential_type, capacity").eq("is_active", true), // v20.0.4
@@ -10344,7 +10400,7 @@
             supabase.from("staff_trainings").select("id, staff_id, training_topic_id, completed_at, expires_at, staff(first_name, last_name, is_active), training_topic_definitions(topic_name, category, renewal_months)"),
             supabase.from("training_topic_definitions").select("id, topic_name, category, deadline_days, renewal_months, requires_certification"),
             supabase.from("staff").select("id, first_name, last_name, hire_date, is_active").eq("is_active", true),
-            supabase.from("person_service_authorizations").select("id, person_id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code), persons(first_name, last_name)"),
+            supabase.from(AUTH_VIEW).select("id, person_id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code), persons(first_name, last_name)"),
             supabase.from("persons").select("id, first_name, last_name, is_active").eq("is_active", true),
             supabase.from("documents").select("id, staff_id, person_id, doc_type, file_name, expires_at, uploaded_at").eq("is_archived", false).not("expires_at", "is", null),
             supabase.from("medications").select("id, person_id, medication_name, dosage, frequency, schedule_times, is_prn, is_active, persons(first_name, last_name)").eq("is_active", true),
@@ -11840,7 +11896,7 @@
           const { data: notes } = await query;
 
           // Pull all auths for rate lookup
-          const { data: auths } = await supabase.from("person_service_authorizations")
+          const { data: auths } = await supabase.from(AUTH_VIEW)
             .select("id, person_id, service_code_id, authorized_units, used_units, rate_per_unit, service_code_definitions(code)");
 
           const authMap = {};
@@ -12571,7 +12627,7 @@
           // ═══ CLIENT FACE SHEET ═══
           else if (tmpl.id === "client_face_sheet") {
             const { data: client } = await supabase.from("persons").select("*").eq("id", entityId).single();
-            const { data: auths } = await supabase.from("person_service_authorizations").select("authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code)").eq("person_id", entityId);
+            const { data: auths } = await supabase.from(AUTH_VIEW).select("authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code)").eq("person_id", entityId);
             const doc = new jsPDF();
             let y = pdfHeader(doc, "Client Face Sheet — Tab 1", `${client.first_name} ${client.last_name}`);
             doc.setFontSize(10);
@@ -16944,34 +17000,52 @@
       );
     }
 
-    // v20.0.4 — minimal assign-to-site (staff_assignments site-edges only;
-    // person-edge UI arrives when Item 4 makes anything consume it). The edge
-    // is the operator's career; placements flowing through are the chapters.
+    // v20.0.4 — assign-to-site (staff_assignments site edges). The edge is the
+    // operator's career; placements flowing through are the chapters.
+    // v20.0.12 (Item 4 R4 / B4) — person edges join the tab. Sight for a
+    // deliver-tier login = an open person edge here, or a site edge here plus
+    // the person's placement at that site (can_see_person in the database).
+    // Edges with origin "schedule" were opened by the shifts trigger and run
+    // from the shift date through +7 days, extended by later shifts; a manager
+    // who wants sight to be permanent assigns the person here (origin manual).
     function StaffAssignmentsTab({ staffId, orgId }) {
       const { addToast } = useToast();
       const [edges, setEdges] = useState([]);
+      const [personEdges, setPersonEdges] = useState([]);
       const [siteOptions, setSiteOptions] = useState([]);
+      const [personOptions, setPersonOptions] = useState([]);
       const [loading, setLoading] = useState(true);
       const [saving, setSaving] = useState(false);
+      const [savingPerson, setSavingPerson] = useState(false);
       const today = () => new Date().toISOString().split("T")[0];
       const [form, setForm] = useState({ site_id: "", start_date: today() });
+      const [pForm, setPForm] = useState({ person_id: "", start_date: today() });
 
       const load = async () => {
         setLoading(true);
-        const [aRes, sRes] = await Promise.all([
+        const [aRes, pRes, sRes, cRes] = await Promise.all([
           supabase.from("staff_assignments")
             .select("id, site_id, start_date, end_date, org_sites(name, site_type)")
             .eq("staff_id", staffId).not("site_id", "is", null).order("start_date", { ascending: false }),
+          supabase.from("staff_assignments")
+            .select("id, person_id, start_date, end_date, origin, persons(first_name, last_name)")
+            .eq("staff_id", staffId).not("person_id", "is", null).order("start_date", { ascending: false }),
           supabase.from("org_sites").select("id, name, site_type").eq("is_active", true).order("name"),
+          supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
         ]);
         setEdges(aRes.data || []);
+        setPersonEdges(pRes.data || []);
         setSiteOptions(sRes.data || []);
+        setPersonOptions(cRes.data || []);
         setLoading(false);
       };
       useEffect(() => { load(); }, [staffId]);
 
       const active = edges.filter(e => !e.end_date);
+      const isOpen = (e) => !e.end_date || e.end_date >= today();
+      const activePeople = personEdges.filter(isOpen);
       const fmtD = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString() : "—";
+      const personName = (e) => e.persons ? `${e.persons.first_name || ""} ${e.persons.last_name || ""}`.trim() : "—";
 
       const handleAssign = async () => {
         if (!form.site_id) return addToast("Choose a site", "error");
@@ -16987,6 +17061,20 @@
         load();
       };
 
+      const handleAssignPerson = async () => {
+        if (!pForm.person_id) return addToast("Choose a person", "error");
+        setSavingPerson(true);
+        const { error } = await supabase.from("staff_assignments").insert({
+          org_id: orgId, staff_id: staffId, person_id: pForm.person_id,
+          start_date: pForm.start_date || today(), is_primary: false, origin: "manual",
+        });
+        setSavingPerson(false);
+        if (error) return addToast(error.message.includes("staff_assignments_active_person_uniq") ? "Already actively assigned to that person" : error.message, "error");
+        addToast("Assignment recorded", "success");
+        setPForm({ person_id: "", start_date: today() });
+        load();
+      };
+
       const handleEndEdge = async (edge) => {
         if (!confirm(`End the assignment to ${edge.org_sites?.name || "this site"}? History is kept.`)) return;
         const { error } = await supabase.from("staff_assignments").update({ end_date: today() }).eq("id", edge.id);
@@ -16995,48 +17083,104 @@
         load();
       };
 
+      const handleEndPersonEdge = async (edge) => {
+        const what = edge.origin === "schedule" ? "schedule-opened sight of" : "assignment to";
+        if (!confirm(`End the ${what} ${personName(edge)}? History is kept; a future shift for this pair opens sight again.`)) return;
+        const { error } = await supabase.from("staff_assignments").update({ end_date: today() }).eq("id", edge.id);
+        if (error) return addToast(error.message, "error");
+        addToast("Assignment ended", "success");
+        load();
+      };
+
       if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
 
+      const endBtn = (onClick) => (
+        <button onClick={onClick} style={{ padding: "3px 8px", borderRadius: 6, border: `1px solid ${CB.border}`, background: CB.white, color: CB.red, cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit" }}>End</button>
+      );
+
       return (
-        <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, padding: 20 }}>
-          <h4 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Site Assignments</h4>
-          <p style={{ fontSize: 12, color: CB.textLight, marginBottom: 16 }}>
-            Who serves where, as dated history. In Item 4 these edges become what an operator's login can see — access flows from relationship, never role alone.
-          </p>
-          <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 16 }}>
-            <div style={{ flex: 2, minWidth: 220 }}>
-              <FormField label="Assign to Site">
-                <select style={fieldStyle} value={form.site_id} onChange={e => setForm(p => ({ ...p, site_id: e.target.value }))}>
-                  <option value="">Select a site…</option>
-                  {siteOptions.map(s => <option key={s.id} value={s.id}>{s.name}{s.site_type === "hhs" ? " (Host Home)" : ""}</option>)}
-                </select>
-              </FormField>
+        <div style={{ display: "grid", gap: 16 }}>
+          <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, padding: 20 }}>
+            <h4 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Site Assignments</h4>
+            <p style={{ fontSize: 12, color: CB.textLight, marginBottom: 16 }}>
+              Who serves where, as dated history. A site edge gives a front-line login sight of everyone placed at that site — access flows from relationship, never role alone.
+            </p>
+            <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 16 }}>
+              <div style={{ flex: 2, minWidth: 220 }}>
+                <FormField label="Assign to Site">
+                  <select style={fieldStyle} value={form.site_id} onChange={e => setForm(p => ({ ...p, site_id: e.target.value }))}>
+                    <option value="">Select a site…</option>
+                    {siteOptions.map(s => <option key={s.id} value={s.id}>{s.name}{s.site_type === "hhs" ? " (Host Home)" : ""}</option>)}
+                  </select>
+                </FormField>
+              </div>
+              <div style={{ flex: 1, minWidth: 150 }}>
+                <FormField label="Start Date">
+                  <input style={fieldStyle} type="date" value={form.start_date} onChange={e => setForm(p => ({ ...p, start_date: e.target.value }))} />
+                </FormField>
+              </div>
+              <div style={{ paddingBottom: 14 }}>
+                <PrimaryButton onClick={handleAssign} loading={saving}>{icons.plus({ size: 14 })} Assign</PrimaryButton>
+              </div>
             </div>
-            <div style={{ flex: 1, minWidth: 150 }}>
-              <FormField label="Start Date">
-                <input style={fieldStyle} type="date" value={form.start_date} onChange={e => setForm(p => ({ ...p, start_date: e.target.value }))} />
-              </FormField>
-            </div>
-            <div style={{ paddingBottom: 14 }}>
-              <PrimaryButton onClick={handleAssign} loading={saving}>{icons.plus({ size: 14 })} Assign</PrimaryButton>
+            {active.length === 0 && <div style={{ padding: "12px 14px", borderRadius: 10, border: `1px dashed ${CB.border}`, color: CB.textLight, fontSize: 13, marginBottom: 12 }}>No active site assignments.</div>}
+            <div style={{ display: "grid", gap: 6 }}>
+              {edges.map(e => (
+                <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", borderRadius: 8, border: `1px solid ${e.end_date ? CB.border : `${CB.teal}50`}`, fontSize: 13, background: e.end_date ? CB.white : `${CB.teal}06` }}>
+                  <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <span style={{ fontWeight: 600, color: CB.navy }}>{e.org_sites?.name || "—"}</span>
+                    {e.org_sites?.site_type === "hhs" && <Badge text="Host Home" color={CB.teal} />}
+                  </span>
+                  <span style={{ display: "flex", gap: 10, alignItems: "center", color: CB.textMid }}>
+                    {fmtD(e.start_date)} → {e.end_date ? fmtD(e.end_date) : "present"}
+                    {!e.end_date && endBtn(() => handleEndEdge(e))}
+                  </span>
+                </div>
+              ))}
             </div>
           </div>
-          {active.length === 0 && <div style={{ padding: "12px 14px", borderRadius: 10, border: `1px dashed ${CB.border}`, color: CB.textLight, fontSize: 13, marginBottom: 12 }}>No active site assignments.</div>}
-          <div style={{ display: "grid", gap: 6 }}>
-            {edges.map(e => (
-              <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", borderRadius: 8, border: `1px solid ${e.end_date ? CB.border : `${CB.teal}50`}`, fontSize: 13, background: e.end_date ? CB.white : `${CB.teal}06` }}>
-                <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <span style={{ fontWeight: 600, color: CB.navy }}>{e.org_sites?.name || "—"}</span>
-                  {e.org_sites?.site_type === "hhs" && <Badge text="Host Home" color={CB.teal} />}
-                </span>
-                <span style={{ display: "flex", gap: 10, alignItems: "center", color: CB.textMid }}>
-                  {fmtD(e.start_date)} → {e.end_date ? fmtD(e.end_date) : "present"}
-                  {!e.end_date && (
-                    <button onClick={() => handleEndEdge(e)} style={{ padding: "3px 8px", borderRadius: 6, border: `1px solid ${CB.border}`, background: CB.white, color: CB.red, cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit" }}>End</button>
-                  )}
-                </span>
+
+          <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, padding: 20 }}>
+            <h4 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Person Assignments</h4>
+            <p style={{ fontSize: 12, color: CB.textLight, marginBottom: 16 }}>
+              Who this staff member may see, one person at a time. Scheduling a shift for someone they cannot see opens a temporary edge automatically (shift date through 7 days after, extended by later shifts); assign here to make it permanent. Ending an edge ends sight — history is kept.
+            </p>
+            <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 16 }}>
+              <div style={{ flex: 2, minWidth: 220 }}>
+                <FormField label="Assign to Person">
+                  <select style={fieldStyle} value={pForm.person_id} onChange={e => setPForm(p => ({ ...p, person_id: e.target.value }))}>
+                    <option value="">Select a person…</option>
+                    {personOptions.map(c => <option key={c.id} value={c.id}>{c.last_name}, {c.first_name}</option>)}
+                  </select>
+                </FormField>
               </div>
-            ))}
+              <div style={{ flex: 1, minWidth: 150 }}>
+                <FormField label="Start Date">
+                  <input style={fieldStyle} type="date" value={pForm.start_date} onChange={e => setPForm(p => ({ ...p, start_date: e.target.value }))} />
+                </FormField>
+              </div>
+              <div style={{ paddingBottom: 14 }}>
+                <PrimaryButton onClick={handleAssignPerson} loading={savingPerson}>{icons.plus({ size: 14 })} Assign</PrimaryButton>
+              </div>
+            </div>
+            {activePeople.length === 0 && <div style={{ padding: "12px 14px", borderRadius: 10, border: `1px dashed ${CB.border}`, color: CB.textLight, fontSize: 13, marginBottom: 12 }}>No active person assignments.</div>}
+            <div style={{ display: "grid", gap: 6 }}>
+              {personEdges.map(e => {
+                const open = isOpen(e);
+                return (
+                  <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", borderRadius: 8, border: `1px solid ${open ? `${CB.teal}50` : CB.border}`, fontSize: 13, background: open ? `${CB.teal}06` : CB.white }}>
+                    <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <span style={{ fontWeight: 600, color: CB.navy }}>{personName(e)}</span>
+                      {e.origin === "schedule" && <Badge text="From schedule" color={CB.amber} />}
+                    </span>
+                    <span style={{ display: "flex", gap: 10, alignItems: "center", color: CB.textMid }}>
+                      {fmtD(e.start_date)} → {e.end_date ? (open ? `through ${fmtD(e.end_date)}` : fmtD(e.end_date)) : "present"}
+                      {open && endBtn(() => handleEndPersonEdge(e))}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
       );
@@ -17053,7 +17197,7 @@
       const loadClient = async () => {
         setLoading(true);
         const { data } = await supabase.from("persons")
-          .select("*, person_service_authorizations(id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code))")
+          .select("*, person_service_authorizations:person_service_authorizations_v(id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code))")
           .eq("id", clientId).single();
         setClient(data);
         setLoading(false);
@@ -18673,7 +18817,7 @@
       // Pull all the data we need in parallel
       const [personRes, authRes, medRes, contactRes, contextMemRes] = await Promise.all([
         supabase.from("persons").select("*").eq("id", personId).maybeSingle(),
-        supabase.from("person_service_authorizations").select("id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code, name)").eq("person_id", personId),
+        supabase.from(AUTH_VIEW).select("id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code, name)").eq("person_id", personId),
         supabase.from("medications").select("medication_name, dosage, frequency, schedule_times, is_prn, prn_reason, is_active").eq("person_id", personId).eq("is_active", true).limit(50),
         supabase.from("person_contacts").select("contact_type, name, relationship, phone, email").eq("person_id", personId),
         supabase.from("service_delivery_context_members").select("context_id, is_active, end_date, service_delivery_contexts(name, delivery_type, service_code_definitions(code))").eq("person_id", personId),
@@ -19665,8 +19809,34 @@
     // ═══════════════════════════════════════════════════════════════
     // APP ROOT
     // ═══════════════════════════════════════════════════════════════
+    // v20.0.12 — a signed-in user with no membership in the org their token
+    // names. The database already returns nothing to them (B1 guard); this is
+    // the honest screen instead of an empty dashboard. Same-user auth events do
+    // not re-run identity once it resolved, so the only way forward is an
+    // invitation (accepting one hard-reloads) or signing out.
+    function NoMembershipPage() {
+      const { user, signOut, brand } = useAuth();
+      return (
+        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: CB.cream, flexDirection: "column", gap: 16, padding: 24 }}>
+          <div style={{ width: 48, height: 48, borderRadius: 14, background: `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            {icons.shield({ size: 24, color: CB.white })}
+          </div>
+          <div style={{ maxWidth: 460, textAlign: "center" }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: CB.navy, marginBottom: 8 }}>No workspace access</div>
+            <div style={{ fontSize: 14, color: CB.textMid, marginBottom: 6 }}>
+              {user?.email} is signed in but is not an active member of {brand?.name || "this organization"}.
+            </div>
+            <div style={{ fontSize: 13, color: CB.textLight, marginBottom: 20 }}>
+              Access comes from an active staff record with a linked login. Ask your administrator to send an invitation to this email, or to reactivate your record.
+            </div>
+            <button onClick={() => signOut()} style={{ padding: "9px 16px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white, color: CB.navy, cursor: "pointer", fontSize: 13, fontWeight: 700, fontFamily: "inherit" }}>Sign out</button>
+          </div>
+        </div>
+      );
+    }
+
     function App() {
-      const { user, loading, brandReady } = useAuth();
+      const { user, loading, brandReady, identityState, role, accessTier } = useAuth();
 
       // v19.7.0 — Path-based routing for /signup. Listens to history events
       // so back-button after signup works. Reads window.location.pathname
@@ -19690,7 +19860,9 @@
       // a brief flash of "Hope Haven Services Inc." (DEFAULT_BRAND) or
       // their previous tenant's chrome before the real brand hydrates.
       // Spinner stays visible across the auth->brand transition.
-      if (loading || (user && !brandReady)) {
+      // v20.0.12 — also wait for identity (membership) to resolve. Before this
+      // the pending window rendered the owner fallback's chrome for everyone.
+      if (loading || (user && (!brandReady || identityState === "pending"))) {
         return (
           <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: CB.cream, flexDirection: "column", gap: 16 }}>
             <div style={{ width: 48, height: 48, borderRadius: 14, background: `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -19707,12 +19879,15 @@
         if (typeof window !== "undefined") {
           window.history.replaceState({}, "", "/app");
         }
-        return <AppShell />;
+        return (identityState === "ok" && (!role || !accessTier)) ? <NoMembershipPage /> : <AppShell />;
       }
 
       if (user && inviteToken) return <AcceptInvitePage token={inviteToken} />;
       if (!user && inviteToken) return <SignupPage inviteToken={inviteToken} />;
       if (!user && isSignupPath) return <SignupPage />;
+      // v20.0.12 — resolved identity with no role or no tier = no access. (A
+      // FAILED lookup is not this case: it degrades to dsp and keeps retrying.)
+      if (user && identityState === "ok" && (!role || !accessTier)) return <NoMembershipPage />;
       return user ? <AppShell /> : <LoginPage />;
     }
 
