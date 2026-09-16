@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.12ar1 (Greptile r1): a failed assignments read keeps the last successful list on screen and shows an error panel with Retry in place of the empty state — "No active … assignments" can no longer stand in for a network, PostgREST, or authorization failure. -->
   <!-- v20.0.12a: Staff → Assignments lists were silently EMPTY since v20.0.4g. That migration added tenant-bound composite foreign keys ALONGSIDE the original single-column ones on staff_assignments, so PostgREST found two relationships to org_sites (and to persons) and refused the embed with an error the page swallowed as "no assignments". The embeds now name the composite FK (org_sites!staff_assignments_site_org_fk, persons!staff_assignments_person_org_fk), and a failed load shows an error toast instead of an empty list. Data was never affected — every edge saved. -->
   <!-- v20.0.12 (Item 4 PR b — read policies): identity comes from MEMBERSHIP. Role and tier are read from member_role() / access_tier() (org_members, written only by the staff trigger and RPCs); the email-matched staff lookup and the "no staff row = owner" fallback are gone — no membership means a no-access screen, never a role. Navigation falls back by TIER (manage → owner set, operate → supervisor set, deliver → dsp set + training) instead of every unmapped role landing on the DSP menu. Every authorization READ goes through person_service_authorizations_v (rate hidden below manage; sight via can_see_person); the Add Auth write path stays on the base table. Staff → Assignments lists person edges (manual and schedule-opened, with their window) and can end them. Database side: sql/v20.0.12.sql — RESTRICTIVE tenant guard (org claim + live membership) on 44 tables, one tier read policy per table, staff_directory_v, the shifts → sight-edge trigger. -->
   <!-- v20.0.11 (Item 4 PR a — identity + membership): the database now owns who may change staff access. staff.role / is_active / user_id / termination_date and the organizations subscription columns are no longer app-writable (column privileges, sql/v20.0.11.sql); role changes and terminations go through set_staff_role / terminate_staff / reactivate_staff, which enforce the ceiling rule (act on and grant only roles below your own; owner anything; last owner protected). org_members is derived from staff by trigger. Invite modal offers only roles the caller may grant; existing staff records get 'Invite to app' (invite carries staff_id, accept_invite binds the login to that record). No visibility change yet — that is PR (b). Design: docs/item4-rls-design.md -->
@@ -17018,6 +17019,10 @@
       const [loading, setLoading] = useState(true);
       const [saving, setSaving] = useState(false);
       const [savingPerson, setSavingPerson] = useState(false);
+      // v20.0.12ar1 (Greptile r1) — a failed read is tracked per list, so the
+      // empty-state copy can never stand in for an error and a failed refresh
+      // never wipes what was already on screen.
+      const [loadError, setLoadError] = useState({ site: null, person: null });
       const today = () => new Date().toISOString().split("T")[0];
       const [form, setForm] = useState({ site_id: "", start_date: today() });
       const [pForm, setPForm] = useState({ person_id: "", start_date: today() });
@@ -17038,11 +17043,14 @@
           supabase.from("org_sites").select("id, name, site_type").eq("is_active", true).order("name"),
           supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
         ]);
-        // v20.0.12a — a failed read is an error, never "no assignments".
+        // v20.0.12a / ar1 — a failed read is an error, never "no assignments":
+        // the list keeps its last successful contents and shows an error panel
+        // in place of the empty state until a reload succeeds.
         if (aRes.error) addToast(`Could not load site assignments: ${aRes.error.message}`, "error");
+        else setEdges(aRes.data || []);
         if (pRes.error) addToast(`Could not load person assignments: ${pRes.error.message}`, "error");
-        setEdges(aRes.data || []);
-        setPersonEdges(pRes.data || []);
+        else setPersonEdges(pRes.data || []);
+        setLoadError({ site: aRes.error ? aRes.error.message : null, person: pRes.error ? pRes.error.message : null });
         setSiteOptions(sRes.data || []);
         setPersonOptions(cRes.data || []);
         setLoading(false);
@@ -17105,6 +17113,13 @@
       const endBtn = (onClick) => (
         <button onClick={onClick} style={{ padding: "3px 8px", borderRadius: 6, border: `1px solid ${CB.border}`, background: CB.white, color: CB.red, cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit" }}>End</button>
       );
+      // v20.0.12ar1 — shown INSTEAD of the empty state when the last read failed.
+      const errorPanel = (what, message) => (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: 10, border: `1px solid ${CB.red}55`, background: `${CB.red}08`, color: CB.red, fontSize: 13, marginBottom: 12 }}>
+          <span>Couldn't load {what}: {message}. The list below may be out of date.</span>
+          <button onClick={load} style={{ padding: "5px 10px", borderRadius: 6, border: `1px solid ${CB.red}55`, background: CB.white, color: CB.red, cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit", whiteSpace: "nowrap" }}>Retry</button>
+        </div>
+      );
 
       return (
         <div style={{ display: "grid", gap: 16 }}>
@@ -17131,7 +17146,9 @@
                 <PrimaryButton onClick={handleAssign} loading={saving}>{icons.plus({ size: 14 })} Assign</PrimaryButton>
               </div>
             </div>
-            {active.length === 0 && <div style={{ padding: "12px 14px", borderRadius: 10, border: `1px dashed ${CB.border}`, color: CB.textLight, fontSize: 13, marginBottom: 12 }}>No active site assignments.</div>}
+            {loadError.site
+              ? errorPanel("site assignments", loadError.site)
+              : active.length === 0 && <div style={{ padding: "12px 14px", borderRadius: 10, border: `1px dashed ${CB.border}`, color: CB.textLight, fontSize: 13, marginBottom: 12 }}>No active site assignments.</div>}
             <div style={{ display: "grid", gap: 6 }}>
               {edges.map(e => (
                 <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", borderRadius: 8, border: `1px solid ${e.end_date ? CB.border : `${CB.teal}50`}`, fontSize: 13, background: e.end_date ? CB.white : `${CB.teal}06` }}>
@@ -17171,7 +17188,9 @@
                 <PrimaryButton onClick={handleAssignPerson} loading={savingPerson}>{icons.plus({ size: 14 })} Assign</PrimaryButton>
               </div>
             </div>
-            {activePeople.length === 0 && <div style={{ padding: "12px 14px", borderRadius: 10, border: `1px dashed ${CB.border}`, color: CB.textLight, fontSize: 13, marginBottom: 12 }}>No active person assignments.</div>}
+            {loadError.person
+              ? errorPanel("person assignments", loadError.person)
+              : activePeople.length === 0 && <div style={{ padding: "12px 14px", borderRadius: 10, border: `1px dashed ${CB.border}`, color: CB.textLight, fontSize: 13, marginBottom: 12 }}>No active person assignments.</div>}
             <div style={{ display: "grid", gap: 6 }}>
               {personEdges.map(e => {
                 const open = isOpen(e);
