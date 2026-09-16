@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.12ar2 (Greptile r2): assignment loads carry a sequence number; a response that is no longer the newest load is discarded, so a Retry started before an assign/end can never overwrite that mutation's reload with older rows. First load only shows the spinner; retries keep the current list on screen. -->
   <!-- v20.0.12ar1 (Greptile r1): a failed assignments read keeps the last successful list on screen and shows an error panel with Retry in place of the empty state — "No active … assignments" can no longer stand in for a network, PostgREST, or authorization failure. -->
   <!-- v20.0.12a: Staff → Assignments lists were silently EMPTY since v20.0.4g. That migration added tenant-bound composite foreign keys ALONGSIDE the original single-column ones on staff_assignments, so PostgREST found two relationships to org_sites (and to persons) and refused the embed with an error the page swallowed as "no assignments". The embeds now name the composite FK (org_sites!staff_assignments_site_org_fk, persons!staff_assignments_person_org_fk), and a failed load shows an error toast instead of an empty list. Data was never affected — every edge saved. -->
   <!-- v20.0.12 (Item 4 PR b — read policies): identity comes from MEMBERSHIP. Role and tier are read from member_role() / access_tier() (org_members, written only by the staff trigger and RPCs); the email-matched staff lookup and the "no staff row = owner" fallback are gone — no membership means a no-access screen, never a role. Navigation falls back by TIER (manage → owner set, operate → supervisor set, deliver → dsp set + training) instead of every unmapped role landing on the DSP menu. Every authorization READ goes through person_service_authorizations_v (rate hidden below manage; sight via can_see_person); the Add Auth write path stays on the base table. Staff → Assignments lists person edges (manual and schedule-opened, with their window) and can end them. Database side: sql/v20.0.12.sql — RESTRICTIVE tenant guard (org claim + live membership) on 44 tables, one tier read policy per table, staff_directory_v, the shifts → sight-edge trigger. -->
@@ -17023,12 +17024,20 @@
       // empty-state copy can never stand in for an error and a failed refresh
       // never wipes what was already on screen.
       const [loadError, setLoadError] = useState({ site: null, person: null });
+      // v20.0.12ar2 (Greptile r2) — ordering guard: every load takes a sequence
+      // number and a response only lands if it is still the newest load. A
+      // Retry started before an assign/end cannot overwrite the mutation's own
+      // reload. The full-page spinner is for the first load only, so Retry
+      // keeps the last list on screen while it runs.
+      const loadSeq = useRef(0);
+      const loadedOnce = useRef(false);
       const today = () => new Date().toISOString().split("T")[0];
       const [form, setForm] = useState({ site_id: "", start_date: today() });
       const [pForm, setPForm] = useState({ person_id: "", start_date: today() });
 
       const load = async () => {
-        setLoading(true);
+        const seq = ++loadSeq.current;
+        if (!loadedOnce.current) setLoading(true);
         // v20.0.12a — staff_assignments carries TWO foreign keys to org_sites and
         // to persons (v20.0.4d/scaffold single-column + v20.0.4g tenant-bound
         // composite). PostgREST cannot choose between them, so the embed must
@@ -17043,6 +17052,7 @@
           supabase.from("org_sites").select("id, name, site_type").eq("is_active", true).order("name"),
           supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
         ]);
+        if (seq !== loadSeq.current) return; // v20.0.12ar2 — superseded by a newer load; its result wins
         // v20.0.12a / ar1 — a failed read is an error, never "no assignments":
         // the list keeps its last successful contents and shows an error panel
         // in place of the empty state until a reload succeeds.
@@ -17053,6 +17063,7 @@
         setLoadError({ site: aRes.error ? aRes.error.message : null, person: pRes.error ? pRes.error.message : null });
         setSiteOptions(sRes.data || []);
         setPersonOptions(cRes.data || []);
+        loadedOnce.current = true;
         setLoading(false);
       };
       useEffect(() => { load(); }, [staffId]);
