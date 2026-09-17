@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.13 (Item 4 PR c — write policies): the database now decides who may WRITE what (sql/v20.0.13.sql). Approved service notes, reviewed incidents and submitted quarterly summaries are locked for every tier; the only accepted change is an explicit Reopen by a supervisor or manager, written to audit_log; approval and review are stamped server-side. A client's identity fields change only under the manage tier; a DSP clocks in and out once and every EVV correction is a supervisor's, with the v20.0.10 reason + log; a DSP changes only the status of their own shift. In the app: the front-line invite gate is OFF (Host Home Operators and DSPs are invitable); coworker names on records come from staff_directory_v so front-line logins see names without the roster; Reopen buttons on notes and incidents; the EVV time-correction control is office-tier only; refused writes surface the database's own message. -->
   <!-- v20.0.12ar2 (Greptile r2): assignment loads carry a sequence number; a response that is no longer the newest load is discarded, so a Retry started before an assign/end can never overwrite that mutation's reload with older rows. First load only shows the spinner; retries keep the current list on screen. -->
   <!-- v20.0.12ar1 (Greptile r1): a failed assignments read keeps the last successful list on screen and shows an error panel with Retry in place of the empty state — "No active … assignments" can no longer stand in for a network, PostgREST, or authorization failure. -->
   <!-- v20.0.12a: Staff → Assignments lists were silently EMPTY since v20.0.4g. That migration added tenant-bound composite foreign keys ALONGSIDE the original single-column ones on staff_assignments, so PostgREST found two relationships to org_sites (and to persons) and refused the embed with an error the page swallowed as "no assignments". The embeds now name the composite FK (org_sites!staff_assignments_site_org_fk, persons!staff_assignments_person_org_fk), and a failed load shows an error toast instead of an empty list. Data was never affected — every edge saved. -->
@@ -318,6 +319,12 @@
     // can_see_person). The Add Auth write path — insert, read-back, twin check,
     // set-rate — stays on the base table, which only the manage tier can read.
     const AUTH_VIEW = "person_service_authorizations_v";
+    // v20.0.13 (B3) — coworker names on records (notes, EVV, shifts, medication
+    // logs, progress notes) and name pickers read staff_directory_v: id, name and
+    // role of ACTIVE staff, readable by every tier. The staff table itself stays
+    // own-row for front-line logins. Embeds are aliased "staff:" so consumers are
+    // unchanged; hinted embeds with two staff FKs (incidents reporter/reviewer)
+    // stay on the base table.
 
 
     function AuthProvider({ children }) {
@@ -1610,7 +1617,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.12a</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.13</span>
               </div>
             </div>
             {isMobile && (
@@ -1867,7 +1874,7 @@
             supabase.from("persons").select("id", { count: "exact", head: true }).eq("is_active", true),
             supabase.from("staff_trainings").select("id, expires_at").lt("expires_at", nowISO),
             supabase.from(AUTH_VIEW).select("id", { count: "exact", head: true }),
-            supabase.from("staff_trainings").select("id, expires_at, staff(first_name, last_name), training_topic_definitions(topic_name)").lt("expires_at", in30.toISOString()).order("expires_at", { ascending: true }).limit(5),
+            supabase.from("staff_trainings").select("id, expires_at, staff:staff_directory_v(first_name, last_name), training_topic_definitions(topic_name)").lt("expires_at", in30.toISOString()).order("expires_at", { ascending: true }).limit(5),
             supabase.from(AUTH_VIEW).select("id, end_date, service_code_definitions(code), persons(first_name, last_name)").lt("end_date", in30.toISOString().split("T")[0]).order("end_date", { ascending: true }).limit(5),
             // v19.2.1 hotfix: split the join — some FKs weren't resolvable by PostgREST, causing 400
             // v19.5.3 fix: documents.expires_at is a `date` column (not timestamp), so the
@@ -1882,7 +1889,7 @@
           const staffIds = [...new Set(docs.map(d => d.staff_id).filter(Boolean))];
           const personIds = [...new Set(docs.map(d => d.person_id).filter(Boolean))];
           const [staffLookup, personLookup] = await Promise.all([
-            staffIds.length ? supabase.from("staff").select("id, first_name, last_name").in("id", staffIds) : Promise.resolve({ data: [] }),
+            staffIds.length ? supabase.from("staff_directory_v").select("id, first_name, last_name").in("id", staffIds) : Promise.resolve({ data: [] }),
             personIds.length ? supabase.from("persons").select("id, first_name, last_name").in("id", personIds) : Promise.resolve({ data: [] }),
           ]);
           const staffById = Object.fromEntries((staffLookup.data || []).map(s => [s.id, s]));
@@ -2101,11 +2108,11 @@
             <label style={labelStyle}>Role *</label>
             <select value={form.role} onChange={e => set("role", e.target.value)} style={inputStyle} disabled={!!staff}>
               {/* v20.0.11 — only roles the caller may grant (ceiling mirror; server enforces). */}
-              {/* v20.0.4 (D5) — hhs_operator stays out of the invite path until
-                  Item 4 ships relationship-scoped RLS. An operator login before
-                  those walls exist would see org-wide PHI; records exist now,
-                  logins come with the walls. Reverse this filter in Item 4. */}
-              {STAFF_ROLES.filter(r => r.value !== "owner" && r.value !== "hhs_operator" && (canGrantRole(callerRole, r.value) || (staff && r.value === staff.role))).map(r => (
+              {/* v20.0.13 — the v20.0.4 (D5) gate is OFF: relationship-scoped
+                  reads (b) and writes (c) are live, so a Host Home Operator login
+                  sees and writes only its own home. The ceiling still decides
+                  who may grant which role. */}
+              {STAFF_ROLES.filter(r => r.value !== "owner" && (canGrantRole(callerRole, r.value) || (staff && r.value === staff.role))).map(r => (
                 <option key={r.value} value={r.value}>{r.label}</option>
               ))}
             </select>
@@ -2551,8 +2558,8 @@
         { label: "Email", render: (r) => r.email || "—" },
         { label: "", render: (r) => (<div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
           {/* v20.0.11 — a staff record with no login gets an app invite bound to THIS record */}
-          {/* hhs_operator logins wait for PR (b): an operator login before the walls exist would see org-wide PHI (v20.0.4 D5). */}
-          {r.is_active && !r.user_id && r.role !== "hhs_operator" && canManageStaff(callerRole, r.role) && (
+          {/* v20.0.13 — front-line gate OFF: operators and DSPs get "Invite to app" like everyone else (walls are up: (b) reads, (c) writes). */}
+          {r.is_active && !r.user_id && canManageStaff(callerRole, r.role) && (
             <button onClick={(e) => { e.stopPropagation(); setInviteStaff(r); setInviteOpen(true); }} style={{
               display: "flex", alignItems: "center", gap: 6, padding: "6px 12px",
               borderRadius: 8, border: `1px solid ${CB.teal}`, background: CB.white,
@@ -3642,7 +3649,7 @@
 
       useEffect(() => {
         if (open) {
-          supabase.from("staff").select("id, first_name, last_name").eq("is_active", true).order("last_name").then(({ data }) => setStaffList(data || []));
+          supabase.from("staff_directory_v").select("id, first_name, last_name").order("last_name").then(({ data }) => setStaffList(data || []));
           supabase.from("training_topic_definitions").select("id, topic_name, renewal_months").order("topic_name").then(({ data }) => {
             // Deduplicate by name
             const seen = new Map();
@@ -3774,7 +3781,7 @@
       const loadAll = async () => {
         setLoading(true);
         const [compRes, topicRes, staffRes] = await Promise.all([
-          supabase.from("staff_trainings").select("id, staff_id, training_topic_id, completed_at, expires_at, certificate_url, staff(first_name, last_name), training_topic_definitions(topic_name, category)").order("completed_at", { ascending: false }).limit(200),
+          supabase.from("staff_trainings").select("id, staff_id, training_topic_id, completed_at, expires_at, certificate_url, staff:staff_directory_v(first_name, last_name), training_topic_definitions(topic_name, category)").order("completed_at", { ascending: false }).limit(200),
           // v19.6.1 — include is_active for soft-delete filtering. If the column
           // doesn't exist yet (pre-migration), retry without it so the page
           // still renders.
@@ -5804,7 +5811,7 @@
       useEffect(() => {
         if (open) {
           Promise.all([
-            supabase.from("staff").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
+            supabase.from("staff_directory_v").select("id, first_name, last_name").order("last_name"),
             supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
             supabase.from("service_code_definitions").select("id, code, name").order("code"),
             // v19.2 — load active contexts
@@ -6629,6 +6636,13 @@
                         background: CB.green, color: CB.white, cursor: "pointer", fontFamily: "inherit",
                       }}>{icons.checkCircle({ size: 13, color: CB.white })} {viewing.status === "draft" ? "Submit" : "Approve"}</button>
                     )}
+                    {/* v20.0.13 (C1) — an approved note is locked in the database; Reopen (→ submitted) is the only change it accepts, and it is written to audit_log. */}
+                    {!editing && viewing.status === "approved" && perms.viewCompliance && (
+                      <button onClick={() => { if (confirm("Reopen this approved note for editing? The reopen is recorded in the audit log.")) updateStatus(viewing.id, "submitted"); }} style={{
+                        padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.amber}`, fontSize: 12, fontWeight: 700,
+                        background: `${CB.amber}12`, color: CB.amber, cursor: "pointer", fontFamily: "inherit",
+                      }}>{icons.edit({ size: 13, color: CB.amber })} Reopen</button>
+                    )}
                     {!editing && viewing.status !== "approved" && (
                       <button onClick={() => { setEditing(true); }} style={{
                         padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, fontSize: 12, fontWeight: 700,
@@ -6656,7 +6670,7 @@
                       </FormField>
                       <FormField label="Status" half style={{ marginBottom: 0 }}>
                         <select style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} value={editForm.status} onChange={e => setEditForm(p => ({ ...p, status: e.target.value }))}>
-                          {["draft", "submitted", "approved", "rejected"].map(s => <option key={s} value={s}>{s}</option>)}
+                          {["draft", "submitted", "approved", "rejected"].filter(s => s !== "approved" || perms.viewCompliance).map(s => <option key={s} value={s}>{s}</option>)}
                         </select>
                       </FormField>
                     </>
@@ -7341,7 +7355,7 @@
       useEffect(() => {
         if (!open) return;
         Promise.all([
-          supabase.from("staff").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
+          supabase.from("staff_directory_v").select("id, first_name, last_name").order("last_name"),
           supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
           supabase.from("service_code_definitions").select("id, code, name").order("code"),
           // v19.2 — load active contexts with their service code and org unit
@@ -7714,8 +7728,8 @@
         const endISO = fmtISODate(weekEndDate);
 
         // Shifts for this week — v19.2: include context data, graceful fallback if column/join not present
-        const shiftSelect = "id, staff_id, person_id, service_code_id, context_id, scheduled_date, scheduled_start, scheduled_end, location, notes, status, staff(first_name, last_name), persons(first_name, last_name), service_code_definitions(code), service_delivery_contexts(id, name, delivery_type)";
-        const shiftSelectLegacy = "id, staff_id, person_id, service_code_id, scheduled_date, scheduled_start, scheduled_end, location, notes, status, staff(first_name, last_name), persons(first_name, last_name), service_code_definitions(code)";
+        const shiftSelect = "id, staff_id, person_id, service_code_id, context_id, scheduled_date, scheduled_start, scheduled_end, location, notes, status, staff:staff_directory_v(first_name, last_name), persons(first_name, last_name), service_code_definitions(code), service_delivery_contexts(id, name, delivery_type)";
+        const shiftSelectLegacy = "id, staff_id, person_id, service_code_id, scheduled_date, scheduled_start, scheduled_end, location, notes, status, staff:staff_directory_v(first_name, last_name), persons(first_name, last_name), service_code_definitions(code)";
         let shiftRes = await supabase.from("shifts")
           .select(shiftSelect)
           .gte("scheduled_date", startISO)
@@ -7814,7 +7828,7 @@
         });
 
         // Also pull full staff list (so the grid shows staff even with no shifts this week)
-        const allStaffRes = await supabase.from("staff").select("id, first_name, last_name").eq("is_active", true).order("last_name");
+        const allStaffRes = await supabase.from("staff_directory_v").select("id, first_name, last_name").order("last_name");
         (allStaffRes.data || []).forEach(s => {
           if (!staffMap.has(s.id)) staffMap.set(s.id, s);
         });
@@ -8484,7 +8498,7 @@
     // ═══════════════════════════════════════════════════════════════
     function EVVPage() {
       const { addToast } = useToast();
-      const { orgId, enforcement, brand, staffProfile, user } = useAuth(); // v19.10 brand for filename; v19.10.1 identity for edit audit
+      const { orgId, enforcement, brand, staffProfile, user, accessTier } = useAuth(); // v19.10 brand for filename; v19.10.1 identity for edit audit; v20.0.13 tier for the correction control
       const [sessions, setSessions] = useState([]);
       const [loading, setLoading] = useState(true);
       const [staffList, setStaffList] = useState([]);
@@ -8587,8 +8601,8 @@
         // v19.2 — try to include context join; fall back if column/relationship not present
         // v20.0.10 (Item 5) — original_clock_in_at / original_clock_out_at come from
         // sql/v20.0.10.sql; until it runs, the select retries without them.
-        const evvSelect = "id, clock_in_at, clock_out_at, original_clock_in_at, original_clock_out_at, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, geofence_valid, exceptions, context_id, staff(first_name, last_name), persons(first_name, last_name), service_code_definitions(code), service_delivery_contexts(id, name, delivery_type)";
-        const evvSelectLegacy = "id, clock_in_at, clock_out_at, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, geofence_valid, exceptions, staff(first_name, last_name), persons(first_name, last_name), service_code_definitions(code)";
+        const evvSelect = "id, clock_in_at, clock_out_at, original_clock_in_at, original_clock_out_at, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, geofence_valid, exceptions, context_id, staff:staff_directory_v(first_name, last_name), persons(first_name, last_name), service_code_definitions(code), service_delivery_contexts(id, name, delivery_type)";
+        const evvSelectLegacy = "id, clock_in_at, clock_out_at, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, geofence_valid, exceptions, staff:staff_directory_v(first_name, last_name), persons(first_name, last_name), service_code_definitions(code)";
         let sessRes = await supabase.from("evv_sessions").select(evvSelect).order("clock_in_at", { ascending: false }).limit(50);
         if (sessRes.error && /original_clock/i.test(sessRes.error.message || "")) {
           sessRes = await supabase.from("evv_sessions").select(evvSelect.replace("original_clock_in_at, original_clock_out_at, ", "")).order("clock_in_at", { ascending: false }).limit(50);
@@ -8597,14 +8611,14 @@
           sessRes = await supabase.from("evv_sessions").select(evvSelectLegacy).order("clock_in_at", { ascending: false }).limit(50);
         }
         const [staffRes, clientRes, scRes] = await Promise.all([
-          supabase.from("staff").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
+          supabase.from("staff_directory_v").select("id, first_name, last_name").order("last_name"),
           supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
           supabase.from("service_code_definitions").select("id, code, name, evv_required").order("code"),
         ]);
         if (!sessRes.error) setSessions(sessRes.data || []);
         // v19.9 — open sessions regardless of recency (see openSessions note)
         const openRes = await supabase.from("evv_sessions")
-          .select("id, clock_in_at, clock_out_at, staff(first_name, last_name), persons(first_name, last_name), service_code_definitions(code)")
+          .select("id, clock_in_at, clock_out_at, staff:staff_directory_v(first_name, last_name), persons(first_name, last_name), service_code_definitions(code)")
           .is("clock_out_at", null)
           .order("clock_in_at", { ascending: true })
           .limit(200); // v19.9.1 — raised from 25 (Greptile: open sessions beyond cap vanished from banner)
@@ -8931,7 +8945,7 @@
         const start = new Date(Date.UTC(y, m - 1, 1) - mtOffset(y, m) * 3600000);
         const end = new Date(Date.UTC(nextY, nextM - 1, 1) - mtOffset(nextY, nextM) * 3600000);
         const { data, error } = await supabase.from("evv_sessions")
-          .select("id, clock_in_at, clock_out_at, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, geofence_valid, exceptions, staff(first_name, last_name), persons(id, first_name, last_name, medicaid_number), service_code_definitions(code, name)")
+          .select("id, clock_in_at, clock_out_at, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, geofence_valid, exceptions, staff:staff_directory_v(first_name, last_name), persons(id, first_name, last_name, medicaid_number), service_code_definitions(code, name)")
           .gte("clock_in_at", start.toISOString())
           .lt("clock_in_at", end.toISOString())
           .order("clock_in_at", { ascending: true })
@@ -9362,7 +9376,8 @@
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 20 }}>
                   <Badge text={viewing.service_code_definitions?.code || "?"} color={CB.blue} />
                   <Badge text={viewing.clock_out_at ? "Completed" : "Active"} color={viewing.clock_out_at ? CB.green : CB.amber} />
-                  {!editingEVV && viewing.clock_out_at && (
+                  {/* v20.0.13 (C4) — corrections are a supervisor's or manager's; a DSP clocks in and out once. The database enforces it; this only hides a button that would be refused. */}
+                  {!editingEVV && viewing.clock_out_at && accessTier !== "deliver" && (
                     <button onClick={() => setEditingEVV(true)} style={{
                       marginLeft: "auto", padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.border}`,
                       fontSize: 12, fontWeight: 700, background: CB.white, color: CB.textMid, cursor: "pointer", fontFamily: "inherit",
@@ -10095,7 +10110,7 @@
         const [incRes, clientRes, staffRes] = await Promise.all([
           supabase.from("incidents").select("*, persons(first_name, last_name), reporter:staff!incidents_reported_by_fkey(first_name, last_name), reviewer:staff!incidents_reviewed_by_fkey(first_name, last_name)").eq("org_id", orgId).order("occurred_at", { ascending: false }),
           supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
-          supabase.from("staff").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
+          supabase.from("staff_directory_v").select("id, first_name, last_name").order("last_name"),
         ]);
         setIncidents(incRes.data || []);
         setClients(clientRes.data || []);
@@ -10150,7 +10165,18 @@
         loadAll();
       };
 
+      // v20.0.13 (C2) — reopen: clear the review layer only; the database refuses anything else on a reviewed report and logs the reopen.
+      const reopenIncident = async (id) => {
+        if (!confirm("Reopen this reviewed incident for editing? The reopen is recorded in the audit log.")) return;
+        const { error } = await supabase.from("incidents").update({ status: "open", reviewed_at: null, reviewed_by: null }).eq("id", id);
+        if (error) return addToast(error.message, "error");
+        addToast("Incident reopened", "success");
+        setViewing(null);
+        loadAll();
+      };
+
       const updateStatus = async (id, status, reviewNotes) => {
+        // reviewed_by is stamped by the database from the reviewer's own staff row (v20.0.13); sent here only for older schemas.
         const update = { status, reviewed_by: staffProfile?.id, reviewed_at: new Date().toISOString() };
         if (reviewNotes) update.review_notes = reviewNotes;
         const { error } = await supabase.from("incidents").update(update).eq("id", id);
@@ -10232,6 +10258,13 @@
                     <button onClick={() => updateStatus(inc.id, "resolved", reviewNotes)} style={{ padding: "10px 18px", borderRadius: 10, border: "none", fontSize: 13, fontWeight: 700, background: `${CB.green}15`, color: CB.green, cursor: "pointer", fontFamily: "inherit" }}>Resolve</button>
                     <button onClick={() => updateStatus(inc.id, "closed", reviewNotes)} style={{ padding: "10px 18px", borderRadius: 10, border: "none", fontSize: 13, fontWeight: 700, background: `${CB.textLight}20`, color: CB.textMid, cursor: "pointer", fontFamily: "inherit" }}>Close</button>
                   </div>
+                </div>
+              )}
+              {/* v20.0.13 (C2) — a reviewed incident is locked in the database; Reopen clears the review (recorded in audit_log) so the report can be corrected and re-reviewed. */}
+              {perms.viewCompliance && inc.reviewed_at && (
+                <div style={{ padding: "14px 24px", borderTop: `1px solid ${CB.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                  <span style={{ fontSize: 12, color: CB.textLight }}>Reviewed {new Date(inc.reviewed_at).toLocaleString()} — the report is locked.</span>
+                  <button onClick={() => reopenIncident(inc.id)} style={{ padding: "8px 14px", borderRadius: 8, border: `1px solid ${CB.amber}`, fontSize: 12, fontWeight: 700, background: `${CB.amber}12`, color: CB.amber, cursor: "pointer", fontFamily: "inherit" }}>Reopen for edits</button>
                 </div>
               )}
             </div>
@@ -10824,7 +10857,7 @@
           const endDate = new Date(startDate); endDate.setDate(endDate.getDate() + 6);
           const [medRes, logRes] = await Promise.all([
             supabase.from("medications").select("*").eq("person_id", selectedClient).eq("is_active", true).order("medication_name"),
-            supabase.from("medication_logs").select("*, staff(first_name, last_name)").eq("person_id", selectedClient).gte("scheduled_date", startDate.toISOString().split("T")[0]).lte("scheduled_date", endDate.toISOString().split("T")[0]),
+            supabase.from("medication_logs").select("*, staff:staff_directory_v(first_name, last_name)").eq("person_id", selectedClient).gte("scheduled_date", startDate.toISOString().split("T")[0]).lte("scheduled_date", endDate.toISOString().split("T")[0]),
           ]);
           setMedications(medRes.data || []);
           setLogs(logRes.data || []);
@@ -11369,7 +11402,7 @@
         try {
           const [goalRes, noteRes] = await Promise.all([
             supabase.from("pcsp_goals").select("*").eq("person_id", selectedClient).order("created_at", { ascending: false }),
-            supabase.from("pcsp_progress_notes").select("*, staff(first_name, last_name)").eq("person_id", selectedClient).order("note_date", { ascending: false }),
+            supabase.from("pcsp_progress_notes").select("*, staff:staff_directory_v(first_name, last_name)").eq("person_id", selectedClient).order("note_date", { ascending: false }),
           ]);
           setGoals(goalRes.data || []);
           setProgressNotes(noteRes.data || []);
@@ -12722,7 +12755,7 @@
           else if (tmpl.id === "pcsp_summary") {
             const { data: client } = await supabase.from("persons").select("first_name, last_name").eq("id", entityId).single();
             const { data: goals } = await supabase.from("pcsp_goals").select("*").eq("person_id", entityId).neq("status", "discontinued");
-            const { data: notes } = await supabase.from("pcsp_progress_notes").select("*, staff(first_name, last_name)").eq("person_id", entityId).order("note_date", { ascending: false });
+            const { data: notes } = await supabase.from("pcsp_progress_notes").select("*, staff:staff_directory_v(first_name, last_name)").eq("person_id", entityId).order("note_date", { ascending: false });
             const doc = new jsPDF();
             const now = new Date(); const threeAgo = new Date(now); threeAgo.setMonth(threeAgo.getMonth() - 3);
             let y = pdfHeader(doc, "PCSP Quarterly Summary — Tab 6", `${client.first_name} ${client.last_name} — ${threeAgo.toLocaleDateString()} to ${now.toLocaleDateString()}`);
@@ -16563,7 +16596,7 @@
           supabase.from("medications").select("*").eq("person_id", clientId).order("medication_name"),
           // Real table is medication_logs — uses scheduled_date + scheduled_time, not passed_at
           supabase.from("medication_logs")
-            .select("id, scheduled_date, scheduled_time, status, administered_at, notes, medications(medication_name, dosage), staff(first_name, last_name)")
+            .select("id, scheduled_date, scheduled_time, status, administered_at, notes, medications(medication_name, dosage), staff:staff_directory_v(first_name, last_name)")
             .eq("person_id", clientId)
             .order("scheduled_date", { ascending: false })
             .order("scheduled_time", { ascending: false })
@@ -19087,8 +19120,8 @@
       // pattern used by ServiceNotesPage and EVVPage).
       const noteSelFull = "id, service_date, start_time, end_time, duration_minutes, billable_units, status, summary_note, service_code_id, staff_id, staff_ids, context_id, staff!service_notes_staff_id_fkey(first_name, last_name), service_code_definitions(code, name), service_delivery_contexts(id, name, delivery_type)";
       const noteSelLite = "id, service_date, start_time, end_time, duration_minutes, billable_units, status, summary_note, service_code_id, staff_id, staff_ids, staff!service_notes_staff_id_fkey(first_name, last_name), service_code_definitions(code, name)";
-      const evvSelFull  = "id, clock_in_at, clock_out_at, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, geofence_valid, exceptions, context_id, staff_id, person_id, service_code_id, staff(first_name, last_name), service_code_definitions(code), service_delivery_contexts(name, delivery_type)";
-      const evvSelLite  = "id, clock_in_at, clock_out_at, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, geofence_valid, exceptions, staff_id, person_id, service_code_id, staff(first_name, last_name), service_code_definitions(code)";
+      const evvSelFull  = "id, clock_in_at, clock_out_at, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, geofence_valid, exceptions, context_id, staff_id, person_id, service_code_id, staff:staff_directory_v(first_name, last_name), service_code_definitions(code), service_delivery_contexts(name, delivery_type)";
+      const evvSelLite  = "id, clock_in_at, clock_out_at, clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng, geofence_valid, exceptions, staff_id, person_id, service_code_id, staff:staff_directory_v(first_name, last_name), service_code_definitions(code)";
 
       const personRes = await supabase.from("persons").select("*").eq("id", personId).maybeSingle();
       const person = personRes.data;
@@ -19490,7 +19523,7 @@
       useEffect(() => {
         Promise.all([
           supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
-          supabase.from("staff").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
+          supabase.from("staff_directory_v").select("id, first_name, last_name").order("last_name"),
         ]).then(([p, s]) => {
           setPersons(p.data || []);
           setStaffList(s.data || []);

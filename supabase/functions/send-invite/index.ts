@@ -27,12 +27,16 @@ function json(body: unknown, status = 200): Response {
 }
 
 // Roles invitable in v20.0.3 — the user_role enum minus "owner", from the
-// live-DB diagnostic. Items 3-4 ALTER TYPE to add hhs_operator (with scope);
-// v20.5 adds care-circle roles. 'owner' is never invitable (DB CHECK agrees).
+// live-DB diagnostic. v20.5 adds care-circle roles. 'owner' is never
+// invitable (DB CHECK agrees).
+// v20.0.13r1 (Item 4 PR c, Greptile r1) — hhs_operator added: the front-line
+// gate is OFF now that reads (v20.0.12) and writes (v20.0.13) are
+// relationship-scoped; an operator login sees and writes only its own home.
+// billing / readonly stay listed but rank 0, so canGrant refuses them.
 const ALLOWED_INVITE_ROLES = [
   "admin", "supervisor", "dsp", "billing", "readonly", "bcba", "rn",
   "house_manager", "day_program_director", "residential_director",
-  "compliance_director",
+  "compliance_director", "hhs_operator",
 ];
 // Roles allowed to SEND invites.
 const CAN_INVITE = ["owner", "admin"];
