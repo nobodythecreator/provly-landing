@@ -27,6 +27,12 @@
 --   set read_at and nothing else; manage may edit.
 -- Service-role / SQL-editor writes (auth.uid() IS NULL) pass every trigger
 -- untouched — data repair stays possible; the triggers govern app logins.
+-- r1 (Greptile r1, Sep 16) — RE-RUN REQUIRED: (1) audit_log.action is
+-- VARCHAR(20); the reopen actions are now note_reopened / incident_reopened /
+-- summary_reopened and the verification asserts they fit; (2) C4 tightened —
+-- a deliver login may change ONLY clock_out_at/lat/lng, and only while the
+-- session is open; a completed session is frozen for deliver entirely
+-- (geofence_valid and exceptions included).
 -- ============================================================================
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -325,7 +331,7 @@ BEGIN
     END IF;
     NEW.approved_by := NULL; NEW.approved_at := NULL;
     INSERT INTO public.audit_log (org_id, user_id, action, table_name, record_id, old_data, new_data)
-    VALUES (OLD.org_id, auth.uid(), 'service_note_reopened', 'service_notes', OLD.id,
+    VALUES (OLD.org_id, auth.uid(), 'note_reopened', 'service_notes', OLD.id,
             jsonb_build_object('status', OLD.status, 'approved_by', OLD.approved_by, 'approved_at', OLD.approved_at),
             jsonb_build_object('status', NEW.status, 'reopened_by_staff_id', public.my_staff_id()));
     RETURN NEW;
@@ -450,7 +456,7 @@ BEGIN
     END IF;
     NEW.submitted_to_sc_at := NULL;
     INSERT INTO public.audit_log (org_id, user_id, action, table_name, record_id, old_data, new_data)
-    VALUES (OLD.org_id, auth.uid(), 'quarterly_summary_reopened', 'quarterly_summaries', OLD.id,
+    VALUES (OLD.org_id, auth.uid(), 'summary_reopened', 'quarterly_summaries', OLD.id,
             jsonb_build_object('status', OLD.status, 'submitted_to_sc_at', OLD.submitted_to_sc_at),
             jsonb_build_object('status', NEW.status, 'reopened_by_staff_id', public.my_staff_id()));
     RETURN NEW;
@@ -494,8 +500,12 @@ CREATE TRIGGER persons_identity_guard
   BEFORE UPDATE ON public.persons
   FOR EACH ROW EXECUTE FUNCTION public.trg_persons_identity_guard();
 
--- C4 — evv_sessions: a deliver login may only clock out, once. Everything else
--- is a correction: operate/manage with the v20.0.10 reason + edit log.
+-- C4 — evv_sessions: a deliver login may only clock out, once. While the
+-- session is open it may set clock_out_at / clock_out_lat / clock_out_lng and
+-- nothing else; once clock_out_at is set the row is frozen for deliver in
+-- every column (r1: geofence_valid and exceptions included — evidence, not
+-- the worker's to touch). Corrections are operate/manage with the v20.0.10
+-- reason + edit log.
 CREATE OR REPLACE FUNCTION public.trg_evv_deliver_guard()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -506,16 +516,18 @@ DECLARE
   v_tier text := public.access_tier();
   -- original_* are derive-only (trg_evv_sessions_preserve_originals rewrites them
   -- after this trigger); excluded so the check does not depend on trigger order.
-  v_clockout text[] := ARRAY['clock_out_at', 'clock_out_lat', 'clock_out_lng', 'geofence_valid', 'exceptions',
-                             'original_clock_in_at', 'original_clock_out_at'];
+  v_derived  text[] := ARRAY['original_clock_in_at', 'original_clock_out_at'];
+  v_clockout text[] := ARRAY['clock_out_at', 'clock_out_lat', 'clock_out_lng', 'original_clock_in_at', 'original_clock_out_at'];
 BEGIN
   IF auth.uid() IS NULL OR v_tier IN ('manage', 'operate') THEN RETURN NEW; END IF;
-  IF (to_jsonb(NEW) - v_clockout) <> (to_jsonb(OLD) - v_clockout) THEN
-    RAISE EXCEPTION 'EVV time corrections are made by a supervisor, with a reason';
+  IF OLD.clock_out_at IS NOT NULL THEN                          -- completed: frozen for deliver
+    IF (to_jsonb(NEW) - v_derived) <> (to_jsonb(OLD) - v_derived) THEN
+      RAISE EXCEPTION 'This session is already clocked out. Ask a supervisor to correct it.';
+    END IF;
+    RETURN NEW;
   END IF;
-  IF OLD.clock_out_at IS NOT NULL
-     AND (NEW.clock_out_at, NEW.clock_out_lat, NEW.clock_out_lng) IS DISTINCT FROM (OLD.clock_out_at, OLD.clock_out_lat, OLD.clock_out_lng) THEN
-    RAISE EXCEPTION 'This session is already clocked out. Ask a supervisor to correct it.';
+  IF (to_jsonb(NEW) - v_clockout) <> (to_jsonb(OLD) - v_clockout) THEN   -- open: clock-out fields only
+    RAISE EXCEPTION 'EVV time corrections are made by a supervisor, with a reason';
   END IF;
   RETURN NEW;
 END;
@@ -657,9 +669,9 @@ SELECT check_name, value, want FROM (
   SELECT 12, 'reopen paths write audit_log (three lock triggers carry their audit action)',
          (SELECT count(*)::text FROM pg_proc p
            WHERE p.pronamespace = 'public'::regnamespace
-             AND ((p.proname = 'trg_service_notes_lock' AND p.prosrc LIKE '%service_note_reopened%')
-               OR (p.proname = 'trg_incidents_lock' AND p.prosrc LIKE '%incident_reopened%')
-               OR (p.proname = 'trg_quarterly_summaries_lock' AND p.prosrc LIKE '%quarterly_summary_reopened%'))),
+             AND ((p.proname = 'trg_service_notes_lock' AND p.prosrc LIKE '%''note_reopened''%')
+               OR (p.proname = 'trg_incidents_lock' AND p.prosrc LIKE '%''incident_reopened''%')
+               OR (p.proname = 'trg_quarterly_summaries_lock' AND p.prosrc LIKE '%''summary_reopened''%'))),
          '3'
   UNION ALL
   SELECT 13, 'every trigger lets service-role / SQL-editor writes through (auth.uid() IS NULL check)',
@@ -678,4 +690,18 @@ SELECT check_name, value, want FROM (
   SELECT 15, '(info) approved notes with no approved_by stamp (approved before v20.0.13 — expected; stamps start now)',
          (SELECT count(*)::text FROM public.service_notes WHERE status = 'approved' AND approved_by IS NULL),
          'read'
+  UNION ALL
+  SELECT 16, 'r1: the three reopen actions fit audit_log.action (column max length shown)',
+         (SELECT (greatest(length('note_reopened'), length('incident_reopened'), length('summary_reopened'))
+                  <= coalesce(c.character_maximum_length, 1000000))::text || ' (max ' || coalesce(c.character_maximum_length::text, 'unbounded') || ')'
+            FROM information_schema.columns c
+           WHERE c.table_schema = 'public' AND c.table_name = 'audit_log' AND c.column_name = 'action'),
+         'true (max 20)'
+  UNION ALL
+  SELECT 17, 'r1: EVV deliver guard freezes completed sessions entirely (geofence_valid / exceptions no longer writable below office tiers)',
+         (SELECT count(*)::text FROM pg_proc p
+           WHERE p.pronamespace = 'public'::regnamespace AND p.proname = 'trg_evv_deliver_guard'
+             AND p.prosrc NOT LIKE '%''geofence_valid''%' AND p.prosrc NOT LIKE '%''exceptions''%'
+             AND p.prosrc LIKE '%already clocked out%'),
+         '1'
 ) v ORDER BY ord;
