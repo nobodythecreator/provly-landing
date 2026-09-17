@@ -14,6 +14,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.13ar1 (Greptile r1): the mid-join sign-up page is routed ahead of the readiness gate instead of bypassing it, the gate is unchanged, and a successful join lands on /app with a full reload (as accepting from a signed-in session already did) — brand and membership hydrate behind the spinner before any workspace surface renders. -->
+  <!-- v20.0.13a (go-live dry run, first deliver-tier login): front-line UI pass. Schedule shows a front-line login only its own row (the grid was listing every active name from the directory view); the Utah EVV submission pre-flight/export panel, New Shift, Add Goal, Quarterly Summary and Log Training are office-tier controls and are hidden below it (the database already refused them). Join flow: while SignupPage is accepting an invite, App no longer mounts AcceptInvitePage on the SIGNED_IN event, which had run accept_invite a second time and flashed "Couldn't accept this invitation" before the reload landed on the dashboard. -->
   <!-- v20.0.13 (Item 4 PR c — write policies): the database now decides who may WRITE what (sql/v20.0.13.sql). Approved service notes, reviewed incidents and submitted quarterly summaries are locked for every tier; the only accepted change is an explicit Reopen by a supervisor or manager, written to audit_log; approval and review are stamped server-side. A client's identity fields change only under the manage tier; a DSP clocks in and out once and every EVV correction is a supervisor's, with the v20.0.10 reason + log; a DSP changes only the status of their own shift. In the app: the front-line invite gate is OFF (Host Home Operators and DSPs are invitable); coworker names on records come from staff_directory_v so front-line logins see names without the roster; Reopen buttons on notes and incidents; the EVV time-correction control is office-tier only; refused writes surface the database's own message. -->
   <!-- v20.0.12ar2 (Greptile r2): assignment loads carry a sequence number; a response that is no longer the newest load is discarded, so a Retry started before an assign/end can never overwrite that mutation's reload with older rows. First load only shows the spinner; retries keep the current list on screen. -->
   <!-- v20.0.12ar1 (Greptile r1): a failed assignments read keeps the last successful list on screen and shows an error panel with Retry in place of the empty state — "No active … assignments" can no longer stand in for a network, PostgREST, or authorization failure. -->
@@ -996,6 +998,12 @@
     // Branding. Decision-fatigue principle: don't make users choose
     // colors before they've seen them in context.
     // ═══════════════════════════════════════════════════════════════
+    // v20.0.13a — set while SignupPage is mid-join (signUp → accept_invite →
+    // refresh → reload). App reads it so the SIGNED_IN event does not swap in
+    // AcceptInvitePage, which re-ran accept_invite on a consumed token and
+    // flashed "Couldn't accept this invitation" before the reload landed.
+    let joinInProgress = false;
+
     function SignupPage({ inviteToken = null }) {
       const [form, setForm] = useState({
         legal_name: "", address: "", phone: "", email: "", contract_number: "",
@@ -1073,6 +1081,7 @@
         // (joins the inviting org) instead of signup_create_organization.
         if (inviteMode) {
           setSubmitting(true);
+          joinInProgress = true; // v20.0.13a — this page owns the accept until it navigates or fails
           try {
             // v20.0.3.4 — re-validate at the submit instant so an account is
             // never created against a link that has meanwhile been
@@ -1090,7 +1099,7 @@
                   : recheck && recheck.reason === "superseded"
                     ? "A newer invitation was sent to this email. Open the most recent invite email and use that link."
                     : "This invitation is no longer valid — see the notice above.");
-              setSubmitting(false);
+              setSubmitting(false); joinInProgress = false;
               return;
             }
             const { data: authData, error: authErr } = await supabase.auth.signUp({
@@ -1103,12 +1112,12 @@
               } else {
                 setSubmitError(authErr.message || "Sign-up failed. Please try again.");
               }
-              setSubmitting(false);
+              setSubmitting(false); joinInProgress = false;
               return;
             }
             if (!authData || !authData.session) {
               setSubmitError("Account created — confirm your email, then open your invite link again to finish joining.");
-              setSubmitting(false);
+              setSubmitting(false); joinInProgress = false;
               return;
             }
             const { error: acceptErr } = await supabase.rpc("accept_invite", { p_token: inviteToken });
@@ -1122,7 +1131,7 @@
               setSubmitError(superseded
                 ? "Your account was created, but a newer invitation replaced this link. Open the most recent invite email and click its link to finish joining."
                 : `Account created but joining failed: ${acceptErr.message}. Please contact your administrator.`);
-              setSubmitting(false);
+              setSubmitting(false); joinInProgress = false;
               return;
             }
             // The org_id JWT claim was just written server-side; refresh the
@@ -1139,16 +1148,21 @@
               console.error("post-accept session refresh failed:", refreshErr);
               await supabase.auth.signOut().catch(() => {});
               setSubmitError("You've joined successfully, but this tab couldn't refresh your session. Use the Sign in link below to enter your workspace.");
-              setSubmitting(false);
+              setSubmitting(false); joinInProgress = false;
               return;
             }
-            window.history.pushState({}, "", "/app");
-            window.dispatchEvent(new PopStateEvent("popstate"));
+            // v20.0.13ar1 — the claim-bearing session is in place; land on /app
+            // with a FULL reload (as AcceptInvitePage does) so AuthProvider
+            // hydrates brand + membership from a clean slate behind the
+            // readiness gate. joinInProgress is cleared for completeness; the
+            // reload discards this realm anyway.
+            joinInProgress = false;
+            window.location.replace("/app");
             return;
           } catch (err) {
             console.error("Invite signup unexpected error:", err);
             setSubmitError(err.message || "Something went wrong. Please try again.");
-            setSubmitting(false);
+            setSubmitting(false); joinInProgress = false;
             return;
           }
         }
@@ -1169,12 +1183,12 @@
             } else {
               setSubmitError(authErr.message || "Sign-up failed. Please try again.");
             }
-            setSubmitting(false);
+            setSubmitting(false); joinInProgress = false;
             return;
           }
           if (!authData?.user) {
             setSubmitError("Sign-up succeeded but no session was returned. Please try signing in.");
-            setSubmitting(false);
+            setSubmitting(false); joinInProgress = false;
             return;
           }
 
@@ -1617,7 +1631,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.13</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.13a</span>
               </div>
             </div>
             {isMobile && (
@@ -3747,7 +3761,7 @@
     };
 
     function TrainingPage() {
-      const { orgId } = useAuth();
+      const { orgId, accessTier } = useAuth(); // v20.0.13a — logging a training is an office-tier write
       const { addToast } = useToast();
       const [tab, setTab] = useState("bystaff");
       const [completions, setCompletions] = useState([]);
@@ -3907,7 +3921,7 @@
       return (
         <div>
           <PageHeader title="Training Tracker" subtitle={`${topics.length} training ${topics.length === 1 ? "topic" : "topics"} — view by staff member, completion log, or topic definitions`}
-            action={<PrimaryButton onClick={() => setFormOpen(true)}>{icons.plus({ size: 16 })} Log Training</PrimaryButton>}
+            action={accessTier === "deliver" ? null : <PrimaryButton onClick={() => setFormOpen(true)}>{icons.plus({ size: 16 })} Log Training</PrimaryButton>}
           />
           <div style={{ display: "flex", gap: 4, marginBottom: 20, background: CB.cream, padding: 4, borderRadius: 10, width: "fit-content", flexWrap: "wrap" }}>
             <TabButton value="bystaff" label="By Staff" />
@@ -7687,7 +7701,10 @@
     }
 
     function SchedulePage({ onNavigate }) {
-      const { orgId } = useAuth();
+      // v20.0.13a — a front-line login sees its own row only (its shifts are the
+      // only ones RLS returns; the grid was still listing every active name).
+      const { orgId, accessTier, staffProfile } = useAuth();
+      const frontLine = accessTier === "deliver";
       const { addToast } = useToast();
       const { isMobile } = useMobile();
       const [anchorDate, setAnchorDate] = useState(() => weekStart(new Date()));
@@ -7835,7 +7852,7 @@
 
         setShifts(enriched);
         setEvvSessions(evvRes.data || []);
-        setStaff([...staffMap.values()]);
+        setStaff([...staffMap.values()].filter(s => !frontLine || s.id === staffProfile?.id)); // v20.0.13a
         setClients([...clientMap.values()]);
         setLoading(false);
       };
@@ -7919,8 +7936,8 @@
 
       return (
         <div>
-          <PageHeader title="Schedule" subtitle="Weekly shift planning, coverage, and gap detection"
-            action={<PrimaryButton onClick={() => openNew()}>{icons.plus({ size: 16 })} New Shift</PrimaryButton>}
+          <PageHeader title="Schedule" subtitle={frontLine ? "Your shifts this week" : "Weekly shift planning, coverage, and gap detection"}
+            action={frontLine ? null : <PrimaryButton onClick={() => openNew()}>{icons.plus({ size: 16 })} New Shift</PrimaryButton>}
           />
 
           {/* Toolbar: week nav + filters + view mode */}
@@ -7947,10 +7964,10 @@
               <span style={{ fontSize: 13, fontWeight: 700, color: CB.navy, marginLeft: 8 }}>{weekLabel}</span>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-              <select value={filterStaff} onChange={e => setFilterStaff(e.target.value)} style={{ ...fieldStyle, padding: "7px 12px", fontSize: 13, width: "auto", minWidth: 160 }}>
+              {!frontLine && <select value={filterStaff} onChange={e => setFilterStaff(e.target.value)} style={{ ...fieldStyle, padding: "7px 12px", fontSize: 13, width: "auto", minWidth: 160 }}>
                 <option value="">All staff</option>
                 {staff.map(s => <option key={s.id} value={s.id}>{s.first_name} {s.last_name}</option>)}
-              </select>
+              </select>}
               {contexts.length > 0 && (
                 <select value={filterContext} onChange={e => setFilterContext(e.target.value)} style={{ ...fieldStyle, padding: "7px 12px", fontSize: 13, width: "auto", minWidth: 180 }}>
                   <option value="">All contexts</option>
@@ -9300,8 +9317,9 @@
           )}
 
           {/* v19.9 — Utah EVV Submission pre-flight (validation runs the checks
-              the state system rejects on, before you export/submit a month) */}
-          <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, padding: 20, marginBottom: 20 }}>
+              the state system rejects on, before you export/submit a month)
+              v20.0.13a — state-submission tooling is office-tier only. */}
+          {accessTier !== "deliver" && <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, padding: 20, marginBottom: 20 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
               <div style={{ flex: 1, minWidth: 220 }}>
                 <div style={{ fontSize: 15, fontWeight: 800, color: CB.navy }}>Utah EVV Submission — Pre-flight</div>
@@ -9364,7 +9382,7 @@
                 </div>
               );
             })()}
-          </div>
+          </div>}
 
           <DataTable columns={columns} data={sessions} loading={loading} emptyMessage="No EVV sessions recorded" onRowClick={openEVVDetail} />
 
@@ -11370,6 +11388,7 @@
     ];
 
     function PCSPGoalsPage() {
+      const { accessTier: pcspTier } = useAuth(); // v20.0.13a — goals and summaries are office-tier writes
       const [clients, setClients] = useState([]);
       const [selectedClient, setSelectedClient] = useState("");
       const [goals, setGoals] = useState([]);
@@ -11681,7 +11700,7 @@
       return (
         <div>
           <PageHeader title="PCSP Goal Tracking" subtitle={clientObj ? `${clientObj.first_name} ${clientObj.last_name} — ISP Goals & Progress` : "Select a client"}
-            action={
+            action={pcspTier === "deliver" ? null :
               <div style={{ display: "flex", gap: 8 }}>
                 <button onClick={generateSummary} disabled={!selectedClient || generatingSummary} style={{
                   display: "flex", alignItems: "center", gap: 8, padding: "10px 18px", borderRadius: 10,
@@ -19931,6 +19950,12 @@
       // a brief flash of "Hope Haven Services Inc." (DEFAULT_BRAND) or
       // their previous tenant's chrome before the real brand hydrates.
       // Spinner stays visible across the auth->brand transition.
+      // v20.0.13ar1 — a join in progress keeps SignupPage mounted through the
+      // SIGNED_IN event, routed ahead of the readiness gate so the gate itself is
+      // untouched. The join ends in a full reload of /app (below), which
+      // re-hydrates brand and membership behind this same spinner.
+      if (inviteToken && joinInProgress) return <SignupPage inviteToken={inviteToken} />;
+
       // v20.0.12 — also wait for identity (membership) to resolve. Before this
       // the pending window rendered the owner fallback's chrome for everyone.
       if (loading || (user && (!brandReady || identityState === "pending"))) {
