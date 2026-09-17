@@ -14,9 +14,10 @@ Updated: Sep 16 2026.
 - ✅ v20.0.11 — Item 4 PR (a): identity + membership + reverse drift (Sep 11)
 - ✅ v20.0.11a — tenant-isolation hotfix: seven tables had USING(true) policies (Sep 12)
 - ✅ v20.0.12 — Item 4 PR (b): read policies — tenant guard = org claim + live membership on 44 tables; one tier read policy per table (manage / operate / deliver); `person_service_authorizations_v` (rate hidden below manage) and `staff_directory_v`; schedule → 7-day sight edge; owner fallback retired (no membership = no access); nav by tier; Assignments person-edge list (Sep 16)
+- ✅ v20.0.12a — Staff → Assignments lists visible again (two FKs since v20.0.4g; embeds name the composite FK; failed loads show an error, never an empty list) (Sep 16)
+- ✅ v20.0.13 — Item 4 PR (c): write policies — one tier write policy per command on 44 tables; approved notes / reviewed incidents / submitted summaries locked with audited Reopen; client identity fields manage-only; EVV corrections supervisor-only; DSP shift status-only; audit + EVV edit logs append-only; front-line invite gate OFF; coworker names via `staff_directory_v` (Sep 16)
 
 ## Tier 1 — finish Item 4 (security)
-- ⬜ **v20.0.13 — Item 4 PR (c): write policies.** deliver = own records on visible people until signed off; operate/manage writes per matrix; sign-off lock; shift-status trigger; audit_log append-only; DELETE = manage only; staff names on records via `staff_directory_v`; front-line invite gate comes off.
 - ⬜ **Go live with identities.** Invite the seven unlinked Hope Haven records (front line included); retire the shared org login; assignments kept current as a security control.
 
 ## Tier 2 — small debts surfaced this cycle
