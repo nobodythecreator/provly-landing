@@ -22,6 +22,7 @@ Updated: Sep 16 2026.
 
 ## Tier 2 — small debts surfaced this cycle
 - ⬜ **AI drafting proxy.** Edge function holding the Anthropic key server-side; the AI page has never worked in production (browser-side calls, no key). Flips the landing row to shipped.
+- ⬜ **EVV correction RPC.** `correct_evv_session(session_id, patch, reason)` — edit-log row + session update in one transaction; becomes the only office-tier write path to clock times, so a reason and a log entry are database guarantees rather than app behavior (today: two client requests, audit first).
 - ⬜ **UPI, not PRISM.** Compliance-deadline D23 text + EVV export comment; begin "claims" → "payments" vocabulary.
 - 🧑 **Stripe:** delete the orphan Hope Haven customer ($0.00, Aug 1 4:18 PM) — confirm it is not `cus_Uzn7znOlF1QMue` first.
 - 🧑 **Staff data hygiene before go-live:** Elena Felix email has a stray `<`; Asunta Lubanga has no email; Kevin Halverson is in twice; Ethan Fox is roled DSP (operator?).
