@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.13ar1 (Greptile r1): the mid-join sign-up page is routed ahead of the readiness gate instead of bypassing it, the gate is unchanged, and a successful join lands on /app with a full reload (as accepting from a signed-in session already did) — brand and membership hydrate behind the spinner before any workspace surface renders. -->
   <!-- v20.0.13a (go-live dry run, first deliver-tier login): front-line UI pass. Schedule shows a front-line login only its own row (the grid was listing every active name from the directory view); the Utah EVV submission pre-flight/export panel, New Shift, Add Goal, Quarterly Summary and Log Training are office-tier controls and are hidden below it (the database already refused them). Join flow: while SignupPage is accepting an invite, App no longer mounts AcceptInvitePage on the SIGNED_IN event, which had run accept_invite a second time and flashed "Couldn't accept this invitation" before the reload landed on the dashboard. -->
   <!-- v20.0.13 (Item 4 PR c — write policies): the database now decides who may WRITE what (sql/v20.0.13.sql). Approved service notes, reviewed incidents and submitted quarterly summaries are locked for every tier; the only accepted change is an explicit Reopen by a supervisor or manager, written to audit_log; approval and review are stamped server-side. A client's identity fields change only under the manage tier; a DSP clocks in and out once and every EVV correction is a supervisor's, with the v20.0.10 reason + log; a DSP changes only the status of their own shift. In the app: the front-line invite gate is OFF (Host Home Operators and DSPs are invitable); coworker names on records come from staff_directory_v so front-line logins see names without the roster; Reopen buttons on notes and incidents; the EVV time-correction control is office-tier only; refused writes surface the database's own message. -->
   <!-- v20.0.12ar2 (Greptile r2): assignment loads carry a sequence number; a response that is no longer the newest load is discarded, so a Retry started before an assign/end can never overwrite that mutation's reload with older rows. First load only shows the spinner; retries keep the current list on screen. -->
@@ -1150,8 +1151,13 @@
               setSubmitting(false); joinInProgress = false;
               return;
             }
-            window.history.pushState({}, "", "/app");
-            window.dispatchEvent(new PopStateEvent("popstate"));
+            // v20.0.13ar1 — the claim-bearing session is in place; land on /app
+            // with a FULL reload (as AcceptInvitePage does) so AuthProvider
+            // hydrates brand + membership from a clean slate behind the
+            // readiness gate. joinInProgress is cleared for completeness; the
+            // reload discards this realm anyway.
+            joinInProgress = false;
+            window.location.replace("/app");
             return;
           } catch (err) {
             console.error("Invite signup unexpected error:", err);
@@ -19944,11 +19950,15 @@
       // a brief flash of "Hope Haven Services Inc." (DEFAULT_BRAND) or
       // their previous tenant's chrome before the real brand hydrates.
       // Spinner stays visible across the auth->brand transition.
+      // v20.0.13ar1 — a join in progress keeps SignupPage mounted through the
+      // SIGNED_IN event, routed ahead of the readiness gate so the gate itself is
+      // untouched. The join ends in a full reload of /app (below), which
+      // re-hydrates brand and membership behind this same spinner.
+      if (inviteToken && joinInProgress) return <SignupPage inviteToken={inviteToken} />;
+
       // v20.0.12 — also wait for identity (membership) to resolve. Before this
       // the pending window rendered the owner fallback's chrome for everyone.
-      // v20.0.13a — while SignupPage owns a join, keep it mounted: no spinner
-      // swap on the SIGNED_IN event (its async accept → refresh → reload continues).
-      if (loading || (user && !joinInProgress && (!brandReady || identityState === "pending"))) {
+      if (loading || (user && (!brandReady || identityState === "pending"))) {
         return (
           <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: CB.cream, flexDirection: "column", gap: 16 }}>
             <div style={{ width: 48, height: 48, borderRadius: 14, background: `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -19968,8 +19978,8 @@
         return (identityState === "ok" && (!role || !accessTier)) ? <NoMembershipPage /> : <AppShell />;
       }
 
-      if (user && inviteToken && !joinInProgress) return <AcceptInvitePage token={inviteToken} />; // v20.0.13a
-      if (inviteToken && (!user || joinInProgress)) return <SignupPage inviteToken={inviteToken} />;
+      if (user && inviteToken) return <AcceptInvitePage token={inviteToken} />;
+      if (!user && inviteToken) return <SignupPage inviteToken={inviteToken} />;
       if (!user && isSignupPath) return <SignupPage />;
       // v20.0.12 — resolved identity with no role or no tier = no access. (A
       // FAILED lookup is not this case: it degrades to dsp and keeps retrying.)
