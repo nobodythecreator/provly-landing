@@ -14,6 +14,10 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.13cr3 (Greptile r3): the form ref used by the co-staff retry guard is declared after the form state (cr2 read `form` before its useState — a ReferenceError on open). -->
+  <!-- v20.0.13cr2 (Greptile r2): the co-staff Retry re-runs only the coworker lookup for the current client (own sequence guard) — the note's goal, code, fields and chosen co-staff are untouched. -->
+  <!-- v20.0.13cr1 (Greptile r1): a failed co-staff candidate load shows an error with Retry instead of an empty picker; a context change that drops the selected client also clears co-staff candidates and chips and voids any in-flight load. -->
+  <!-- v20.0.13c (dry run, service-note form): the "Additional staff on shift" picker no longer enumerates the org for a front-line login — it lists the coworkers who share this client (staff_sharing_person RPC: open edges on the person or their home, plus office tiers), empty until a client is chosen. Office tiers keep the directory. The form's default service date is now the LOCAL date (the UTC default rolled to tomorrow after 6 PM Mountain). -->
   <!-- v20.0.13br3 (Greptile r3): a context-owned service code saves when the selected context locks that code and the client is an active member of it; non-context notes keep the direct current-authorization rule. -->
   <!-- v20.0.13br2 (Greptile r2): a front-line profile that hydrates after the form opened fills an empty author (never overwrites one); changing the service date drops a chosen code that is not current on the new date; Save refuses a code absent from the client's current authorizations unless an office tier chose Show all codes on purpose. -->
   <!-- v20.0.13br1 (Greptile r1): the front-line author preset lives in the form's single open-reset (no racing second effect); "authorized" means current on the service date (status + window), so expired authorizations no longer surface; a client switch clears the chosen code, its extra fields, the previous client's authorizations/goals and the office override at once, and a sequence guard discards late responses from an earlier client; the override also resets on every open. -->
@@ -1635,7 +1639,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.13b</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.13c</span>
               </div>
             </div>
             {isMobile && (
@@ -5811,6 +5815,25 @@
       const frontLine = accessTier === "deliver"; // v20.0.13b — writes as itself; authorized codes only
       const [showAllCodes, setShowAllCodes] = useState(false); // v20.0.13b — office-tier override
       const clientReqSeq = useRef(0); // v20.0.13br1 — client-load sequence guard (bumped on open and on every client change)
+      const [coStaffOptions, setCoStaffOptions] = useState([]); // v20.0.13c — front-line: coworkers who share the chosen client
+      const [coStaffError, setCoStaffError] = useState(null);   // v20.0.13cr1 — a failed candidate load is an error, never "no coworkers"
+      const coStaffSeq = useRef(0);                              // v20.0.13cr2 — sequence for standalone co-staff reloads
+
+      // v20.0.13cr2 — Retry re-runs ONLY the coworker lookup for the current
+      // client. It touches nothing else on the note: goal, code, fields and
+      // any already-chosen co-staff stay exactly as entered.
+      const retryCoStaff = async () => {
+        if (!frontLine || !form.person_id) return;
+        const seq = ++coStaffSeq.current;
+        const clientAtStart = form.person_id;
+        setCoStaffError(null);
+        const res = await supabase.rpc("staff_sharing_person", { p_person_id: clientAtStart });
+        if (seq !== coStaffSeq.current || clientAtStart !== formRef.current.person_id) return; // superseded or client changed meanwhile
+        if (res.error) setCoStaffError(res.error.message || "request failed");
+        else setCoStaffOptions(res.data || []);
+      };
+      // v20.0.13c — local calendar date (the UTC default rolled past midnight after 6 PM Mountain)
+      const localToday = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
       const perms = usePermissions();
       const [saving, setSaving] = useState(false);
       const [staffList, setStaffList] = useState([]);
@@ -5823,11 +5846,12 @@
       const [form, setForm] = useState({
         staff_id: "", co_staff_ids: [], person_id: "", service_code_id: "",
         context_id: "", // v19.2
-        service_date: new Date().toISOString().split("T")[0],
+        service_date: localToday(),
         start_time: "", end_time: "", note_text: "", goal_id: "",
       });
       const [extraFields, setExtraFields] = useState({});
       const [goals, setGoals] = useState([]);
+      const formRef = useRef(form); formRef.current = form;      // v20.0.13cr3 — declared after the form state it mirrors (cr2 read it before initialization)
 
       useEffect(() => {
         if (open) {
@@ -5864,7 +5888,9 @@
           // v20.0.13br1 — one reset path: a front-line author is the signed-in
           // staff record from the first render of the form (no second effect to
           // race), and the office "show all codes" override never survives a reopen.
-          setForm({ staff_id: (frontLine && staffProfile?.id) ? staffProfile.id : "", co_staff_ids: [], person_id: "", service_code_id: "", context_id: "", service_date: new Date().toISOString().split("T")[0], start_time: "", end_time: "", note_text: "", goal_id: "" });
+          setForm({ staff_id: (frontLine && staffProfile?.id) ? staffProfile.id : "", co_staff_ids: [], person_id: "", service_code_id: "", context_id: "", service_date: localToday(), start_time: "", end_time: "", note_text: "", goal_id: "" });
+          setCoStaffOptions([]);
+          setCoStaffError(null);
           setExtraFields({});
           setSelectedCode(null);
           setClientAuths([]);
@@ -5899,14 +5925,21 @@
         setShowAllCodes(false);
         setClientAuths([]);
         setGoals([]);
+        if (frontLine) { coStaffSeq.current += 1; setCoStaffOptions([]); setCoStaffError(null); setForm(p => ({ ...p, co_staff_ids: [] })); } // v20.0.13c — co-staff are per client
         if (!personId) return;
-        const [authData, goalData] = await Promise.all([
+        const [authData, goalData, coData] = await Promise.all([
           supabase.from(AUTH_VIEW).select("id, service_code_id, authorized_units, used_units, status, start_date, end_date, service_code_definitions(code)").eq("person_id", personId),
           supabase.from("pcsp_goals").select("id, domain, goal_description, status").eq("person_id", personId).in("status", ["active", "in_progress"]).order("domain"),
+          frontLine ? supabase.rpc("staff_sharing_person", { p_person_id: personId }) : Promise.resolve({ data: null }),
         ]);
         if (seq !== clientReqSeq.current) return; // superseded by a newer client choice (or a reopen)
         setClientAuths(authData.data || []);
         setGoals(goalData.data || []);
+        if (frontLine) {
+          // v20.0.13cr1 — a failed load shows as an error with Retry, not as an empty picker
+          if (coData.error) { setCoStaffError(coData.error.message || "request failed"); }
+          else { setCoStaffOptions(coData.data || []); setCoStaffError(null); }
+        }
       };
 
       // v20.0.13br1 — an authorization counts only if it is current for the
@@ -5971,6 +6004,8 @@
           if (!personStillValid) {
             setClientAuths([]);
             setGoals([]);
+            clientReqSeq.current += 1;                       // v20.0.13cr1 — void any in-flight load for the dropped client
+            if (frontLine) { coStaffSeq.current += 1; setCoStaffOptions([]); setCoStaffError(null); setForm(p => ({ ...p, co_staff_ids: [] })); }
           }
         } else {
           setForm(prev => ({ ...prev, context_id: "" }));
@@ -6143,7 +6178,7 @@
                 {form.co_staff_ids.length > 0 && (
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
                     {form.co_staff_ids.map(coId => {
-                      const s = staffList.find(x => x.id === coId);
+                      const s = (frontLine ? coStaffOptions : staffList).find(x => x.id === coId);
                       if (!s) return null;
                       return (
                         <div key={coId} style={{
@@ -6170,12 +6205,19 @@
                     if (!e.target.value) return;
                     setForm(p => ({ ...p, co_staff_ids: [...p.co_staff_ids, e.target.value] }));
                   }}>
-                  <option value="">+ Add co-staff...</option>
-                  {staffList
+                  <option value="">{frontLine && !form.person_id ? "Choose a client first..." : "+ Add co-staff..."}</option>
+                  {/* v20.0.13c — a front-line login sees only the coworkers who share this client; office tiers see the directory */}
+                  {(frontLine ? coStaffOptions : staffList)
                     .filter(s => s.id !== form.staff_id && !form.co_staff_ids.includes(s.id))
                     .map(s => <option key={s.id} value={s.id}>{s.first_name} {s.last_name}</option>)}
                 </select>
-                {form.co_staff_ids.length === 0 && (
+                {frontLine && coStaffError && (
+                  <div style={{ marginTop: 6, fontSize: 12, color: CB.red, display: "flex", alignItems: "center", gap: 10 }}>
+                    <span>Couldn't load co-staff for this client: {coStaffError}</span>
+                    <button onClick={retryCoStaff} style={{ padding: "3px 8px", borderRadius: 6, border: `1px solid ${CB.red}55`, background: CB.white, color: CB.red, cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit" }}>Retry</button>
+                  </div>
+                )}
+                {form.co_staff_ids.length === 0 && !coStaffError && (
                   <div style={{ marginTop: 6, fontSize: 11, color: CB.textLight, fontStyle: "italic" }}>
                     For two-person shifts (e.g. RHS, HHS), add additional staff who worked the same shift.
                   </div>
