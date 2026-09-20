@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.13cr3 (Greptile r3): the form ref used by the co-staff retry guard is declared after the form state (cr2 read `form` before its useState — a ReferenceError on open). -->
   <!-- v20.0.13cr2 (Greptile r2): the co-staff Retry re-runs only the coworker lookup for the current client (own sequence guard) — the note's goal, code, fields and chosen co-staff are untouched. -->
   <!-- v20.0.13cr1 (Greptile r1): a failed co-staff candidate load shows an error with Retry instead of an empty picker; a context change that drops the selected client also clears co-staff candidates and chips and voids any in-flight load. -->
   <!-- v20.0.13c (dry run, service-note form): the "Additional staff on shift" picker no longer enumerates the org for a front-line login — it lists the coworkers who share this client (staff_sharing_person RPC: open edges on the person or their home, plus office tiers), empty until a client is chosen. Office tiers keep the directory. The form's default service date is now the LOCAL date (the UTC default rolled to tomorrow after 6 PM Mountain). -->
@@ -5817,7 +5818,6 @@
       const [coStaffOptions, setCoStaffOptions] = useState([]); // v20.0.13c — front-line: coworkers who share the chosen client
       const [coStaffError, setCoStaffError] = useState(null);   // v20.0.13cr1 — a failed candidate load is an error, never "no coworkers"
       const coStaffSeq = useRef(0);                              // v20.0.13cr2 — sequence for standalone co-staff reloads
-      const formRef = useRef(form); formRef.current = form;      // v20.0.13cr2 — current form for async guards
 
       // v20.0.13cr2 — Retry re-runs ONLY the coworker lookup for the current
       // client. It touches nothing else on the note: goal, code, fields and
@@ -5851,6 +5851,7 @@
       });
       const [extraFields, setExtraFields] = useState({});
       const [goals, setGoals] = useState([]);
+      const formRef = useRef(form); formRef.current = form;      // v20.0.13cr3 — declared after the form state it mirrors (cr2 read it before initialization)
 
       useEffect(() => {
         if (open) {
