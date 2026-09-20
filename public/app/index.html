@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.13br2 (Greptile r2): a front-line profile that hydrates after the form opened fills an empty author (never overwrites one); changing the service date drops a chosen code that is not current on the new date; Save refuses a code absent from the client's current authorizations unless an office tier chose Show all codes on purpose. -->
   <!-- v20.0.13br1 (Greptile r1): the front-line author preset lives in the form's single open-reset (no racing second effect); "authorized" means current on the service date (status + window), so expired authorizations no longer surface; a client switch clears the chosen code, its extra fields, the previous client's authorizations/goals and the office override at once, and a sequence guard discards late responses from an earlier client; the override also resets on every open. -->
   <!-- v20.0.13b (dry run, service-note form): a front-line login writes notes as itself — Primary Staff is fixed to the signed-in staff record (the database already requires staff_id = my_staff_id()). The Service Code picker offers the selected client's AUTHORIZED codes: office tiers can still "Show all codes" (the compliance mirror never blocks recording reality; the audit flags it), front-line logins cannot. -->
   <!-- v20.0.13ar1 (Greptile r1): the mid-join sign-up page is routed ahead of the readiness gate instead of bypassing it, the gate is unchanged, and a successful join lands on /app with a full reload (as accepting from a signed-in session already did) — brand and membership hydrate behind the spinner before any workspace surface renders. -->
@@ -5872,6 +5873,15 @@
         }
       }, [open]);
 
+      // v20.0.13br2 — if the front-line profile hydrates after the form opened,
+      // fill an EMPTY author. Declared after the open-reset so it runs after it;
+      // it never overwrites a set author, so there is no race in either order.
+      useEffect(() => {
+        if (open && frontLine && staffProfile?.id) {
+          setForm(p => (p.staff_id ? p : { ...p, staff_id: staffProfile.id }));
+        }
+      }, [open, frontLine, staffProfile?.id]);
+
       // Load client auths when person changes.
       // v20.0.13br1 — a client switch is a fresh start for everything that hangs
       // off the client: the chosen code and its extra fields are cleared (unless
@@ -5928,6 +5938,20 @@
         setExtraFields({});
       };
 
+      // v20.0.13br2 — the service date decides which authorizations are current;
+      // a chosen code that is not current on the new date is dropped (unless a
+      // context owns the code, or an office tier chose Show all codes), so it
+      // can never ride into the save payload.
+      const handleDateChange = (dateStr) => {
+        const dropCode = !!form.service_code_id && !form.context_id && !(showAllCodes && !frontLine)
+          && !clientAuths.some(a => a.service_code_id === form.service_code_id && authCurrentOn(a, dateStr));
+        setForm(prev => ({ ...prev, service_date: dateStr, service_code_id: dropCode ? "" : prev.service_code_id }));
+        if (dropCode) {
+          setSelectedCode(null); setExtraFields({});
+          addToast("That service code is not authorized on the new date — choose a code again", "warning");
+        }
+      };
+
       // v19.2 — context picker: locks service code + filters clients to members
       const handleContextChange = (ctxId) => {
         const ctx = contexts.find(c => c.id === ctxId);
@@ -5966,6 +5990,13 @@
       const handleSave = async () => {
         if (!form.staff_id || !form.person_id || !form.service_code_id || !form.service_date) {
           return addToast("Primary staff, client, service code, and date are required", "error");
+        }
+        // v20.0.13br2 — the code must be authorized for this client on this
+        // date. Office tiers may override on purpose (Show all codes); the
+        // compliance audit flags the result. Front-line logins may not.
+        const codeIsCurrent = currentAuths.some(a => a.service_code_id === form.service_code_id);
+        if (!codeIsCurrent && !(showAllCodes && !frontLine)) {
+          return addToast("That service code is not authorized for this client on the service date", "error");
         }
         setSaving(true);
         // Calculate duration
@@ -6185,7 +6216,7 @@
           </FormField>
           <FormRow>
             <FormField label="Service Date" required half>
-              <input style={fieldStyle} type="date" value={form.service_date} onChange={e => set("service_date", e.target.value)} />
+              <input style={fieldStyle} type="date" value={form.service_date} onChange={e => handleDateChange(e.target.value)} />
             </FormField>
             <FormField label="Start Time" half>
               <input style={fieldStyle} type="time" value={form.start_time} onChange={e => set("start_time", e.target.value)} />
