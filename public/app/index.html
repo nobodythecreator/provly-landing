@@ -14,6 +14,10 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.13br3 (Greptile r3): a context-owned service code saves when the selected context locks that code and the client is an active member of it; non-context notes keep the direct current-authorization rule. -->
+  <!-- v20.0.13br2 (Greptile r2): a front-line profile that hydrates after the form opened fills an empty author (never overwrites one); changing the service date drops a chosen code that is not current on the new date; Save refuses a code absent from the client's current authorizations unless an office tier chose Show all codes on purpose. -->
+  <!-- v20.0.13br1 (Greptile r1): the front-line author preset lives in the form's single open-reset (no racing second effect); "authorized" means current on the service date (status + window), so expired authorizations no longer surface; a client switch clears the chosen code, its extra fields, the previous client's authorizations/goals and the office override at once, and a sequence guard discards late responses from an earlier client; the override also resets on every open. -->
+  <!-- v20.0.13b (dry run, service-note form): a front-line login writes notes as itself — Primary Staff is fixed to the signed-in staff record (the database already requires staff_id = my_staff_id()). The Service Code picker offers the selected client's AUTHORIZED codes: office tiers can still "Show all codes" (the compliance mirror never blocks recording reality; the audit flags it), front-line logins cannot. -->
   <!-- v20.0.13ar1 (Greptile r1): the mid-join sign-up page is routed ahead of the readiness gate instead of bypassing it, the gate is unchanged, and a successful join lands on /app with a full reload (as accepting from a signed-in session already did) — brand and membership hydrate behind the spinner before any workspace surface renders. -->
   <!-- v20.0.13a (go-live dry run, first deliver-tier login): front-line UI pass. Schedule shows a front-line login only its own row (the grid was listing every active name from the directory view); the Utah EVV submission pre-flight/export panel, New Shift, Add Goal, Quarterly Summary and Log Training are office-tier controls and are hidden below it (the database already refused them). Join flow: while SignupPage is accepting an invite, App no longer mounts AcceptInvitePage on the SIGNED_IN event, which had run accept_invite a second time and flashed "Couldn't accept this invitation" before the reload landed on the dashboard. -->
   <!-- v20.0.13 (Item 4 PR c — write policies): the database now decides who may WRITE what (sql/v20.0.13.sql). Approved service notes, reviewed incidents and submitted quarterly summaries are locked for every tier; the only accepted change is an explicit Reopen by a supervisor or manager, written to audit_log; approval and review are stamped server-side. A client's identity fields change only under the manage tier; a DSP clocks in and out once and every EVV correction is a supervisor's, with the v20.0.10 reason + log; a DSP changes only the status of their own shift. In the app: the front-line invite gate is OFF (Host Home Operators and DSPs are invitable); coworker names on records come from staff_directory_v so front-line logins see names without the roster; Reopen buttons on notes and incidents; the EVV time-correction control is office-tier only; refused writes surface the database's own message. -->
@@ -1631,7 +1635,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.13a</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.13b</span>
               </div>
             </div>
             {isMobile && (
@@ -5803,7 +5807,10 @@
 
     function ServiceNoteForm({ open, onClose, onSaved }) {
       const { addToast } = useToast();
-      const { orgId } = useAuth();
+      const { orgId, accessTier, staffProfile } = useAuth();
+      const frontLine = accessTier === "deliver"; // v20.0.13b — writes as itself; authorized codes only
+      const [showAllCodes, setShowAllCodes] = useState(false); // v20.0.13b — office-tier override
+      const clientReqSeq = useRef(0); // v20.0.13br1 — client-load sequence guard (bumped on open and on every client change)
       const perms = usePermissions();
       const [saving, setSaving] = useState(false);
       const [staffList, setStaffList] = useState([]);
@@ -5854,35 +5861,74 @@
                 });
             }
           });
-          setForm({ staff_id: "", co_staff_ids: [], person_id: "", service_code_id: "", context_id: "", service_date: new Date().toISOString().split("T")[0], start_time: "", end_time: "", note_text: "", goal_id: "" });
+          // v20.0.13br1 — one reset path: a front-line author is the signed-in
+          // staff record from the first render of the form (no second effect to
+          // race), and the office "show all codes" override never survives a reopen.
+          setForm({ staff_id: (frontLine && staffProfile?.id) ? staffProfile.id : "", co_staff_ids: [], person_id: "", service_code_id: "", context_id: "", service_date: new Date().toISOString().split("T")[0], start_time: "", end_time: "", note_text: "", goal_id: "" });
           setExtraFields({});
           setSelectedCode(null);
           setClientAuths([]);
           setGoals([]);
+          setShowAllCodes(false);
+          clientReqSeq.current += 1;   // any in-flight client load from a previous session is void
         }
       }, [open]);
 
-      // Load client auths when person changes
-      const handleClientChange = async (personId) => {
-        setForm(prev => ({ ...prev, person_id: personId, goal_id: "" }));
-        if (personId) {
-          const [authData, goalData] = await Promise.all([
-            supabase.from(AUTH_VIEW).select("id, service_code_id, authorized_units, used_units, service_code_definitions(code)").eq("person_id", personId),
-            supabase.from("pcsp_goals").select("id, domain, goal_description, status").eq("person_id", personId).in("status", ["active", "in_progress"]).order("domain"),
-          ]);
-          setClientAuths(authData.data || []);
-          setGoals(goalData.data || []);
-        } else {
-          setClientAuths([]);
-          setGoals([]);
+      // v20.0.13br2 — if the front-line profile hydrates after the form opened,
+      // fill an EMPTY author. Declared after the open-reset so it runs after it;
+      // it never overwrites a set author, so there is no race in either order.
+      useEffect(() => {
+        if (open && frontLine && staffProfile?.id) {
+          setForm(p => (p.staff_id ? p : { ...p, staff_id: staffProfile.id }));
         }
+      }, [open, frontLine, staffProfile?.id]);
+
+      // Load client auths when person changes.
+      // v20.0.13br1 — a client switch is a fresh start for everything that hangs
+      // off the client: the chosen code and its extra fields are cleared (unless
+      // a context legitimately owns the code), the office "show all" override is
+      // cleared, the previous client's authorizations/goals are dropped at once,
+      // and a late response from an earlier switch can never land (sequence guard).
+      const handleClientChange = async (personId) => {
+        const seq = ++clientReqSeq.current;
+        setForm(prev => ({
+          ...prev, person_id: personId, goal_id: "",
+          service_code_id: prev.context_id ? prev.service_code_id : "",
+        }));
+        if (!form.context_id) { setSelectedCode(null); setExtraFields({}); }
+        setShowAllCodes(false);
+        setClientAuths([]);
+        setGoals([]);
+        if (!personId) return;
+        const [authData, goalData] = await Promise.all([
+          supabase.from(AUTH_VIEW).select("id, service_code_id, authorized_units, used_units, status, start_date, end_date, service_code_definitions(code)").eq("person_id", personId),
+          supabase.from("pcsp_goals").select("id, domain, goal_description, status").eq("person_id", personId).in("status", ["active", "in_progress"]).order("domain"),
+        ]);
+        if (seq !== clientReqSeq.current) return; // superseded by a newer client choice (or a reopen)
+        setClientAuths(authData.data || []);
+        setGoals(goalData.data || []);
       };
+
+      // v20.0.13br1 — an authorization counts only if it is current for the
+      // service date: not expired/closed by status, and the date falls inside
+      // its window. (Server-side: the deliver INSERT policy will require the
+      // same — filed as a follow-up; today the compliance audit flags it.)
+      const authCurrentOn = (a, dateStr) => {
+        if (!a) return false;
+        const st = String(a.status || "").toLowerCase();
+        if (["expired", "closed", "terminated", "denied", "inactive", "cancelled", "canceled"].includes(st)) return false;
+        const d = dateStr || new Date().toISOString().split("T")[0];
+        if (a.start_date && a.start_date > d) return false;
+        if (a.end_date && a.end_date < d) return false;
+        return true;
+      };
+      const currentAuths = useMemo(() => clientAuths.filter(a => authCurrentOn(a, form.service_date)), [clientAuths, form.service_date]);
 
       // Find the active auth for the selected client + code combo
       const activeAuth = useMemo(() => {
-        if (!form.service_code_id || !clientAuths.length) return null;
-        return clientAuths.find(a => a.service_code_id === form.service_code_id) || null;
-      }, [form.service_code_id, clientAuths]);
+        if (!form.service_code_id || !currentAuths.length) return null;
+        return currentAuths.find(a => a.service_code_id === form.service_code_id) || null;
+      }, [form.service_code_id, currentAuths]);
 
       const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
 
@@ -5891,6 +5937,20 @@
         const code = serviceCodes.find(s => s.id === scId);
         setSelectedCode(code?.code || null);
         setExtraFields({});
+      };
+
+      // v20.0.13br2 — the service date decides which authorizations are current;
+      // a chosen code that is not current on the new date is dropped (unless a
+      // context owns the code, or an office tier chose Show all codes), so it
+      // can never ride into the save payload.
+      const handleDateChange = (dateStr) => {
+        const dropCode = !!form.service_code_id && !form.context_id && !(showAllCodes && !frontLine)
+          && !clientAuths.some(a => a.service_code_id === form.service_code_id && authCurrentOn(a, dateStr));
+        setForm(prev => ({ ...prev, service_date: dateStr, service_code_id: dropCode ? "" : prev.service_code_id }));
+        if (dropCode) {
+          setSelectedCode(null); setExtraFields({});
+          addToast("That service code is not authorized on the new date — choose a code again", "warning");
+        }
       };
 
       // v19.2 — context picker: locks service code + filters clients to members
@@ -5931,6 +5991,20 @@
       const handleSave = async () => {
         if (!form.staff_id || !form.person_id || !form.service_code_id || !form.service_date) {
           return addToast("Primary staff, client, service code, and date are required", "error");
+        }
+        // v20.0.13br2 — the code must be authorized for this client on this
+        // date. Office tiers may override on purpose (Show all codes); the
+        // compliance audit flags the result. Front-line logins may not.
+        // v20.0.13br3 — a context-owned code is valid when the selected context
+        // locks that code AND the client is an active member of it (the context
+        // is the authorization for group service); everything else needs a
+        // direct current authorization.
+        const codeIsCurrent = currentAuths.some(a => a.service_code_id === form.service_code_id);
+        const ctx = form.context_id ? contexts.find(c => c.id === form.context_id) : null;
+        const codeViaContext = !!ctx && ctx.service_code_id === form.service_code_id
+          && (contextMembers[form.context_id] || []).includes(form.person_id);
+        if (!codeIsCurrent && !codeViaContext && !(showAllCodes && !frontLine)) {
+          return addToast("That service code is not authorized for this client on the service date", "error");
         }
         setSaving(true);
         // Calculate duration
@@ -6042,10 +6116,16 @@
 
           <FormRow>
             <FormField label="Primary Staff" required half>
-              <select style={fieldStyle} value={form.staff_id} onChange={e => set("staff_id", e.target.value)}>
-                <option value="">Select primary staff...</option>
-                {staffList.map(s => <option key={s.id} value={s.id}>{s.first_name} {s.last_name}</option>)}
-              </select>
+              {frontLine ? (
+                <div style={{ ...fieldStyle, background: "#F1F5F9", cursor: "not-allowed" }}>
+                  {staffProfile ? `${staffProfile.first_name || ""} ${staffProfile.last_name || ""}`.trim() : "You"}
+                </div>
+              ) : (
+                <select style={fieldStyle} value={form.staff_id} onChange={e => set("staff_id", e.target.value)}>
+                  <option value="">Select primary staff...</option>
+                  {staffList.map(s => <option key={s.id} value={s.id}>{s.first_name} {s.last_name}</option>)}
+                </select>
+              )}
             </FormField>
             <FormField label="Client" required half>
               <select style={fieldStyle} value={form.person_id} onChange={e => handleClientChange(e.target.value)}>
@@ -6110,13 +6190,25 @@
               disabled={!!form.context_id}
               onChange={e => handleCodeChange(e.target.value)}
             >
-              <option value="">Select service code...</option>
+              <option value="">{form.person_id ? "Select service code..." : "Select a client first..."}</option>
+              {/* v20.0.13b — once a client is chosen, offer the codes they are
+                  authorized for; office tiers may show every code (the mirror
+                  never blocks recording reality — the compliance audit flags it). */}
               {serviceCodes.map(sc => {
-                // If client selected, mark which codes they have auths for
-                const hasAuth = clientAuths.some(a => a.service_code_id === sc.id);
+                const hasAuth = currentAuths.some(a => a.service_code_id === sc.id); // v20.0.13br1 — current on the service date
+                if (form.person_id && !hasAuth && !(showAllCodes && !frontLine)) return null;
+                if (!form.person_id && frontLine) return null;
                 return <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}{hasAuth ? " ✓" : ""}</option>;
               })}
             </select>
+            {form.person_id && !frontLine && (
+              <div style={{ marginTop: 4, fontSize: 11, color: CB.textLight }}>
+                {showAllCodes ? "Showing every code. " : `Showing ${currentAuths.length} current authorization${currentAuths.length === 1 ? "" : "s"}. `}
+                <a href="#" onClick={e => { e.preventDefault(); setShowAllCodes(v => !v); }} style={{ color: CB.teal, fontWeight: 600 }}>
+                  {showAllCodes ? "Authorized only" : "Show all codes"}
+                </a>
+              </div>
+            )}
             {form.context_id && (
               <div style={{ marginTop: 4, fontSize: 11, color: CB.textLight, fontStyle: "italic" }}>
                 Locked to context's service code. Clear context to override.
@@ -6132,7 +6224,7 @@
           </FormField>
           <FormRow>
             <FormField label="Service Date" required half>
-              <input style={fieldStyle} type="date" value={form.service_date} onChange={e => set("service_date", e.target.value)} />
+              <input style={fieldStyle} type="date" value={form.service_date} onChange={e => handleDateChange(e.target.value)} />
             </FormField>
             <FormField label="Start Time" half>
               <input style={fieldStyle} type="time" value={form.start_time} onChange={e => set("start_time", e.target.value)} />
