@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.13br1 (Greptile r1): the front-line author preset lives in the form's single open-reset (no racing second effect); "authorized" means current on the service date (status + window), so expired authorizations no longer surface; a client switch clears the chosen code, its extra fields, the previous client's authorizations/goals and the office override at once, and a sequence guard discards late responses from an earlier client; the override also resets on every open. -->
   <!-- v20.0.13b (dry run, service-note form): a front-line login writes notes as itself — Primary Staff is fixed to the signed-in staff record (the database already requires staff_id = my_staff_id()). The Service Code picker offers the selected client's AUTHORIZED codes: office tiers can still "Show all codes" (the compliance mirror never blocks recording reality; the audit flags it), front-line logins cannot. -->
   <!-- v20.0.13ar1 (Greptile r1): the mid-join sign-up page is routed ahead of the readiness gate instead of bypassing it, the gate is unchanged, and a successful join lands on /app with a full reload (as accepting from a signed-in session already did) — brand and membership hydrate behind the spinner before any workspace surface renders. -->
   <!-- v20.0.13a (go-live dry run, first deliver-tier login): front-line UI pass. Schedule shows a front-line login only its own row (the grid was listing every active name from the directory view); the Utah EVV submission pre-flight/export panel, New Shift, Add Goal, Quarterly Summary and Log Training are office-tier controls and are hidden below it (the database already refused them). Join flow: while SignupPage is accepting an invite, App no longer mounts AcceptInvitePage on the SIGNED_IN event, which had run accept_invite a second time and flashed "Couldn't accept this invitation" before the reload landed on the dashboard. -->
@@ -5807,6 +5808,7 @@
       const { orgId, accessTier, staffProfile } = useAuth();
       const frontLine = accessTier === "deliver"; // v20.0.13b — writes as itself; authorized codes only
       const [showAllCodes, setShowAllCodes] = useState(false); // v20.0.13b — office-tier override
+      const clientReqSeq = useRef(0); // v20.0.13br1 — client-load sequence guard (bumped on open and on every client change)
       const perms = usePermissions();
       const [saving, setSaving] = useState(false);
       const [staffList, setStaffList] = useState([]);
@@ -5824,11 +5826,6 @@
       });
       const [extraFields, setExtraFields] = useState({});
       const [goals, setGoals] = useState([]);
-
-      // v20.0.13b — a front-line author is the signed-in staff record, always.
-      useEffect(() => {
-        if (open && frontLine && staffProfile?.id) setForm(p => ({ ...p, staff_id: staffProfile.id }));
-      }, [open, frontLine, staffProfile?.id]);
 
       useEffect(() => {
         if (open) {
@@ -5862,35 +5859,65 @@
                 });
             }
           });
-          setForm({ staff_id: "", co_staff_ids: [], person_id: "", service_code_id: "", context_id: "", service_date: new Date().toISOString().split("T")[0], start_time: "", end_time: "", note_text: "", goal_id: "" });
+          // v20.0.13br1 — one reset path: a front-line author is the signed-in
+          // staff record from the first render of the form (no second effect to
+          // race), and the office "show all codes" override never survives a reopen.
+          setForm({ staff_id: (frontLine && staffProfile?.id) ? staffProfile.id : "", co_staff_ids: [], person_id: "", service_code_id: "", context_id: "", service_date: new Date().toISOString().split("T")[0], start_time: "", end_time: "", note_text: "", goal_id: "" });
           setExtraFields({});
           setSelectedCode(null);
           setClientAuths([]);
           setGoals([]);
+          setShowAllCodes(false);
+          clientReqSeq.current += 1;   // any in-flight client load from a previous session is void
         }
       }, [open]);
 
-      // Load client auths when person changes
+      // Load client auths when person changes.
+      // v20.0.13br1 — a client switch is a fresh start for everything that hangs
+      // off the client: the chosen code and its extra fields are cleared (unless
+      // a context legitimately owns the code), the office "show all" override is
+      // cleared, the previous client's authorizations/goals are dropped at once,
+      // and a late response from an earlier switch can never land (sequence guard).
       const handleClientChange = async (personId) => {
-        setForm(prev => ({ ...prev, person_id: personId, goal_id: "" }));
-        if (personId) {
-          const [authData, goalData] = await Promise.all([
-            supabase.from(AUTH_VIEW).select("id, service_code_id, authorized_units, used_units, service_code_definitions(code)").eq("person_id", personId),
-            supabase.from("pcsp_goals").select("id, domain, goal_description, status").eq("person_id", personId).in("status", ["active", "in_progress"]).order("domain"),
-          ]);
-          setClientAuths(authData.data || []);
-          setGoals(goalData.data || []);
-        } else {
-          setClientAuths([]);
-          setGoals([]);
-        }
+        const seq = ++clientReqSeq.current;
+        setForm(prev => ({
+          ...prev, person_id: personId, goal_id: "",
+          service_code_id: prev.context_id ? prev.service_code_id : "",
+        }));
+        if (!form.context_id) { setSelectedCode(null); setExtraFields({}); }
+        setShowAllCodes(false);
+        setClientAuths([]);
+        setGoals([]);
+        if (!personId) return;
+        const [authData, goalData] = await Promise.all([
+          supabase.from(AUTH_VIEW).select("id, service_code_id, authorized_units, used_units, status, start_date, end_date, service_code_definitions(code)").eq("person_id", personId),
+          supabase.from("pcsp_goals").select("id, domain, goal_description, status").eq("person_id", personId).in("status", ["active", "in_progress"]).order("domain"),
+        ]);
+        if (seq !== clientReqSeq.current) return; // superseded by a newer client choice (or a reopen)
+        setClientAuths(authData.data || []);
+        setGoals(goalData.data || []);
       };
+
+      // v20.0.13br1 — an authorization counts only if it is current for the
+      // service date: not expired/closed by status, and the date falls inside
+      // its window. (Server-side: the deliver INSERT policy will require the
+      // same — filed as a follow-up; today the compliance audit flags it.)
+      const authCurrentOn = (a, dateStr) => {
+        if (!a) return false;
+        const st = String(a.status || "").toLowerCase();
+        if (["expired", "closed", "terminated", "denied", "inactive", "cancelled", "canceled"].includes(st)) return false;
+        const d = dateStr || new Date().toISOString().split("T")[0];
+        if (a.start_date && a.start_date > d) return false;
+        if (a.end_date && a.end_date < d) return false;
+        return true;
+      };
+      const currentAuths = useMemo(() => clientAuths.filter(a => authCurrentOn(a, form.service_date)), [clientAuths, form.service_date]);
 
       // Find the active auth for the selected client + code combo
       const activeAuth = useMemo(() => {
-        if (!form.service_code_id || !clientAuths.length) return null;
-        return clientAuths.find(a => a.service_code_id === form.service_code_id) || null;
-      }, [form.service_code_id, clientAuths]);
+        if (!form.service_code_id || !currentAuths.length) return null;
+        return currentAuths.find(a => a.service_code_id === form.service_code_id) || null;
+      }, [form.service_code_id, currentAuths]);
 
       const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
 
@@ -6129,7 +6156,7 @@
                   authorized for; office tiers may show every code (the mirror
                   never blocks recording reality — the compliance audit flags it). */}
               {serviceCodes.map(sc => {
-                const hasAuth = clientAuths.some(a => a.service_code_id === sc.id);
+                const hasAuth = currentAuths.some(a => a.service_code_id === sc.id); // v20.0.13br1 — current on the service date
                 if (form.person_id && !hasAuth && !(showAllCodes && !frontLine)) return null;
                 if (!form.person_id && frontLine) return null;
                 return <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}{hasAuth ? " ✓" : ""}</option>;
@@ -6137,7 +6164,7 @@
             </select>
             {form.person_id && !frontLine && (
               <div style={{ marginTop: 4, fontSize: 11, color: CB.textLight }}>
-                {showAllCodes ? "Showing every code. " : `Showing ${clientAuths.length} authorized code${clientAuths.length === 1 ? "" : "s"}. `}
+                {showAllCodes ? "Showing every code. " : `Showing ${currentAuths.length} current authorization${currentAuths.length === 1 ? "" : "s"}. `}
                 <a href="#" onClick={e => { e.preventDefault(); setShowAllCodes(v => !v); }} style={{ color: CB.teal, fontWeight: 600 }}>
                   {showAllCodes ? "Authorized only" : "Show all codes"}
                 </a>
