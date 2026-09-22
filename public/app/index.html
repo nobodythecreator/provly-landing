@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.13e (pre-invite polish, Tombé Sep 22): (1) the Dashboard subtitle is the business name alone — the DSPD contract number stays on the Compliance and Billing pages where it means something; (2) Staff and Clients lists keep inactive records at the bottom, whatever the sort; (3) the shared DataTable gained click-to-sort headers (▲/▼, third click clears) for any column that declares a sortKey or sortValue; Staff sorts by name, role, hire date, status, email; Clients by name, Medicaid #, DOB, status. Default: name A→Z. -->
   <!-- v20.0.13cr3 (Greptile r3): the form ref used by the co-staff retry guard is declared after the form state (cr2 read `form` before its useState — a ReferenceError on open). -->
   <!-- v20.0.13cr2 (Greptile r2): the co-staff Retry re-runs only the coworker lookup for the current client (own sequence guard) — the note's goal, code, fields and chosen co-staff are untouched. -->
   <!-- v20.0.13cr1 (Greptile r1): a failed co-staff candidate load shows an error with Retry instead of an empty picker; a context change that drops the selected client also clears co-staff candidates and chips and voids any in-flight load. -->
@@ -1639,7 +1640,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.13c</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.13e</span>
               </div>
             </div>
             {isMobile && (
@@ -1805,7 +1806,37 @@
       );
     }
 
-    function DataTable({ columns, data, loading, emptyMessage = "No data found", onRowClick }) {
+    // v20.0.13e — sortable headers + inactive-last.
+    //   A column is sortable when it declares sortKey (a row field) or
+    //   sortValue (row → comparable). Click cycles A→Z, Z→A, off. defaultSort
+    //   = { index, dir }. inactiveLast keeps rows with is_active === false at
+    //   the bottom whatever the sort, in their own sorted order.
+    const cmpSortValues = (a, b) => {
+      const na = a === null || a === undefined || a === "";
+      const nb = b === null || b === undefined || b === "";
+      if (na && nb) return 0; if (na) return 1; if (nb) return -1;          // blanks last
+      if (typeof a === "number" && typeof b === "number") return a - b;
+      if (typeof a === "boolean" && typeof b === "boolean") return (a === b) ? 0 : (a ? -1 : 1); // true first
+      return String(a).localeCompare(String(b), undefined, { sensitivity: "base", numeric: true });
+    };
+    function DataTable({ columns, data, loading, emptyMessage = "No data found", onRowClick, defaultSort = null, inactiveLast = false }) {
+      const [sort, setSort] = useState(defaultSort);
+      const isSortable = (col) => !!(col && (col.sortKey || col.sortValue));
+      const rows = useMemo(() => {
+        let arr = [...(data || [])];
+        const col = sort ? columns[sort.index] : null;
+        if (col && isSortable(col)) {
+          const val = (r) => col.sortValue ? col.sortValue(r) : r[col.sortKey];
+          const dir = sort.dir === "desc" ? -1 : 1;
+          arr.sort((a, b) => cmpSortValues(val(a), val(b)) * dir);
+        }
+        if (inactiveLast) arr = [...arr.filter(r => r.is_active !== false), ...arr.filter(r => r.is_active === false)];
+        return arr;
+      }, [data, sort, columns, inactiveLast]);
+      const clickHeader = (i) => {
+        if (!isSortable(columns[i])) return;
+        setSort(prev => (!prev || prev.index !== i) ? { index: i, dir: "asc" } : prev.dir === "asc" ? { index: i, dir: "desc" } : null);
+      };
       if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 48 }}><Spinner size={24} /></div>;
       return (
         <div style={{ background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, overflow: "hidden" }}>
@@ -1813,17 +1844,22 @@
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead>
                 <tr style={{ background: CB.cream }}>
-                  {columns.map((col, i) => (
-                    <th key={i} style={{ padding: "13px 18px", textAlign: "left", fontSize: 12, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.8, borderBottom: `1px solid ${CB.border}`, whiteSpace: "nowrap" }}>
-                      {col.label}
-                    </th>
-                  ))}
+                  {columns.map((col, i) => {
+                    const sortable = isSortable(col);
+                    const active = !!(sort && sort.index === i);
+                    return (
+                      <th key={i} onClick={() => clickHeader(i)} title={sortable ? "Click to sort" : undefined}
+                        style={{ padding: "13px 18px", textAlign: "left", fontSize: 12, fontWeight: 700, color: active ? CB.navy : CB.textLight, textTransform: "uppercase", letterSpacing: 0.8, borderBottom: `1px solid ${CB.border}`, whiteSpace: "nowrap", cursor: sortable ? "pointer" : "default", userSelect: "none" }}>
+                        {col.label}{sortable && <span style={{ marginLeft: 6, fontSize: 10, color: active ? CB.teal : `${CB.textLight}88` }}>{active ? (sort.dir === "asc" ? "▲" : "▼") : "▲▼"}</span>}
+                      </th>
+                    );
+                  })}
                 </tr>
               </thead>
               <tbody>
-                {data.length === 0 ? (
+                {rows.length === 0 ? (
                   <tr><td colSpan={columns.length} style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14 }}>{emptyMessage}</td></tr>
-                ) : data.map((row, ri) => (
+                ) : rows.map((row, ri) => (
                   <tr key={row.id || ri} style={{ borderBottom: `1px solid ${CB.border}`, cursor: onRowClick ? "pointer" : "default" }}
                     onClick={() => onRowClick && onRowClick(row)}
                     onMouseEnter={e => e.currentTarget.style.background = CB.cream}
@@ -1950,7 +1986,7 @@
 
       return (
         <div>
-          <PageHeader title="Dashboard" subtitle={brand.orgContractNumber ? `${brand.orgName} — ${brand.orgContractNumber}` : brand.orgName}
+          <PageHeader title="Dashboard" subtitle={brand.orgName} /* v20.0.13e — business name only; the contract number lives on Compliance and Billing */
             action={
               <button onClick={loadDashboard} style={{
                 display: "flex", alignItems: "center", gap: 8, padding: "10px 18px",
@@ -2556,7 +2592,7 @@
       const openProfile = (row) => setViewing(row);
 
       const columns = [
-        { label: "Name", bold: true, render: (r) => (
+        { label: "Name", bold: true, sortValue: (r) => `${r.last_name || ""} ${r.first_name || ""}`.trim(), render: (r) => (
           <button onClick={(e) => { e.stopPropagation(); openProfile(r); }} style={{
             background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit",
             fontSize: 14, fontWeight: 600, color: CB.navy, textAlign: "left",
@@ -2566,7 +2602,7 @@
             onMouseLeave={e => { e.currentTarget.style.color = CB.navy; }}
           >{r.first_name} {r.last_name}</button>
         )},
-        { label: "Role", render: (r) => (
+        { label: "Role", sortValue: (r) => STAFF_ROLES.find(x => x.value === r.role)?.label || r.role || "", render: (r) => (
           <div style={{ display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center" }}>
             <Badge text={STAFF_ROLES.find(x => x.value === r.role)?.label || r.role?.replace(/_/g, " ") || "—"} color={CB.navy} />
             {/* v20.0.4 (D6) — 1099 chip; amber = W-9 missing, the mirror's flag */}
@@ -2575,9 +2611,9 @@
             )}
           </div>
         )},
-        { label: "Hire Date", render: (r) => r.hire_date ? new Date(r.hire_date + "T00:00:00").toLocaleDateString() : "—" },
-        { label: "Status", render: (r) => <Badge text={r.is_active ? "Active" : "Inactive"} color={r.is_active ? CB.green : CB.textLight} /> },
-        { label: "Email", render: (r) => r.email || "—" },
+        { label: "Hire Date", sortKey: "hire_date", render: (r) => r.hire_date ? new Date(r.hire_date + "T00:00:00").toLocaleDateString() : "—" },
+        { label: "Status", sortValue: (r) => !!r.is_active, render: (r) => <Badge text={r.is_active ? "Active" : "Inactive"} color={r.is_active ? CB.green : CB.textLight} /> },
+        { label: "Email", sortKey: "email", render: (r) => r.email || "—" },
         { label: "", render: (r) => (<div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
           {/* v20.0.11 — a staff record with no login gets an app invite bound to THIS record */}
           {/* v20.0.13 — front-line gate OFF: operators and DSPs get "Invite to app" like everyone else (walls are up: (b) reads, (c) writes). */}
@@ -2609,7 +2645,7 @@
               </div>
             }
           />
-          <DataTable columns={columns} data={staff} loading={loading} emptyMessage="No staff members found" />
+          <DataTable columns={columns} data={staff} loading={loading} emptyMessage="No staff members found" defaultSort={{ index: 0, dir: "asc" }} inactiveLast />
           <StaffForm open={formOpen} onClose={() => setFormOpen(false)} onSaved={loadStaff} editing={editing} />
           <InviteStaffModal open={inviteOpen} staff={inviteStaff} onClose={() => { setInviteOpen(false); setInviteStaff(null); loadStaff(); }} />
           <StaffProfileModal open={!!viewing} onClose={() => setViewing(null)} staff={viewing} onEdit={openEdit} onViewFull={onNavigate ? (id) => onNavigate("staff-profile", { type: "staff", id }) : undefined} />
@@ -3612,7 +3648,7 @@
       const openProfile = (row) => setViewing(row);
 
       const columns = [
-        { label: "Name", bold: true, render: (r) => (
+        { label: "Name", bold: true, sortValue: (r) => `${r.last_name || ""} ${r.first_name || ""}`.trim(), render: (r) => (
           <button onClick={(e) => { e.stopPropagation(); openProfile(r); }} style={{
             background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit",
             fontSize: 14, fontWeight: 600, color: CB.navy, textAlign: "left",
@@ -3623,9 +3659,9 @@
           >{r.first_name} {r.last_name}</button>
         )},
         { label: "", render: (r) => hhsSet.has(r.id) ? <Badge text="Host home" color={CB.teal} /> : null }, // v20.0.4 (D6)
-        { label: "Medicaid #", render: (r) => r.medicaid_number || "—" },
-        { label: "DOB", render: (r) => r.date_of_birth ? new Date(r.date_of_birth + "T00:00:00").toLocaleDateString() : "—" },
-        { label: "Status", render: (r) => <Badge text={r.is_active ? "Active" : "Inactive"} color={r.is_active ? CB.green : CB.textLight} /> },
+        { label: "Medicaid #", sortKey: "medicaid_number", render: (r) => r.medicaid_number || "—" },
+        { label: "DOB", sortKey: "date_of_birth", render: (r) => r.date_of_birth ? new Date(r.date_of_birth + "T00:00:00").toLocaleDateString() : "—" },
+        { label: "Status", sortValue: (r) => !!r.is_active, render: (r) => <Badge text={r.is_active ? "Active" : "Inactive"} color={r.is_active ? CB.green : CB.textLight} /> },
         { label: "Authorizations", render: (r) => {
           const a = r.person_service_authorizations || [];
           return a.length > 0 ? (
@@ -3651,7 +3687,7 @@
           <PageHeader title="Clients" subtitle="Person management, authorizations, and service tracking"
             action={<PrimaryButton onClick={openAdd}>{icons.plus({ size: 16 })} Add Client</PrimaryButton>}
           />
-          <DataTable columns={columns} data={clients} loading={loading} emptyMessage="No clients found" />
+          <DataTable columns={columns} data={clients} loading={loading} emptyMessage="No clients found" defaultSort={{ index: 0, dir: "asc" }} inactiveLast />
           <ClientForm open={formOpen} onClose={() => { setFormOpen(false); loadClients(); }} onSaved={loadClients} editing={editing} />
           <ClientProfileModal open={!!viewing} onClose={() => setViewing(null)} client={viewing} onEdit={openEdit} scLookup={scLookup} onViewFull={onNavigate ? (id) => onNavigate("client-profile", { type: "client", id }) : undefined} />
         </div>
