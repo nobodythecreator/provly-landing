@@ -14,6 +14,9 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.14r2 (Greptile r2): the monthly MAR PDF derives its day count from the month-end string — r1 removed the Date it had read from. -->
+  <!-- v20.0.14r1 (Greptile r1): business dates are anchored to America/Denver, not the browser — ymd() and hm() format an instant in Denver via Intl; every date-window computation (last 3/7 days, next 30, month-to-date, previous month, quarter, MAR week, authorization/training expirations) is now pure calendar arithmetic on YYYY-MM-DD strings (ymdAdd / ymdAddMonths / ymdMonthStart / ymdMonthEnd / ymdQuarter), so no Date built from a date string is ever formatted back. -->
+  <!-- v20.0.14 (small debt #1 — local calendar dates): every default or computed calendar date in the app went through new Date().toISOString(), which is UTC — after 18:00 Mountain it names TOMORROW, so evening notes, EVV rows, incidents, med logs, shifts and report windows carried the wrong day. One helper, ymd(d), formats the LOCAL date; 55 sites switched. The one UTC round-trip kept on purpose is the CSV import normaliser (it parses arbitrary strings). Training expiration now parses the completed date as local midnight before adding renewal months. -->
   <!-- v20.0.13er1 (Greptile r1): blanks sort last in both directions (direction applies only between populated values); sortable headers are real buttons — focusable, Enter/Space toggles, visible focus ring — with aria-sort on the column header. -->
   <!-- v20.0.13e (pre-invite polish, Tombé Sep 22): (1) the Dashboard subtitle is the business name alone — the DSPD contract number stays on the Compliance and Billing pages where it means something; (2) Staff and Clients lists keep inactive records at the bottom, whatever the sort; (3) the shared DataTable gained click-to-sort headers (▲/▼, third click clears) for any column that declares a sortKey or sortValue; Staff sorts by name, role, hire date, status, email; Clients by name, Medicaid #, DOB, status. Default: name A→Z. -->
   <!-- v20.0.13cr3 (Greptile r3): the form ref used by the co-staff retry guard is declared after the form state (cr2 read `form` before its useState — a ReferenceError on open). -->
@@ -95,6 +98,33 @@
   <div id="root"></div>
   <script type="text/babel">
     const { useState, useEffect, useContext, createContext, useCallback, useRef, useMemo } = React;
+
+    // v20.0.14 / r1 — BUSINESS calendar dates. Provly's records are Utah
+    // records: the service date, the EVV day, the MAR day are the date in
+    // America/Denver, whatever timezone the browser happens to be in (an
+    // owner travelling, a supervisor out of state). Two rules:
+    //   ymd(instant)  → the Denver calendar date of a moment in time
+    //   hm(instant)   → the Denver wall-clock HH:MM of a moment in time
+    //   ymdAdd / ymdAddMonths / ymdMonthStart / ymdMonthEnd / ymdQuarter →
+    //                 pure calendar arithmetic on "YYYY-MM-DD" strings, no
+    //                 timezone anywhere (UTC-midnight math, formatted back)
+    // Never turn a bare "YYYY-MM-DD" into a Date to do arithmetic — that is
+    // where the UTC/local confusion lived. Do the arithmetic on the string.
+    const BIZ_TZ = "America/Denver";
+    const ymd = (d = new Date()) =>
+      new Intl.DateTimeFormat("en-CA", { timeZone: BIZ_TZ, year: "numeric", month: "2-digit", day: "2-digit" })
+        .format(d instanceof Date ? d : new Date(d));                       // en-CA → YYYY-MM-DD
+    const hm = (d = new Date()) =>
+      new Intl.DateTimeFormat("en-GB", { timeZone: BIZ_TZ, hour: "2-digit", minute: "2-digit", hour12: false })
+        .format(d instanceof Date ? d : new Date(d)).replace(/^24:/, "00:"); // HH:MM
+    const _ymdFromUTC = (dt) => dt.toISOString().slice(0, 10);
+    const _ymdParts = (str) => String(str).slice(0, 10).split("-").map(Number);
+    const ymdAdd = (str, days) => { const [y, m, d] = _ymdParts(str); return _ymdFromUTC(new Date(Date.UTC(y, m - 1, d + days))); };
+    const ymdAddMonths = (str, months) => { const [y, m, d] = _ymdParts(str); return _ymdFromUTC(new Date(Date.UTC(y, m - 1 + months, d))); };
+    const ymdMonthStart = (str) => String(str).slice(0, 8) + "01";
+    const ymdMonthEnd = (str) => { const [y, m] = _ymdParts(str); return _ymdFromUTC(new Date(Date.UTC(y, m, 0))); };
+    const ymdQuarter = (str) => { const [y, m] = _ymdParts(str); const q = Math.floor((m - 1) / 3);
+      return { start: _ymdFromUTC(new Date(Date.UTC(y, q * 3, 1))), end: _ymdFromUTC(new Date(Date.UTC(y, q * 3 + 3, 0))) }; };
 
     // ═══════════════════════════════════════════════════════════════
     // DESIGN TOKENS — matched exactly to landing page
@@ -1641,7 +1671,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.13e</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.14</span>
               </div>
             </div>
             {isMobile && (
@@ -1950,14 +1980,14 @@
             supabase.from("staff_trainings").select("id, expires_at").lt("expires_at", nowISO),
             supabase.from(AUTH_VIEW).select("id", { count: "exact", head: true }),
             supabase.from("staff_trainings").select("id, expires_at, staff:staff_directory_v(first_name, last_name), training_topic_definitions(topic_name)").lt("expires_at", in30.toISOString()).order("expires_at", { ascending: true }).limit(5),
-            supabase.from(AUTH_VIEW).select("id, end_date, service_code_definitions(code), persons(first_name, last_name)").lt("end_date", in30.toISOString().split("T")[0]).order("end_date", { ascending: true }).limit(5),
+            supabase.from(AUTH_VIEW).select("id, end_date, service_code_definitions(code), persons(first_name, last_name)").lt("end_date", ymdAdd(ymd(), 30)).order("end_date", { ascending: true }).limit(5),
             // v19.2.1 hotfix: split the join — some FKs weren't resolvable by PostgREST, causing 400
             // v19.5.3 fix: documents.expires_at is a `date` column (not timestamp), so the
             //   lt comparison must use a date-only string (YYYY-MM-DD) rather than a full
             //   ISO timestamp. Was silently returning 400 since at least v19.2.1, which
             //   meant the dashboard's "upcoming document expirations" alert never fired.
             //   Same pattern as the person_service_authorizations.end_date query above.
-            supabase.from("documents").select("id, doc_type, expires_at, staff_id, person_id").eq("is_archived", false).not("expires_at", "is", null).lt("expires_at", in30.toISOString().split("T")[0]).order("expires_at", { ascending: true }).limit(5),
+            supabase.from("documents").select("id, doc_type, expires_at, staff_id, person_id").eq("is_archived", false).not("expires_at", "is", null).lt("expires_at", ymdAdd(ymd(), 30)).order("expires_at", { ascending: true }).limit(5),
           ]);
           // v19.2.1 — hydrate document names client-side
           const docs = expDocRes.data || [];
@@ -2290,7 +2320,7 @@
     // determine which decks they should have completed and which are
     // missing or expired.
     function computeCompetency({ staffId, serviceCodeId, personId, decks, deckServiceCodes, completions, requirePersonSpecific = true }) {
-      const today = new Date().toISOString().split("T")[0];
+      const today = ymd();
       const required = [];
       // 1. Universal decks (all active decks of type 'universal')
       decks.filter(d => d.is_active !== false && d.deck_type === "universal").forEach(d => required.push({ deck: d, scopePersonId: null }));
@@ -2688,7 +2718,7 @@
         address: "", city: "", state: "UT", zip: "", phone: "",
       });
       const [auths, setAuths] = useState([]);
-      const [newAuth, setNewAuth] = useState({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false }); // v20.0.10 — rate_pending: deliberate null-rate attestation (UI-only, never stored)
+      const [newAuth, setNewAuth] = useState({ service_code_id: "", authorized_units: "", start_date: ymd(), end_date: "", rate_per_unit: "", rate_pending: false }); // v20.0.10 — rate_pending: deliberate null-rate attestation (UI-only, never stored)
 
       useEffect(() => {
         supabase.from("service_code_definitions").select("id, code, name").order("code").then(({ data }) => setServiceCodes(data || []));
@@ -2735,7 +2765,7 @@
           });
           setAuths([]);
         }
-        setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false });
+        setNewAuth({ service_code_id: "", authorized_units: "", start_date: ymd(), end_date: "", rate_per_unit: "", rate_pending: false });
         // v20.0.10 (Greptile r1 → r5) — a new client/modal is a new attempt UNLESS
         // this client has an unconfirmed attempt: then its key is restored so an
         // unchanged resubmission replays instead of duplicating, and it is
@@ -2846,9 +2876,9 @@
         try { return await p; } finally { if (authBusy.current === p) authBusy.current = null; }
       };
       const authValuesFromRow = (row) => {
-        const start_date = row.start_date || new Date().toISOString().split("T")[0];
+        const start_date = row.start_date || ymd();
         let end_date = row.end_date;
-        if (!end_date) { const d = new Date(start_date + "T00:00:00"); d.setFullYear(d.getFullYear() + 1); end_date = d.toISOString().split("T")[0]; }
+        if (!end_date) end_date = ymdAddMonths(start_date, 12); // v20.0.14r1 — calendar math on the string
         return {
           service_code_id: row.service_code_id,
           authorized_units: parseInt(row.authorized_units),
@@ -2864,7 +2894,7 @@
         && numOrNull(stored.rate_per_unit) === numOrNull(vals.rate_per_unit);
       const rowIsEmpty = (row) => !(row.service_code_id || row.authorized_units || row.rate_per_unit || row.end_date);
       const codeOf = (row) => serviceCodes.find(sc => sc.id === row.service_code_id)?.code;
-      const blankRow = () => setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false });
+      const blankRow = () => setNewAuth({ service_code_id: "", authorized_units: "", start_date: ymd(), end_date: "", rate_per_unit: "", rate_pending: false });
       const refreshUnconfirmed = (personId) => {
         if (editingRef.current?.id !== personId) return; // r11 — never paint another client's notice
         const map = getPendingMap(personId);
@@ -3734,7 +3764,7 @@
             });
             setTopics(Array.from(seen.values()));
           });
-          setForm({ staff_id: "", training_topic_id: "", completed_date: new Date().toISOString().split("T")[0], certificate_number: "" });
+          setForm({ staff_id: "", training_topic_id: "", completed_date: ymd(), certificate_number: "" });
         }
       }, [open]);
 
@@ -3746,9 +3776,7 @@
         const topic = topics.find(t => t.id === form.training_topic_id);
         let expiration_date = null;
         if (topic?.renewal_months) {
-          const d = new Date(form.completed_date);
-          d.setMonth(d.getMonth() + topic.renewal_months);
-          expiration_date = d.toISOString().split("T")[0];
+          expiration_date = ymdAddMonths(form.completed_date, topic.renewal_months); // v20.0.14r1 — calendar math on the string
         }
         const { error } = await supabase.from("staff_trainings").insert({
           org_id: orgId,
@@ -4780,7 +4808,7 @@
       const [saving, setSaving] = useState(false);
       const [form, setForm] = useState({
         staff_id: "", person_id: "",
-        completed_at: new Date().toISOString().split("T")[0],
+        completed_at: ymd(),
         expires_at: "",
         trainer_name: "",
         notes: "",
@@ -4790,7 +4818,7 @@
         if (open) {
           setForm({
             staff_id: "", person_id: "",
-            completed_at: new Date().toISOString().split("T")[0],
+            completed_at: ymd(),
             expires_at: "",
             trainer_name: "",
             notes: "",
@@ -5117,7 +5145,7 @@
     // definition; a window already fully in the past is expired. The date
     // window stays the source of truth for "active today" everywhere in-app.
     const deriveAuthStatus = (endDate) => {
-      const today = new Date().toISOString().split("T")[0];
+      const today = ymd();
       return endDate && endDate < today ? "expired" : "approved";
     };
 
@@ -5886,7 +5914,7 @@
         else setCoStaffOptions(res.data || []);
       };
       // v20.0.13c — local calendar date (the UTC default rolled past midnight after 6 PM Mountain)
-      const localToday = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+      const localToday = () => ymd(); // v20.0.14 — one helper app-wide
       const perms = usePermissions();
       const [saving, setSaving] = useState(false);
       const [staffList, setStaffList] = useState([]);
@@ -6003,7 +6031,7 @@
         if (!a) return false;
         const st = String(a.status || "").toLowerCase();
         if (["expired", "closed", "terminated", "denied", "inactive", "cancelled", "canceled"].includes(st)) return false;
-        const d = dateStr || new Date().toISOString().split("T")[0];
+        const d = dateStr || ymd();
         if (a.start_date && a.start_date > d) return false;
         if (a.end_date && a.end_date < d) return false;
         return true;
@@ -10645,7 +10673,7 @@
             supabase.from("persons").select("id, first_name, last_name, is_active").eq("is_active", true),
             supabase.from("documents").select("id, staff_id, person_id, doc_type, file_name, expires_at, uploaded_at").eq("is_archived", false).not("expires_at", "is", null),
             supabase.from("medications").select("id, person_id, medication_name, dosage, frequency, schedule_times, is_prn, is_active, persons(first_name, last_name)").eq("is_active", true),
-            supabase.from("medication_logs").select("id, medication_id, person_id, scheduled_date, scheduled_time, status").gte("scheduled_date", new Date(new Date().setDate(new Date().getDate() - 3)).toISOString().split("T")[0]),
+            supabase.from("medication_logs").select("id, medication_id, person_id, scheduled_date, scheduled_time, status").gte("scheduled_date", ymdAdd(ymd(), -3)),
           ]);
 
           const trainings = trainRes.data || [];
@@ -10807,13 +10835,12 @@
           // ── MISSED MEDICATION DOSES (last 3 days) ──
           const meds = medRes.data || [];
           const medLogs = medLogRes.data || [];
-          const threeDaysAgo = new Date(now); threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
-          const nowDateStr = now.toISOString().split("T")[0];
-          const nowTimeStr = now.toTimeString().slice(0, 5);
+          const nowDateStr = ymd(now);         // v20.0.14r1 — Denver business date
+          const nowTimeStr = hm(now);          // v20.0.14r1 — Denver wall clock (schedule times are Utah times)
           meds.filter(m => !m.is_prn && m.schedule_times?.length).forEach(med => {
             const clientName = med.persons ? `${med.persons.first_name} ${med.persons.last_name}` : "Unknown";
-            for (let d = new Date(threeDaysAgo); d <= now; d.setDate(d.getDate() + 1)) {
-              const dateStr = d.toISOString().split("T")[0];
+            for (let i = -3; i <= 0; i++) {
+              const dateStr = ymdAdd(nowDateStr, i);
               (med.schedule_times || []).forEach(time => {
                 if (dateStr === nowDateStr && time > nowTimeStr) return;
                 const hasLog = medLogs.find(l => l.medication_id === med.id && l.scheduled_date === dateStr && l.scheduled_time === time);
@@ -11039,7 +11066,7 @@
       const [showMedForm, setShowMedForm] = useState(false);
       const [editingMed, setEditingMed] = useState(null);
       const [showLogModal, setShowLogModal] = useState(null); // { medication, date, time }
-      const [marDate, setMarDate] = useState(new Date().toISOString().split("T")[0]);
+      const [marDate, setMarDate] = useState(ymd());
       const { isMobile } = useMobile();
       const { addToast } = useToast();
       const { orgId, staffProfile } = useAuth();
@@ -11058,11 +11085,9 @@
         setLoading(true);
         try {
           // Get 7-day window for MAR
-          const startDate = new Date(marDate + "T00:00:00");
-          const endDate = new Date(startDate); endDate.setDate(endDate.getDate() + 6);
           const [medRes, logRes] = await Promise.all([
             supabase.from("medications").select("*").eq("person_id", selectedClient).eq("is_active", true).order("medication_name"),
-            supabase.from("medication_logs").select("*, staff:staff_directory_v(first_name, last_name)").eq("person_id", selectedClient).gte("scheduled_date", startDate.toISOString().split("T")[0]).lte("scheduled_date", endDate.toISOString().split("T")[0]),
+            supabase.from("medication_logs").select("*, staff:staff_directory_v(first_name, last_name)").eq("person_id", selectedClient).gte("scheduled_date", marDate).lte("scheduled_date", ymdAdd(marDate, 6)),
           ]);
           setMedications(medRes.data || []);
           setLogs(logRes.data || []);
@@ -11075,7 +11100,7 @@
         const [form, setForm] = useState(editingMed || {
           medication_name: "", dosage: "", route: "Oral", frequency: "Once daily",
           schedule_times: ["08:00"], prescribed_by: "", pharmacy: "", rx_number: "",
-          start_date: new Date().toISOString().split("T")[0], end_date: "",
+          start_date: ymd(), end_date: "",
           is_prn: false, prn_reason: "", special_instructions: "", is_active: true,
         });
         const [saving, setSaving] = useState(false);
@@ -11258,11 +11283,7 @@
 
       // ── MAR Grid (7 days × medications × times) ──
       const MARView = () => {
-        const startDate = new Date(marDate + "T00:00:00");
-        const days = Array.from({ length: 7 }, (_, i) => {
-          const d = new Date(startDate); d.setDate(d.getDate() + i);
-          return d.toISOString().split("T")[0];
-        });
+        const days = Array.from({ length: 7 }, (_, i) => ymdAdd(marDate, i)); // v20.0.14r1 — calendar math on the string
         const scheduledMeds = medications.filter(m => !m.is_prn && m.schedule_times?.length);
 
         if (!scheduledMeds.length) return (
@@ -11285,20 +11306,20 @@
           return { bg: `${s?.color || CB.textLight}18`, color: s?.color || CB.textLight, text: abbr[log.status] || "?" };
         };
 
-        const nowStr = new Date().toISOString().split("T")[0];
-        const nowTime = new Date().toTimeString().slice(0, 5);
+        const nowStr = ymd();
+        const nowTime = hm();               // v20.0.14r1 -- Denver wall clock
 
         return (
           <div style={{ overflowX: "auto" }}>
             {/* Week navigation */}
             <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
-              <button onClick={() => { const d = new Date(marDate + "T00:00:00"); d.setDate(d.getDate() - 7); setMarDate(d.toISOString().split("T")[0]); }}
+              <button onClick={() => setMarDate(ymdAdd(marDate, -7))}
                 style={{ padding: "6px 14px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600, color: CB.textMid }}>← Prev Week</button>
               <input type="date" value={marDate} onChange={e => setMarDate(e.target.value)}
                 style={{ padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, fontSize: 13, fontFamily: "inherit" }} />
-              <button onClick={() => { const d = new Date(marDate + "T00:00:00"); d.setDate(d.getDate() + 7); setMarDate(d.toISOString().split("T")[0]); }}
+              <button onClick={() => setMarDate(ymdAdd(marDate, 7))}
                 style={{ padding: "6px 14px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600, color: CB.textMid }}>Next Week →</button>
-              <button onClick={() => setMarDate(new Date().toISOString().split("T")[0])}
+              <button onClick={() => setMarDate(ymd())}
                 style={{ padding: "6px 14px", borderRadius: 8, border: `1px solid ${CB.teal}`, background: `${CB.teal}08`, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600, color: CB.teal }}>Today</button>
             </div>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
@@ -11427,16 +11448,15 @@
       // ── Missed Doses Tab ──
       const MissedDoses = () => {
         const now = new Date();
-        const nowStr = now.toISOString().split("T")[0];
-        const nowTime = now.toTimeString().slice(0, 5);
-        const sevenAgo = new Date(now); sevenAgo.setDate(sevenAgo.getDate() - 7);
-        const startStr = sevenAgo.toISOString().split("T")[0];
+        const nowStr = ymd(now);            // v20.0.14r1 — Denver business date
+        const nowTime = hm(now);            // Denver wall clock
+        const startStr = ymdAdd(nowStr, -7);
 
         // Build expected passes for last 7 days
         const missed = [];
         const scheduledMeds = medications.filter(m => !m.is_prn && m.schedule_times?.length);
-        for (let d = new Date(sevenAgo); d <= now; d.setDate(d.getDate() + 1)) {
-          const dateStr = d.toISOString().split("T")[0];
+        for (let i = -7; i <= 0; i++) {
+          const dateStr = ymdAdd(nowStr, i);
           scheduledMeds.forEach(med => {
             (med.schedule_times || []).forEach(time => {
               if (dateStr === nowStr && time > nowTime) return; // future today
@@ -11703,7 +11723,7 @@
       const NoteForm = ({ goalId }) => {
         const goal = goals.find(g => g.id === goalId);
         const [form, setForm] = useState({
-          note_date: new Date().toISOString().split("T")[0],
+          note_date: ymd(),
           progress_rating: 3, narrative: "", data_point: "",
         });
         const [saving, setSaving] = useState(false);
@@ -11877,7 +11897,7 @@
         });
         const clientObj = clients.find(c => c.id === selectedClient);
         const name = clientObj ? `${clientObj.first_name}_${clientObj.last_name}` : "client";
-        doc.save(`PCSP_Quarterly_${name}_${new Date().toISOString().split("T")[0]}.pdf`);
+        doc.save(`PCSP_Quarterly_${name}_${ymd()}.pdf`);
         addToast("PDF exported", "success");
       };
 
@@ -12115,10 +12135,8 @@
       const [summary, setSummary] = useState(null);
       const [loading, setLoading] = useState(true);
       const [dateRange, setDateRange] = useState(() => {
-        const now = new Date();
-        const start = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split("T")[0];
-        const end = now.toISOString().split("T")[0];
-        return { start, end };
+        const end = ymd();                       // v20.0.14r1 — Denver
+        return { start: ymdMonthStart(end), end };
       });
       const perms = usePermissions();
       const { brand } = useAuth();
@@ -12432,7 +12450,7 @@
           const { error } = await supabase.from("claim_submissions").insert({
             org_id: orgId, contract_id: contract?.id || null, person_id: personId,
             service_code: row.service_code, service_date: parseDate(row.service_start_date),
-            billed_amount: row.amount, submitted_date: new Date().toISOString().split("T")[0],
+            billed_amount: row.amount, submitted_date: ymd(),
             claim_status: "submitted",
             notes: `UPI Import — ${row.units} ${row.unit_label} @ $${row.rate} | PID: ${row.consumer_pid} | SCE: ${row.sce} | Remaining: ${row.remaining_units}/${row.monthly_max_units} max`,
           });
@@ -12479,7 +12497,7 @@
 
       // ── Payment Form ──
       const PaymentForm = () => {
-        const [form, setForm] = useState({ contract_id: contracts[0]?.id || "", payment_date: new Date().toISOString().split("T")[0], amount: "", check_number: "", eft_trace: "", payer: "DHHS", payment_method: "EFT", remittance_id: "", notes: "" });
+        const [form, setForm] = useState({ contract_id: contracts[0]?.id || "", payment_date: ymd(), amount: "", check_number: "", eft_trace: "", payer: "DHHS", payment_method: "EFT", remittance_id: "", notes: "" });
         const [saving, setSaving] = useState(false);
         const fs = { width: "100%", padding: "10px 14px", borderRadius: 10, border: `1px solid ${CB.border}`, fontSize: 14, fontFamily: "inherit", background: CB.cream };
         const handleSave = async () => {
@@ -12524,7 +12542,7 @@
         const headers = ["Service Date","Submitted","Client","Code","Contract","Billed","Paid","Outstanding","Days","Bucket"];
         const rows = unpaid.map(c => { const d = c.submitted_date || c.service_date; const days = d ? Math.floor((now - new Date(d+"T00:00:00"))/86400000) : 0; const b = days<=30?"0-30":days<=60?"31-60":days<=90?"61-90":"90+"; const cl = c.persons?`${c.persons.first_name} ${c.persons.last_name}`:"—"; return [c.service_date,c.submitted_date||"—",cl,c.service_code||"—",c.contracts?.contract_number||"—",(c.billed_amount||0).toFixed(2),(c.paid_amount||0).toFixed(2),((c.billed_amount||0)-(c.paid_amount||0)).toFixed(2),days,b]; });
         const csv = [headers,...rows].map(r => r.map(v => `"${v}"`).join(",")).join("\n");
-        const blob = new Blob([csv],{type:"text/csv"}); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href=url; a.download=`aging-report-${now.toISOString().split("T")[0]}.csv`; a.click(); URL.revokeObjectURL(url); addToast("Aging report exported","success");
+        const blob = new Blob([csv],{type:"text/csv"}); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href=url; a.download=`aging-report-${ymd(now)}.csv`; a.click(); URL.revokeObjectURL(url); addToast("Aging report exported","success");
       };
 
       const statusColors = { pending: CB.amber, submitted: CB.blue, paid: CB.green, partial: "#7B1FA2", denied: CB.red, appealed: "#E65100", void: CB.textLight };
@@ -12925,13 +12943,13 @@
           else if (tmpl.id === "mar_monthly") {
             const { data: client } = await supabase.from("persons").select("first_name, last_name").eq("id", entityId).single();
             const { data: meds } = await supabase.from("medications").select("*").eq("person_id", entityId).eq("is_active", true);
-            const startDate = new Date(); startDate.setDate(1);
-            const endDate = new Date(startDate.getFullYear(), startDate.getMonth() + 1, 0);
-            const { data: logs } = await supabase.from("medication_logs").select("medication_id, scheduled_date, scheduled_time, status").eq("person_id", entityId).gte("scheduled_date", startDate.toISOString().split("T")[0]).lte("scheduled_date", endDate.toISOString().split("T")[0]);
+            const startStr = ymdMonthStart(ymd()), endStr = ymdMonthEnd(ymd()); // v20.0.14r1 — Denver month
+            const startDate = new Date(startStr + "T00:00:00");                  // label only
+            const { data: logs } = await supabase.from("medication_logs").select("medication_id, scheduled_date, scheduled_time, status").eq("person_id", entityId).gte("scheduled_date", startStr).lte("scheduled_date", endStr);
             const doc = new jsPDF("landscape");
             const monthName = startDate.toLocaleString("default", { month: "long", year: "numeric" });
             let y = pdfHeader(doc, `Medication Administration Record — ${monthName}`, `${client.first_name} ${client.last_name}`);
-            const daysInMonth = endDate.getDate();
+            const daysInMonth = Number(endStr.slice(-2)); // v20.0.14r2 — from the Denver month-end string (endDate was removed in r1)
             const dayHeaders = Array.from({ length: daysInMonth }, (_, i) => String(i + 1));
             (meds || []).forEach(med => {
               if (y > 170) { doc.addPage(); y = 20; }
@@ -13011,10 +13029,10 @@
 
           // ═══ MONTHLY BILLING SUMMARY ═══
           else if (tmpl.id === "monthly_billing") {
-            const monthStart = new Date(); monthStart.setDate(1); monthStart.setMonth(monthStart.getMonth() - 1);
-            const monthEnd = new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0);
+            const prevStart = ymdAddMonths(ymdMonthStart(ymd()), -1), prevEnd = ymdMonthEnd(prevStart); // v20.0.14r1 — Denver previous month
+            const monthStart = new Date(prevStart + "T00:00:00");                                          // label only
             const monthLabel = monthStart.toLocaleString("default", { month: "long", year: "numeric" });
-            const { data: claims } = await supabase.from("claim_submissions").select("*, persons(first_name, last_name), contracts(contract_number)").gte("service_date", monthStart.toISOString().split("T")[0]).lte("service_date", monthEnd.toISOString().split("T")[0]);
+            const { data: claims } = await supabase.from("claim_submissions").select("*, persons(first_name, last_name), contracts(contract_number)").gte("service_date", prevStart).lte("service_date", prevEnd);
             const doc = new jsPDF();
             let y = pdfHeader(doc, `Monthly Billing Summary — ${monthLabel}`, `${HopeHavenPDF.ORG_NAME} — ${HopeHavenPDF.CONTRACT_NUMBER}`);
             const total = (claims || []).reduce((s, c) => s + Number(c.billed_amount || 0), 0);
@@ -13128,7 +13146,7 @@
               }),
               styles: { fontSize: 8 }, headStyles: { fillColor: [10, 30, 51] },
             });
-            pdfFooter(doc); doc.save(`Org_Compliance_Report_${new Date().toISOString().split("T")[0]}.pdf`);
+            pdfFooter(doc); doc.save(`Org_Compliance_Report_${ymd()}.pdf`);
           }
 
           else {
@@ -13928,10 +13946,10 @@
         emergency_name: "", emergency_phone: "", emergency_relation: "",
         support_coordinator: "", sc_phone: "", sc_email: "", sc_agency: "",
         diagnoses: "", medications_on_file: false, pcsp_on_file: false,
-        admission_date: new Date().toISOString().split("T")[0],
+        admission_date: ymd(),
         auths: [],
       });
-      const [newAuth, setNewAuth] = useState({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false }); // v20.0.10 — rate_pending: deliberate null-rate attestation (UI-only, never stored)
+      const [newAuth, setNewAuth] = useState({ service_code_id: "", authorized_units: "", start_date: ymd(), end_date: "", rate_per_unit: "", rate_pending: false }); // v20.0.10 — rate_pending: deliberate null-rate attestation (UI-only, never stored)
 
       useEffect(() => {
         supabase.from("service_code_definitions").select("id, code, name").order("code").then(({ data }) => setServiceCodes(data || []));
@@ -13947,7 +13965,7 @@
         const rateErr = validateNewAuthRate(newAuth, sc?.code, perms);
         if (rateErr) return addToast(rateErr, "error");
         setForm(prev => ({ ...prev, auths: [...prev.auths, { ...newAuth, code: sc?.code, name: sc?.name }] }));
-        setNewAuth({ service_code_id: "", authorized_units: "", start_date: new Date().toISOString().split("T")[0], end_date: "", rate_per_unit: "", rate_pending: false });
+        setNewAuth({ service_code_id: "", authorized_units: "", start_date: ymd(), end_date: "", rate_per_unit: "", rate_pending: false });
       };
 
       const removeIntakeAuth = (idx) => {
@@ -14005,12 +14023,10 @@
         // Step 2: Create auths
         if (form.auths.length > 0) {
           const authPayloads = form.auths.map(a => {
-            const startDate = a.start_date || new Date().toISOString().split("T")[0];
+            const startDate = a.start_date || ymd();
             let endDate = a.end_date;
             if (!endDate) {
-              const d = new Date(startDate + "T00:00:00");
-              d.setFullYear(d.getFullYear() + 1);
-              endDate = d.toISOString().split("T")[0];
+              endDate = ymdAddMonths(startDate, 12); // v20.0.14r1 — calendar math on the string
             }
             return {
               org_id: orgId, person_id: personId,
@@ -14059,7 +14075,7 @@
                 <PrimaryButton onClick={() => HopeHavenPDF.clientIntakePacket(form, { pid: form.pid, sc_name: form.support_coordinator, sc_phone: form.sc_phone, is_residential: form.auths.some(a => ["RHS", "HHS", "PPS"].includes(a.code)) })} color={CB.navy}>
                   {icons.fileText({ size: 16 })} Download Intake Packet
                 </PrimaryButton>
-                <PrimaryButton onClick={() => { setComplete(false); setStep(0); setForm({ first_name: "", last_name: "", date_of_birth: "", medicaid_number: "", address: "", city: "", state: "UT", zip: "", phone: "", pid: "", gender: "", ssn_last4: "", primary_language: "English", guardian_name: "", guardian_phone: "", guardian_relation: "", emergency_name: "", emergency_phone: "", emergency_relation: "", support_coordinator: "", sc_phone: "", sc_email: "", sc_agency: "", diagnoses: "", medications_on_file: false, pcsp_on_file: false, admission_date: new Date().toISOString().split("T")[0], auths: [] }); }}>
+                <PrimaryButton onClick={() => { setComplete(false); setStep(0); setForm({ first_name: "", last_name: "", date_of_birth: "", medicaid_number: "", address: "", city: "", state: "UT", zip: "", phone: "", pid: "", gender: "", ssn_last4: "", primary_language: "English", guardian_name: "", guardian_phone: "", guardian_relation: "", emergency_name: "", emergency_phone: "", emergency_relation: "", support_coordinator: "", sc_phone: "", sc_email: "", sc_agency: "", diagnoses: "", medications_on_file: false, pcsp_on_file: false, admission_date: ymd(), auths: [] }); }}>
                   {icons.plus({ size: 16 })} Start Another Intake
                 </PrimaryButton>
               </div>
@@ -14431,7 +14447,7 @@
       const [form, setForm] = useState({
         // Personal
         first_name: "", last_name: "", date_of_birth: "", email: "", phone: "",
-        role: "dsp", hire_date: new Date().toISOString().split("T")[0],
+        role: "dsp", hire_date: ymd(),
         address: "", city: "", state: "UT", zip: "",
         emergency_name: "", emergency_phone: "", emergency_relation: "",
         // Section B: Hire Paperwork — tracking on-file status
@@ -14569,7 +14585,7 @@
               <PrimaryButton onClick={() => { setComplete(false); setStep(0); setForm(prev => {
                 const fresh = {};
                 Object.keys(prev).forEach(k => fresh[k] = typeof prev[k] === "boolean" ? false : "");
-                fresh.role = "dsp"; fresh.state = "UT"; fresh.hire_date = new Date().toISOString().split("T")[0];
+                fresh.role = "dsp"; fresh.state = "UT"; fresh.hire_date = ymd();
                 return fresh;
               }); }}>
                 {icons.plus({ size: 16 })} Start Another Onboarding
@@ -15184,7 +15200,7 @@
                 doc.line(110, y, 190, y); doc.text("Date", 110, y + 5);
                 const pages = doc.internal.getNumberOfPages();
                 for (let i = 1; i <= pages; i++) { doc.setPage(i); doc.setFontSize(7); doc.setTextColor(150); doc.text(`Generated by Provly — HIPAA Secure Communication — Page ${i}/${pages}`, 20, 285); doc.setTextColor(0); }
-                doc.save(`Secure_Letter_${secForm.recipient_type}_${new Date().toISOString().split("T")[0]}.pdf`);
+                doc.save(`Secure_Letter_${secForm.recipient_type}_${ymd()}.pdf`);
                 addToast("Secure PDF generated — check downloads", "success");
                 // Log the communication
                 if (myStaffId) {
@@ -15461,7 +15477,7 @@
       }
       if (["hire_date", "date_of_birth", "completed_at", "expires_at"].includes(key)) {
         const d = new Date(v);
-        return isNaN(d.getTime()) ? null : d.toISOString().split("T")[0];
+        return isNaN(d.getTime()) ? null : d.toISOString().split("T")[0]; // v20.0.14 — kept: normalises arbitrary import strings, UTC round-trip is the safe choice here
       }
       return v;
     }
@@ -15833,11 +15849,8 @@
       const [loading, setLoading] = useState(false);
       const [result, setResult] = useState(null);
       const [dateRange, setDateRange] = useState(() => {
-        const now = new Date();
-        return {
-          start: new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split("T")[0],
-          end: now.toISOString().split("T")[0],
-        };
+        const end = ymd();                       // v20.0.14r1 — Denver
+        return { start: ymdMonthStart(end), end };
       });
 
       useEffect(() => {
@@ -15851,7 +15864,7 @@
         setResult(null);
 
         // Get today's notes for this client
-        const today = new Date().toISOString().split("T")[0];
+        const today = ymd();
         const { data: notes } = await supabase.from("service_notes")
           .select("service_date, start_time, end_time, duration_minutes, summary_note, status, staff!service_notes_staff_id_fkey(first_name, last_name), service_code_definitions(code, name)")
           .eq("person_id", selectedClient)
@@ -17087,7 +17100,7 @@
       const [placeOpen, setPlaceOpen] = useState(false);
       const [endOpen, setEndOpen] = useState(false);
       const [saving, setSaving] = useState(false);
-      const today = () => new Date().toISOString().split("T")[0];
+      const today = () => ymd();
       const [placeForm, setPlaceForm] = useState({ site_id: "", start_date: today(), reason: "" });
       const [endForm, setEndForm] = useState({ end_date: today(), reason: "" });
 
@@ -17270,7 +17283,7 @@
       // keeps the last list on screen while it runs.
       const loadSeq = useRef(0);
       const loadedOnce = useRef(false);
-      const today = () => new Date().toISOString().split("T")[0];
+      const today = () => ymd();
       const [form, setForm] = useState({ site_id: "", start_date: today() });
       const [pForm, setPForm] = useState({ person_id: "", start_date: today() });
 
@@ -19300,7 +19313,7 @@
 
       // Filename: face_sheet_lastname_firstname_YYYYMMDD.pdf
       const safe = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "");
-      const today = new Date().toISOString().split("T")[0].replace(/-/g, "");
+      const today = ymd().replace(/-/g, "");
       await doc.downloadAs(`face_sheet_${safe(person.last_name)}_${safe(person.first_name)}_${today}.pdf`);
     }
     // ──────────────────────────────────────────────────────────────────
@@ -19741,12 +19754,9 @@
         setActiveForm(form);
         setScopeId("");
         // Default date range = current quarter
-        const now = new Date();
-        const q = Math.floor(now.getMonth() / 3);
-        const qStart = new Date(now.getFullYear(), q * 3, 1);
-        const qEnd = new Date(now.getFullYear(), q * 3 + 3, 0);
-        setPeriodStart(qStart.toISOString().split("T")[0]);
-        setPeriodEnd(qEnd.toISOString().split("T")[0]);
+        const { start: qStart, end: qEnd } = ymdQuarter(ymd()); // v20.0.14r1 — Denver quarter
+        setPeriodStart(qStart);
+        setPeriodEnd(qEnd);
       };
 
       const handleGenerate = async () => {
