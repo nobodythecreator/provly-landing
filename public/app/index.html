@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.15r1 (Greptile r1): the empty states of the Service Notes, Incidents and PCSP Goals tabs carry the same add action, so a client's first record can be created from the profile. -->
   <!-- v20.0.15 (in-context add actions on the client profile — Tombé, Sep 22): the individual is the record, so the record is where you add to it. Medications tab → Add Medication, PCSP Goals tab → Add Goal, Service Notes tab → New Service Note, Incidents tab → Log Incident, each with the client already set. The Medications page's and PCSP page's inline forms were extracted into standalone MedicationForm / GoalForm components (same fields, same saves) so the profile and the pages share one form each; ServiceNoteForm takes an initialPersonId; Log Incident hands the client to the Incidents page, which opens its form pre-filled. Front-line logins get New Service Note and Log Incident (their own records); Add Medication / Add Goal are office-tier. Each tab reloads after a save; the tab counts refresh. -->
   <!-- v20.0.14r2 (Greptile r2): the monthly MAR PDF derives its day count from the month-end string — r1 removed the Date it had read from. -->
   <!-- v20.0.14r1 (Greptile r1): business dates are anchored to America/Denver, not the browser — ymd() and hm() format an instant in Denver via Intl; every date-window computation (last 3/7 days, next 30, month-to-date, previous month, quarter, MAR week, authorization/training expirations) is now pure calendar arithmetic on YYYY-MM-DD strings (ymdAdd / ymdAddMonths / ymdMonthStart / ymdMonthEnd / ymdQuarter), so no Date built from a date string is ever formatted back. -->
@@ -16776,7 +16777,14 @@
       }, [clientId, reloadKey]);
 
       if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
-      if (notes.length === 0) return <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>No service notes found for this client.</div>;
+      // v20.0.15r1 — the first record is created from the empty state too
+      if (notes.length === 0) return (
+        <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>
+          <div style={{ marginBottom: 14 }}>No service notes found for this client.</div>
+          <PrimaryButton onClick={() => setNoteOpen(true)}>{icons.plus({ size: 14 })} New Service Note</PrimaryButton>
+          <ServiceNoteForm open={noteOpen} onClose={() => setNoteOpen(false)} onSaved={() => { setReloadKey(k => k + 1); if (onChanged) onChanged(); }} initialPersonId={clientId} />
+        </div>
+      );
 
       // Year → Month → notes
       const byYear = {};
@@ -17000,7 +17008,13 @@
 
       if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
       if (error) return <div style={{ padding: 20, background: `${CB.red}10`, borderRadius: 12, border: `1px solid ${CB.red}30`, color: CB.red, fontSize: 13 }}>Error loading incidents: {error}</div>;
-      if (incidents.length === 0) return <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>No incidents recorded. That's a good thing.</div>;
+      // v20.0.15r1 — the first record is created from the empty state too
+      if (incidents.length === 0) return (
+        <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>
+          <div style={{ marginBottom: 14 }}>No incidents recorded. That's a good thing.</div>
+          {onNavigate && <PrimaryButton onClick={() => { setNavIntent({ page: "incidents", person_id: clientId }); onNavigate("incidents"); }}>{icons.plus({ size: 14 })} Log Incident</PrimaryButton>}
+        </div>
+      );
 
       const severityColor = { low: CB.blue, moderate: CB.amber, high: "#E65100", critical: CB.red };
 
@@ -17083,7 +17097,14 @@
 
       if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
       if (error) return <div style={{ padding: 30, background: `${CB.red}10`, borderRadius: 12, border: `1px solid ${CB.red}30`, color: CB.red, fontSize: 13 }}>Error loading goals: {error}</div>;
-      if (goals.length === 0) return <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>No PCSP goals on file. Add goals in the PCSP Goals module.</div>;
+      // v20.0.15r1 — the first record is created from the empty state too
+      if (goals.length === 0) return (
+        <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>
+          <div style={{ marginBottom: 14 }}>No PCSP goals on file.</div>
+          {accessTier !== "deliver" && <PrimaryButton onClick={() => setAddOpen(true)}>{icons.plus({ size: 14 })} Add Goal</PrimaryButton>}
+          {addOpen && <GoalForm personId={clientId} editing={null} onClose={() => setAddOpen(false)} onSaved={() => { setReloadKey(k => k + 1); if (onChanged) onChanged(); }} />}
+        </div>
+      );
 
       // Active = active, in_progress, or no status set. Done = achieved, discontinued.
       const active = goals.filter(g => !g.status || g.status === "active" || g.status === "in_progress");
