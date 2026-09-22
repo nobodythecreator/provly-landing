@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.13er1 (Greptile r1): blanks sort last in both directions (direction applies only between populated values); sortable headers are real buttons — focusable, Enter/Space toggles, visible focus ring — with aria-sort on the column header. -->
   <!-- v20.0.13e (pre-invite polish, Tombé Sep 22): (1) the Dashboard subtitle is the business name alone — the DSPD contract number stays on the Compliance and Billing pages where it means something; (2) Staff and Clients lists keep inactive records at the bottom, whatever the sort; (3) the shared DataTable gained click-to-sort headers (▲/▼, third click clears) for any column that declares a sortKey or sortValue; Staff sorts by name, role, hire date, status, email; Clients by name, Medicaid #, DOB, status. Default: name A→Z. -->
   <!-- v20.0.13cr3 (Greptile r3): the form ref used by the co-staff retry guard is declared after the form state (cr2 read `form` before its useState — a ReferenceError on open). -->
   <!-- v20.0.13cr2 (Greptile r2): the co-staff Retry re-runs only the coworker lookup for the current client (own sequence guard) — the note's goal, code, fields and chosen co-staff are untouched. -->
@@ -1811,13 +1812,17 @@
     //   sortValue (row → comparable). Click cycles A→Z, Z→A, off. defaultSort
     //   = { index, dir }. inactiveLast keeps rows with is_active === false at
     //   the bottom whatever the sort, in their own sorted order.
-    const cmpSortValues = (a, b) => {
-      const na = a === null || a === undefined || a === "";
-      const nb = b === null || b === undefined || b === "";
-      if (na && nb) return 0; if (na) return 1; if (nb) return -1;          // blanks last
-      if (typeof a === "number" && typeof b === "number") return a - b;
-      if (typeof a === "boolean" && typeof b === "boolean") return (a === b) ? 0 : (a ? -1 : 1); // true first
-      return String(a).localeCompare(String(b), undefined, { sensitivity: "base", numeric: true });
+    // v20.0.13er1 — blanks sort last in BOTH directions: the direction applies
+    // only to comparisons between populated values.
+    const isBlankSortValue = (v) => v === null || v === undefined || v === "";
+    const cmpSortValues = (a, b, dir = 1) => {
+      const na = isBlankSortValue(a), nb = isBlankSortValue(b);
+      if (na && nb) return 0; if (na) return 1; if (nb) return -1;          // blanks last, regardless of dir
+      let c;
+      if (typeof a === "number" && typeof b === "number") c = a - b;
+      else if (typeof a === "boolean" && typeof b === "boolean") c = (a === b) ? 0 : (a ? -1 : 1); // true first
+      else c = String(a).localeCompare(String(b), undefined, { sensitivity: "base", numeric: true });
+      return c * dir;
     };
     function DataTable({ columns, data, loading, emptyMessage = "No data found", onRowClick, defaultSort = null, inactiveLast = false }) {
       const [sort, setSort] = useState(defaultSort);
@@ -1828,7 +1833,7 @@
         if (col && isSortable(col)) {
           const val = (r) => col.sortValue ? col.sortValue(r) : r[col.sortKey];
           const dir = sort.dir === "desc" ? -1 : 1;
-          arr.sort((a, b) => cmpSortValues(val(a), val(b)) * dir);
+          arr.sort((a, b) => cmpSortValues(val(a), val(b), dir));
         }
         if (inactiveLast) arr = [...arr.filter(r => r.is_active !== false), ...arr.filter(r => r.is_active === false)];
         return arr;
@@ -1848,9 +1853,21 @@
                     const sortable = isSortable(col);
                     const active = !!(sort && sort.index === i);
                     return (
-                      <th key={i} onClick={() => clickHeader(i)} title={sortable ? "Click to sort" : undefined}
-                        style={{ padding: "13px 18px", textAlign: "left", fontSize: 12, fontWeight: 700, color: active ? CB.navy : CB.textLight, textTransform: "uppercase", letterSpacing: 0.8, borderBottom: `1px solid ${CB.border}`, whiteSpace: "nowrap", cursor: sortable ? "pointer" : "default", userSelect: "none" }}>
-                        {col.label}{sortable && <span style={{ marginLeft: 6, fontSize: 10, color: active ? CB.teal : `${CB.textLight}88` }}>{active ? (sort.dir === "asc" ? "▲" : "▼") : "▲▼"}</span>}
+                      <th key={i} scope="col"
+                        aria-sort={sortable ? (active ? (sort.dir === "asc" ? "ascending" : "descending") : "none") : undefined}
+                        style={{ padding: 0, textAlign: "left", fontSize: 12, fontWeight: 700, color: active ? CB.navy : CB.textLight, textTransform: "uppercase", letterSpacing: 0.8, borderBottom: `1px solid ${CB.border}`, whiteSpace: "nowrap" }}>
+                        {/* v20.0.13er1 — a real button: focusable, Enter/Space toggles, aria-sort on the th announces the order */}
+                        {sortable ? (
+                          <button type="button" onClick={() => clickHeader(i)}
+                            aria-label={`Sort by ${col.label}${active ? (sort.dir === "asc" ? ", currently ascending" : ", currently descending") : ""}`}
+                            style={{ all: "unset", display: "inline-flex", alignItems: "center", gap: 6, padding: "13px 18px", cursor: "pointer", color: "inherit", font: "inherit", textTransform: "inherit", letterSpacing: "inherit", width: "100%", boxSizing: "border-box" }}
+                            onFocus={e => { e.currentTarget.style.outline = `2px solid ${CB.teal}`; e.currentTarget.style.outlineOffset = "-2px"; }}
+                            onBlur={e => { e.currentTarget.style.outline = "none"; }}>
+                            {col.label}<span aria-hidden="true" style={{ fontSize: 10, color: active ? CB.teal : `${CB.textLight}88` }}>{active ? (sort.dir === "asc" ? "▲" : "▼") : "▲▼"}</span>
+                          </button>
+                        ) : (
+                          <span style={{ display: "inline-block", padding: "13px 18px" }}>{col.label}</span>
+                        )}
                       </th>
                     );
                   })}
