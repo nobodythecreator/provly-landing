@@ -2,7 +2,7 @@
 
 **How to read this:** ✅ merged and verified · 🔄 in progress (branch open) · ⬜ not started · 🧑 Tombé's task (no code).
 **Rule:** the PR that completes an item flips its box in the same commit, so this file is only ever as stale as the last merge.
-Updated: Sep 16 2026.
+Updated: Sep 22 2026.
 
 ## Done this cycle
 - ✅ v20.0.10 — client-form integrity + EVV edit-with-reason (Sep 7)
@@ -16,16 +16,26 @@ Updated: Sep 16 2026.
 - ✅ v20.0.12 — Item 4 PR (b): read policies — tenant guard = org claim + live membership on 44 tables; one tier read policy per table (manage / operate / deliver); `person_service_authorizations_v` (rate hidden below manage) and `staff_directory_v`; schedule → 7-day sight edge; owner fallback retired (no membership = no access); nav by tier; Assignments person-edge list (Sep 16)
 - ✅ v20.0.12a — Staff → Assignments lists visible again (two FKs since v20.0.4g; embeds name the composite FK; failed loads show an error, never an empty list) (Sep 16)
 - ✅ v20.0.13 — Item 4 PR (c): write policies — one tier write policy per command on 44 tables; approved notes / reviewed incidents / submitted summaries locked with audited Reopen; client identity fields manage-only; EVV corrections supervisor-only; DSP shift status-only; audit + EVV edit logs append-only; front-line invite gate OFF; coworker names via `staff_directory_v` (Sep 16)
+- ✅ Go-live dry run — first deliver-tier login (Test Operator, Orem home): one home / one resident, own notes, no sign-off, lock-out on termination proven (Sep 16–22)
+- ✅ v20.0.13a — front-line UI pass: Schedule own-row, office-only EVV submission panel and write actions, single accept on join (Sep 16)
+- ✅ v20.0.13b — service-note form: front-line author fixed to self; codes limited to the client's current authorizations (office override) (Sep 19)
+- ✅ v20.0.13c / 13d — co-staff for front-line logins = only the people who share the client (`staff_sharing_person`), not the roster (Sep 19)
+- ✅ v20.0.13e — dashboard shows the business name only; Staff / Clients keep inactive last; click-to-sort headers (Sep 22)
+- ✅ v20.0.14 — business dates anchored to America/Denver; date windows as calendar arithmetic (the evening "tomorrow" bug, app-wide) (Sep 22)
+- ✅ v20.0.15 — client profile: Add Medication / Add Goal / New Service Note / Log Incident in context, client pre-set (Sep 22)
+- ✅ v20.0.16 — EVV corrections as one database transaction: `correct_evv_session` requires the reason, writes the edit log and the correction together; the only office-tier path to clock times; the edit log is written by nothing else (Sep 22)
 
 ## Tier 1 — finish Item 4 (security)
-- ⬜ **Go live with identities.** Invite the seven unlinked Hope Haven records (front line included); retire the shared org login; assignments kept current as a security control.
+- 🔄 **Go live with identities.** Operator invites sent Sep 22 (Elena, Kujang, Ethan); Asunta once her email is on file; Siale and Asia held until they have someone to support (no assignment = empty login); assignments kept current as a security control. (The "retire the shared org login" step is void — no shared login ever existed.)
 
 ## Tier 2 — small debts surfaced this cycle
 - ⬜ **AI drafting proxy.** Edge function holding the Anthropic key server-side; the AI page has never worked in production (browser-side calls, no key). Flips the landing row to shipped.
-- ⬜ **EVV correction RPC.** `correct_evv_session(session_id, patch, reason)` — edit-log row + session update in one transaction; becomes the only office-tier write path to clock times, so a reason and a log entry are database guarantees rather than app behavior (today: two client requests, audit first).
+- ⬜ **Service-note delete (manage).** The database allows a manager to delete an unapproved note; the app has no button. Confirm dialog, unapproved only.
+- ⬜ **Invite email wording.** Says "as hhs_operator" — use the role's label ("Host Home Operator").
+- ⬜ **Deliver-tier service-note insert rule.** Server-side: a front-line note needs a current authorization for its code on its date (or a context that owns the code) — today the form enforces it.
 - ⬜ **UPI, not PRISM.** Compliance-deadline D23 text + EVV export comment; begin "claims" → "payments" vocabulary.
 - 🧑 **Stripe:** delete the orphan Hope Haven customer ($0.00, Aug 1 4:18 PM) — confirm it is not `cus_Uzn7znOlF1QMue` first.
-- 🧑 **Staff data hygiene before go-live:** Elena Felix email has a stray `<`; Asunta Lubanga has no email; Kevin Halverson is in twice; Ethan Fox is roled DSP (operator?).
+- 🧑 **Staff data hygiene:** Asunta Lubanga still has no email (Elena's email and Ethan's role were fixed Sep 22; the two Kevin Halverson rows are inactive).
 
 ## Tier 3 — arcs Item 4 unlocks
 - ⬜ **Email + team messaging.** Real outbound email and Slack-style team messaging; needs per-user identities (unblocked after (c)). Last two "coming soon" rows on the landing page.
