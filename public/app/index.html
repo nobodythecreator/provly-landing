@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.14r2 (Greptile r2): the monthly MAR PDF derives its day count from the month-end string — r1 removed the Date it had read from. -->
   <!-- v20.0.14r1 (Greptile r1): business dates are anchored to America/Denver, not the browser — ymd() and hm() format an instant in Denver via Intl; every date-window computation (last 3/7 days, next 30, month-to-date, previous month, quarter, MAR week, authorization/training expirations) is now pure calendar arithmetic on YYYY-MM-DD strings (ymdAdd / ymdAddMonths / ymdMonthStart / ymdMonthEnd / ymdQuarter), so no Date built from a date string is ever formatted back. -->
   <!-- v20.0.14 (small debt #1 — local calendar dates): every default or computed calendar date in the app went through new Date().toISOString(), which is UTC — after 18:00 Mountain it names TOMORROW, so evening notes, EVV rows, incidents, med logs, shifts and report windows carried the wrong day. One helper, ymd(d), formats the LOCAL date; 55 sites switched. The one UTC round-trip kept on purpose is the CSV import normaliser (it parses arbitrary strings). Training expiration now parses the completed date as local midnight before adding renewal months. -->
   <!-- v20.0.13er1 (Greptile r1): blanks sort last in both directions (direction applies only between populated values); sortable headers are real buttons — focusable, Enter/Space toggles, visible focus ring — with aria-sort on the column header. -->
@@ -12948,7 +12949,7 @@
             const doc = new jsPDF("landscape");
             const monthName = startDate.toLocaleString("default", { month: "long", year: "numeric" });
             let y = pdfHeader(doc, `Medication Administration Record — ${monthName}`, `${client.first_name} ${client.last_name}`);
-            const daysInMonth = endDate.getDate();
+            const daysInMonth = Number(endStr.slice(-2)); // v20.0.14r2 — from the Denver month-end string (endDate was removed in r1)
             const dayHeaders = Array.from({ length: daysInMonth }, (_, i) => String(i + 1));
             (meds || []).forEach(med => {
               if (y > 170) { doc.addPage(); y = 20; }
