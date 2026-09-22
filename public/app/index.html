@@ -14,6 +14,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.15r1 (Greptile r1): the empty states of the Service Notes, Incidents and PCSP Goals tabs carry the same add action, so a client's first record can be created from the profile. -->
+  <!-- v20.0.15 (in-context add actions on the client profile — Tombé, Sep 22): the individual is the record, so the record is where you add to it. Medications tab → Add Medication, PCSP Goals tab → Add Goal, Service Notes tab → New Service Note, Incidents tab → Log Incident, each with the client already set. The Medications page's and PCSP page's inline forms were extracted into standalone MedicationForm / GoalForm components (same fields, same saves) so the profile and the pages share one form each; ServiceNoteForm takes an initialPersonId; Log Incident hands the client to the Incidents page, which opens its form pre-filled. Front-line logins get New Service Note and Log Incident (their own records); Add Medication / Add Goal are office-tier. Each tab reloads after a save; the tab counts refresh. -->
   <!-- v20.0.14r2 (Greptile r2): the monthly MAR PDF derives its day count from the month-end string — r1 removed the Date it had read from. -->
   <!-- v20.0.14r1 (Greptile r1): business dates are anchored to America/Denver, not the browser — ymd() and hm() format an instant in Denver via Intl; every date-window computation (last 3/7 days, next 30, month-to-date, previous month, quarter, MAR week, authorization/training expirations) is now pure calendar arithmetic on YYYY-MM-DD strings (ymdAdd / ymdAddMonths / ymdMonthStart / ymdMonthEnd / ymdQuarter), so no Date built from a date string is ever formatted back. -->
   <!-- v20.0.14 (small debt #1 — local calendar dates): every default or computed calendar date in the app went through new Date().toISOString(), which is UTC — after 18:00 Mountain it names TOMORROW, so evening notes, EVV rows, incidents, med logs, shifts and report windows carried the wrong day. One helper, ymd(d), formats the LOCAL date; 55 sites switched. The one UTC round-trip kept on purpose is the CSV import normaliser (it parses arbitrary strings). Training expiration now parses the completed date as local midnight before adding renewal months. -->
@@ -355,6 +357,12 @@
     // day_program_director / house_manager / bcba → supervisor set; hhs_operator
     // → dsp set. The tier comes from access_tier() in the database.
     const TIER_NAV_ANCHOR = { manage: "owner", operate: "supervisor", deliver: "dsp" };
+
+    // v20.0.15 — a one-shot intent handed from a client profile to a page that
+    // owns its own form (Incidents). The page reads and clears it on mount.
+    let navIntent = null;
+    const setNavIntent = (intent) => { navIntent = intent; };
+    const takeNavIntent = (page) => { const i = navIntent && navIntent.page === page ? navIntent : null; if (i) navIntent = null; return i; };
 
     // v20.0.12 (R3) — every authorization READ goes through the masked view
     // (rate_per_unit is NULL below the manage tier; rows limited by
@@ -1671,7 +1679,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.14</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.15</span>
               </div>
             </div>
             {isMobile && (
@@ -5890,7 +5898,7 @@
       { id: "D38", category: "Operations", title: "Staff Performance Evaluations", description: "Complete annual performance evaluations for all staff", frequency: "Annual", daysToComplete: 365, recurring: true, severity: "medium" },
     ];
 
-    function ServiceNoteForm({ open, onClose, onSaved }) {
+    function ServiceNoteForm({ open, onClose, onSaved, initialPersonId = null }) { // v20.0.15 — opened from a client profile with the client set
       const { addToast } = useToast();
       const { orgId, accessTier, staffProfile } = useAuth();
       const frontLine = accessTier === "deliver"; // v20.0.13b — writes as itself; authorized codes only
@@ -5978,6 +5986,7 @@
           setGoals([]);
           setShowAllCodes(false);
           clientReqSeq.current += 1;   // any in-flight client load from a previous session is void
+          if (initialPersonId) handleClientChange(initialPersonId); // v20.0.15 — profile context: client pre-set, auths/goals/co-staff loaded
         }
       }, [open]);
 
@@ -10337,6 +10346,11 @@
       const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
 
       useEffect(() => { loadAll(); }, []);
+      // v20.0.15 — opened from a client profile: pre-fill the client and open the form
+      useEffect(() => {
+        const intent = takeNavIntent("incidents");
+        if (intent?.person_id) { setForm({ ...blankForm, person_id: intent.person_id }); setShowForm(true); }
+      }, []);
 
       const loadAll = async () => {
         setLoading(true);
@@ -11056,48 +11070,13 @@
     ];
     const DEFAULT_TIMES = { "Once daily": ["08:00"], "Twice daily": ["08:00","20:00"], "Three times daily": ["08:00","12:00","18:00"], "Four times daily": ["06:00","12:00","18:00","22:00"], "Every morning": ["08:00"], "Every evening": ["18:00"], "Every bedtime": ["21:00"], "Weekly": ["08:00"] };
 
-    function MedicationsPage() {
-      const [tab, setTab] = useState("mar"); // mar, medications, missed
-      const [clients, setClients] = useState([]);
-      const [selectedClient, setSelectedClient] = useState("");
-      const [medications, setMedications] = useState([]);
-      const [logs, setLogs] = useState([]);
-      const [loading, setLoading] = useState(true);
-      const [showMedForm, setShowMedForm] = useState(false);
-      const [editingMed, setEditingMed] = useState(null);
-      const [showLogModal, setShowLogModal] = useState(null); // { medication, date, time }
-      const [marDate, setMarDate] = useState(ymd());
-      const { isMobile } = useMobile();
-      const { addToast } = useToast();
-      const { orgId, staffProfile } = useAuth();
-
-      useEffect(() => { loadClients(); }, []);
-      useEffect(() => { if (selectedClient) loadMedData(); }, [selectedClient, marDate]);
-
-      const loadClients = async () => {
-        const { data } = await supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name");
-        setClients(data || []);
-        if (data?.length) setSelectedClient(data[0].id);
-        setLoading(false);
-      };
-
-      const loadMedData = async () => {
-        setLoading(true);
-        try {
-          // Get 7-day window for MAR
-          const [medRes, logRes] = await Promise.all([
-            supabase.from("medications").select("*").eq("person_id", selectedClient).eq("is_active", true).order("medication_name"),
-            supabase.from("medication_logs").select("*, staff:staff_directory_v(first_name, last_name)").eq("person_id", selectedClient).gte("scheduled_date", marDate).lte("scheduled_date", ymdAdd(marDate, 6)),
-          ]);
-          setMedications(medRes.data || []);
-          setLogs(logRes.data || []);
-        } catch (e) { addToast("Failed to load medication data", "error"); }
-        setLoading(false);
-      };
-
-      // ── Medication Form ──
-      const MedForm = () => {
-        const [form, setForm] = useState(editingMed || {
+    // ── Medication Form ── v20.0.15: standalone (was nested in MedicationsPage) so
+    // the client profile can open the same form with the client already set.
+    function MedicationForm({ personId, editing, onClose, onSaved }) {
+        const { isMobile } = useMobile();
+        const { addToast } = useToast();
+        const { orgId } = useAuth();
+        const [form, setForm] = useState(editing || {
           medication_name: "", dosage: "", route: "Oral", frequency: "Once daily",
           schedule_times: ["08:00"], prescribed_by: "", pharmacy: "", rx_number: "",
           start_date: ymd(), end_date: "",
@@ -11106,7 +11085,7 @@
         const [saving, setSaving] = useState(false);
 
         useEffect(() => {
-          if (!editingMed && DEFAULT_TIMES[form.frequency]) {
+          if (!editing && DEFAULT_TIMES[form.frequency]) {
             setForm(f => ({ ...f, schedule_times: DEFAULT_TIMES[form.frequency] || f.schedule_times }));
           }
         }, [form.frequency]);
@@ -11114,10 +11093,10 @@
         const handleSave = async () => {
           if (!form.medication_name || !form.dosage) return addToast("Name and dosage required", "error");
           setSaving(true);
-          const payload = { ...form, person_id: selectedClient, org_id: orgId };
+          const payload = { ...form, person_id: personId, org_id: orgId };
           delete payload.id; delete payload.created_at;
-          if (editingMed) {
-            const { error } = await supabase.from("medications").update(payload).eq("id", editingMed.id);
+          if (editing) {
+            const { error } = await supabase.from("medications").update(payload).eq("id", editing.id);
             if (error) { addToast(error.message, "error"); setSaving(false); return; }
             addToast("Medication updated", "success");
           } else {
@@ -11125,7 +11104,7 @@
             if (error) { addToast(error.message, "error"); setSaving(false); return; }
             addToast("Medication added", "success");
           }
-          setSaving(false); setShowMedForm(false); setEditingMed(null); loadMedData();
+          setSaving(false); onClose(); if (onSaved) onSaved();
         };
 
         const fs = { width: "100%", padding: "10px 14px", borderRadius: 10, border: `1px solid ${CB.border}`, fontSize: 14, fontFamily: "inherit", background: CB.cream };
@@ -11134,7 +11113,7 @@
         const updateTime = (idx, val) => setForm(f => ({ ...f, schedule_times: f.schedule_times.map((t, i) => i === idx ? val : t) }));
 
         return (
-          <Modal open={true} onClose={() => { setShowMedForm(false); setEditingMed(null); }} title={editingMed ? "Edit Medication" : "Add Medication"} width={560}>
+          <Modal open={true} onClose={onClose} title={editing ? "Edit Medication" : "Add Medication"} width={560}>
             <div style={{ padding: "20px 28px 24px", overflowY: "auto", maxHeight: "65vh" }}>
               <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 14 }}>
                 <div style={{ gridColumn: isMobile ? "1" : "1/3" }}>
@@ -11213,15 +11192,55 @@
                 <textarea style={{ ...fs, minHeight: 60 }} value={form.special_instructions} onChange={e => setForm(f => ({ ...f, special_instructions: e.target.value }))} placeholder="Take with food, etc." />
               </div>
               <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 }}>
-                <button onClick={() => { setShowMedForm(false); setEditingMed(null); }} style={{ padding: "10px 20px", borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.white, color: CB.textMid, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+                <button onClick={onClose} style={{ padding: "10px 20px", borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.white, color: CB.textMid, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
                 <button onClick={handleSave} disabled={saving} style={{ padding: "10px 24px", borderRadius: 10, border: "none", background: CB.teal, color: CB.white, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", opacity: saving ? 0.7 : 1 }}>
-                  {saving ? "Saving..." : editingMed ? "Update" : "Add Medication"}
+                  {saving ? "Saving..." : editing ? "Update" : "Add Medication"}
                 </button>
               </div>
             </div>
           </Modal>
         );
+    }
+
+    function MedicationsPage() {
+      const [tab, setTab] = useState("mar"); // mar, medications, missed
+      const [clients, setClients] = useState([]);
+      const [selectedClient, setSelectedClient] = useState("");
+      const [medications, setMedications] = useState([]);
+      const [logs, setLogs] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [showMedForm, setShowMedForm] = useState(false);
+      const [editingMed, setEditingMed] = useState(null);
+      const [showLogModal, setShowLogModal] = useState(null); // { medication, date, time }
+      const [marDate, setMarDate] = useState(ymd());
+      const { isMobile } = useMobile();
+      const { addToast } = useToast();
+      const { orgId, staffProfile } = useAuth();
+
+      useEffect(() => { loadClients(); }, []);
+      useEffect(() => { if (selectedClient) loadMedData(); }, [selectedClient, marDate]);
+
+      const loadClients = async () => {
+        const { data } = await supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name");
+        setClients(data || []);
+        if (data?.length) setSelectedClient(data[0].id);
+        setLoading(false);
       };
+
+      const loadMedData = async () => {
+        setLoading(true);
+        try {
+          // Get 7-day window for MAR
+          const [medRes, logRes] = await Promise.all([
+            supabase.from("medications").select("*").eq("person_id", selectedClient).eq("is_active", true).order("medication_name"),
+            supabase.from("medication_logs").select("*, staff:staff_directory_v(first_name, last_name)").eq("person_id", selectedClient).gte("scheduled_date", marDate).lte("scheduled_date", ymdAdd(marDate, 6)),
+          ]);
+          setMedications(medRes.data || []);
+          setLogs(logRes.data || []);
+        } catch (e) { addToast("Failed to load medication data", "error"); }
+        setLoading(false);
+      };
+
 
       // ── Med Pass Log Modal ──
       const LogModal = () => {
@@ -11564,7 +11583,7 @@
               {tab === "missed" && <MissedDoses />}
             </div>
           )}
-          {showMedForm && <MedForm />}
+          {showMedForm && <MedicationForm personId={selectedClient} editing={editingMed} onClose={() => { setShowMedForm(false); setEditingMed(null); }} onSaved={loadMedData} />}
           <LogModal />
         </div>
       );
@@ -11594,51 +11613,13 @@
       { value: 5, label: "Goal Met", color: "#2E7D32" },
     ];
 
-    function PCSPGoalsPage() {
-      const { accessTier: pcspTier } = useAuth(); // v20.0.13a — goals and summaries are office-tier writes
-      const [clients, setClients] = useState([]);
-      const [selectedClient, setSelectedClient] = useState("");
-      const [goals, setGoals] = useState([]);
-      const [progressNotes, setProgressNotes] = useState([]);
-      const [loading, setLoading] = useState(true);
-      const [showGoalForm, setShowGoalForm] = useState(false);
-      const [editingGoal, setEditingGoal] = useState(null);
-      const [expandedGoal, setExpandedGoal] = useState(null);
-      const [showNoteForm, setShowNoteForm] = useState(null); // goal_id
-      const [showSummary, setShowSummary] = useState(false);
-      const [summaryText, setSummaryText] = useState("");
-      const [generatingSummary, setGeneratingSummary] = useState(false);
-      const [tab, setTab] = useState("goals"); // goals, summary
-      const { isMobile } = useMobile();
-      const { addToast } = useToast();
-      const { orgId, staffProfile } = useAuth();
-
-      useEffect(() => { loadClients(); }, []);
-      useEffect(() => { if (selectedClient) loadGoalData(); }, [selectedClient]);
-
-      const loadClients = async () => {
-        const { data } = await supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name");
-        setClients(data || []);
-        if (data?.length) setSelectedClient(data[0].id);
-        setLoading(false);
-      };
-
-      const loadGoalData = async () => {
-        setLoading(true);
-        try {
-          const [goalRes, noteRes] = await Promise.all([
-            supabase.from("pcsp_goals").select("*").eq("person_id", selectedClient).order("created_at", { ascending: false }),
-            supabase.from("pcsp_progress_notes").select("*, staff:staff_directory_v(first_name, last_name)").eq("person_id", selectedClient).order("note_date", { ascending: false }),
-          ]);
-          setGoals(goalRes.data || []);
-          setProgressNotes(noteRes.data || []);
-        } catch (e) { addToast("Failed to load goals", "error"); }
-        setLoading(false);
-      };
-
-      // ── Goal Form ──
-      const GoalForm = () => {
-        const [form, setForm] = useState(editingGoal || {
+    // ── Goal Form ── v20.0.15: standalone (was nested in PCSPGoalsPage) so the
+    // client profile can open the same form with the client already set.
+    function GoalForm({ personId, editing, onClose, onSaved }) {
+        const { isMobile } = useMobile();
+        const { addToast } = useToast();
+        const { orgId } = useAuth();
+        const [form, setForm] = useState(editing || {
           domain: "Community Living", goal_description: "", objectives: "",
           baseline: "", target_criteria: "", target_date: "", status: "active",
           teaching_strategies: "", support_needed: "",
@@ -11649,10 +11630,10 @@
         const handleSave = async () => {
           if (!form.goal_description || !form.domain) return addToast("Domain and goal description required", "error");
           setSaving(true);
-          const payload = { ...form, person_id: selectedClient, org_id: orgId };
+          const payload = { ...form, person_id: personId, org_id: orgId };
           delete payload.id; delete payload.created_at; delete payload.updated_at;
-          if (editingGoal) {
-            const { error } = await supabase.from("pcsp_goals").update(payload).eq("id", editingGoal.id);
+          if (editing) {
+            const { error } = await supabase.from("pcsp_goals").update(payload).eq("id", editing.id);
             if (error) { addToast(error.message, "error"); setSaving(false); return; }
             addToast("Goal updated", "success");
           } else {
@@ -11660,11 +11641,11 @@
             if (error) { addToast(error.message, "error"); setSaving(false); return; }
             addToast("Goal created", "success");
           }
-          setSaving(false); setShowGoalForm(false); setEditingGoal(null); loadGoalData();
+          setSaving(false); onClose(); if (onSaved) onSaved();
         };
 
         return (
-          <Modal open={true} onClose={() => { setShowGoalForm(false); setEditingGoal(null); }} title={editingGoal ? "Edit Goal" : "Add ISP Goal"} width={600}>
+          <Modal open={true} onClose={onClose} title={editing ? "Edit Goal" : "Add ISP Goal"} width={600}>
             <div style={{ padding: "20px 28px 24px", overflowY: "auto", maxHeight: "65vh" }}>
               <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 14 }}>
                 <div>
@@ -11709,15 +11690,59 @@
                 </div>
               </div>
               <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 }}>
-                <button onClick={() => { setShowGoalForm(false); setEditingGoal(null); }} style={{ padding: "10px 20px", borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.white, color: CB.textMid, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+                <button onClick={onClose} style={{ padding: "10px 20px", borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.white, color: CB.textMid, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
                 <button onClick={handleSave} disabled={saving} style={{ padding: "10px 24px", borderRadius: 10, border: "none", background: CB.teal, color: CB.white, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", opacity: saving ? 0.7 : 1 }}>
-                  {saving ? "Saving..." : editingGoal ? "Update Goal" : "Add Goal"}
+                  {saving ? "Saving..." : editing ? "Update Goal" : "Add Goal"}
                 </button>
               </div>
             </div>
           </Modal>
         );
+    }
+
+    function PCSPGoalsPage() {
+      const { accessTier: pcspTier } = useAuth(); // v20.0.13a — goals and summaries are office-tier writes
+      const [clients, setClients] = useState([]);
+      const [selectedClient, setSelectedClient] = useState("");
+      const [goals, setGoals] = useState([]);
+      const [progressNotes, setProgressNotes] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [showGoalForm, setShowGoalForm] = useState(false);
+      const [editingGoal, setEditingGoal] = useState(null);
+      const [expandedGoal, setExpandedGoal] = useState(null);
+      const [showNoteForm, setShowNoteForm] = useState(null); // goal_id
+      const [showSummary, setShowSummary] = useState(false);
+      const [summaryText, setSummaryText] = useState("");
+      const [generatingSummary, setGeneratingSummary] = useState(false);
+      const [tab, setTab] = useState("goals"); // goals, summary
+      const { isMobile } = useMobile();
+      const { addToast } = useToast();
+      const { orgId, staffProfile } = useAuth();
+
+      useEffect(() => { loadClients(); }, []);
+      useEffect(() => { if (selectedClient) loadGoalData(); }, [selectedClient]);
+
+      const loadClients = async () => {
+        const { data } = await supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name");
+        setClients(data || []);
+        if (data?.length) setSelectedClient(data[0].id);
+        setLoading(false);
       };
+
+      const loadGoalData = async () => {
+        setLoading(true);
+        try {
+          const [goalRes, noteRes] = await Promise.all([
+            supabase.from("pcsp_goals").select("*").eq("person_id", selectedClient).order("created_at", { ascending: false }),
+            supabase.from("pcsp_progress_notes").select("*, staff:staff_directory_v(first_name, last_name)").eq("person_id", selectedClient).order("note_date", { ascending: false }),
+          ]);
+          setGoals(goalRes.data || []);
+          setProgressNotes(noteRes.data || []);
+        } catch (e) { addToast("Failed to load goals", "error"); }
+        setLoading(false);
+      };
+
+      // ── Goal Form ──
 
       // ── Progress Note Form ──
       const NoteForm = ({ goalId }) => {
@@ -12094,7 +12119,7 @@
             </>
           )}
 
-          {showGoalForm && <GoalForm />}
+          {showGoalForm && <GoalForm personId={selectedClient} editing={editingGoal} onClose={() => { setShowGoalForm(false); setEditingGoal(null); }} onSaved={loadGoalData} />}
           {showNoteForm && <NoteForm goalId={showNoteForm} />}
 
           {/* Summary Modal */}
@@ -16735,9 +16760,11 @@
       );
     }
 
-    function ClientNotesTab({ clientId }) {
+    function ClientNotesTab({ clientId, onChanged }) {
       const [notes, setNotes] = useState([]);
       const [loading, setLoading] = useState(true);
+      const [reloadKey, setReloadKey] = useState(0);      // v20.0.15
+      const [noteOpen, setNoteOpen] = useState(false);    // v20.0.15 — New Service Note from the profile
 
       useEffect(() => {
         setLoading(true);
@@ -16747,10 +16774,17 @@
           .order("service_date", { ascending: false })
           .limit(1000)
           .then(({ data }) => { setNotes(data || []); setLoading(false); });
-      }, [clientId]);
+      }, [clientId, reloadKey]);
 
       if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
-      if (notes.length === 0) return <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>No service notes found for this client.</div>;
+      // v20.0.15r1 — the first record is created from the empty state too
+      if (notes.length === 0) return (
+        <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>
+          <div style={{ marginBottom: 14 }}>No service notes found for this client.</div>
+          <PrimaryButton onClick={() => setNoteOpen(true)}>{icons.plus({ size: 14 })} New Service Note</PrimaryButton>
+          <ServiceNoteForm open={noteOpen} onClose={() => setNoteOpen(false)} onSaved={() => { setReloadKey(k => k + 1); if (onChanged) onChanged(); }} initialPersonId={clientId} />
+        </div>
+      );
 
       // Year → Month → notes
       const byYear = {};
@@ -16769,9 +16803,14 @@
 
       return (
         <div>
-          <div style={{ marginBottom: 14, fontSize: 13, color: CB.textMid }}>
-            <strong style={{ color: CB.navy }}>{notes.length}</strong> total service notes across {years.length} {years.length === 1 ? "year" : "years"}
+          <div style={{ marginBottom: 14, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 13, color: CB.textMid }}>
+              <strong style={{ color: CB.navy }}>{notes.length}</strong> total service notes across {years.length} {years.length === 1 ? "year" : "years"}
+            </div>
+            {/* v20.0.15 — write the note from the person's own record; front-line logins may (own notes) */}
+            <PrimaryButton onClick={() => setNoteOpen(true)}>{icons.plus({ size: 14 })} New Service Note</PrimaryButton>
           </div>
+          <ServiceNoteForm open={noteOpen} onClose={() => setNoteOpen(false)} onSaved={() => { setReloadKey(k => k + 1); if (onChanged) onChanged(); }} initialPersonId={clientId} />
           {years.map((y, yi) => (
             <CollapsibleTimeGroup key={y} label={y} count={byYear[y].total} defaultOpen={yi === 0} accentColor={CB.blue}>
               {Object.keys(byYear[y].months).sort().reverse().map((m, mi) => (
@@ -16802,11 +16841,14 @@
       );
     }
 
-    function ClientMedicationsTab({ clientId }) {
+    function ClientMedicationsTab({ clientId, onChanged }) {
       const [meds, setMeds] = useState([]);
       const [logs, setLogs] = useState([]);
       const [loading, setLoading] = useState(true);
       const [error, setError] = useState(null);
+      const [reloadKey, setReloadKey] = useState(0);      // v20.0.15
+      const [addOpen, setAddOpen] = useState(false);      // v20.0.15 — Add Medication from the profile
+      const { accessTier } = useAuth();
 
       useEffect(() => {
         setLoading(true);
@@ -16827,7 +16869,7 @@
           setLogs(lRes.data || []);
           setLoading(false);
         });
-      }, [clientId]);
+      }, [clientId, reloadKey]);
 
       if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
 
@@ -16836,7 +16878,12 @@
 
       return (
         <div>
-          <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 12 }}>Current Medications ({activeMeds.length})</h3>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+            <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, margin: 0 }}>Current Medications ({activeMeds.length})</h3>
+            {/* v20.0.15 — medications are an office-tier write */}
+            {accessTier !== "deliver" && <PrimaryButton onClick={() => setAddOpen(true)}>{icons.plus({ size: 14 })} Add Medication</PrimaryButton>}
+          </div>
+          {addOpen && <MedicationForm personId={clientId} editing={null} onClose={() => setAddOpen(false)} onSaved={() => { setReloadKey(k => k + 1); if (onChanged) onChanged(); }} />}
           {activeMeds.length === 0 ? (
             <div style={{ padding: 30, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, marginBottom: 24 }}>
               No active medications on file.
@@ -16915,7 +16962,7 @@
       );
     }
 
-    function ClientIncidentsTab({ clientId }) {
+    function ClientIncidentsTab({ clientId, onNavigate }) {
       const [incidents, setIncidents] = useState([]);
       const [loading, setLoading] = useState(true);
       const [error, setError] = useState(null);
@@ -16961,7 +17008,13 @@
 
       if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
       if (error) return <div style={{ padding: 20, background: `${CB.red}10`, borderRadius: 12, border: `1px solid ${CB.red}30`, color: CB.red, fontSize: 13 }}>Error loading incidents: {error}</div>;
-      if (incidents.length === 0) return <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>No incidents recorded. That's a good thing.</div>;
+      // v20.0.15r1 — the first record is created from the empty state too
+      if (incidents.length === 0) return (
+        <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>
+          <div style={{ marginBottom: 14 }}>No incidents recorded. That's a good thing.</div>
+          {onNavigate && <PrimaryButton onClick={() => { setNavIntent({ page: "incidents", person_id: clientId }); onNavigate("incidents"); }}>{icons.plus({ size: 14 })} Log Incident</PrimaryButton>}
+        </div>
+      );
 
       const severityColor = { low: CB.blue, moderate: CB.amber, high: "#E65100", critical: CB.red };
 
@@ -16979,8 +17032,12 @@
 
       return (
         <div>
-          <div style={{ marginBottom: 14, fontSize: 13, color: CB.textMid }}>
+          <div style={{ marginBottom: 14, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 13, color: CB.textMid }}>
             <strong style={{ color: CB.navy }}>{incidents.length}</strong> incident{incidents.length === 1 ? "" : "s"} on record across {keys.length} {keys.length === 1 ? "month" : "months"}
+          </div>
+            {/* v20.0.15 — the Incidents page owns the report form; hand it the client and open it there. Front-line logins may (own reports). */}
+            {onNavigate && <PrimaryButton onClick={() => { setNavIntent({ page: "incidents", person_id: clientId }); onNavigate("incidents"); }}>{icons.plus({ size: 14 })} Log Incident</PrimaryButton>}
           </div>
           {keys.map((k, i) => (
             <CollapsibleTimeGroup key={k} label={grouped[k].label} count={grouped[k].items.length} defaultOpen={i === 0} accentColor={CB.amber}>
@@ -17016,10 +17073,13 @@
       );
     }
 
-    function ClientGoalsTab({ clientId }) {
+    function ClientGoalsTab({ clientId, onChanged }) {
       const [goals, setGoals] = useState([]);
       const [loading, setLoading] = useState(true);
       const [error, setError] = useState(null);
+      const [reloadKey, setReloadKey] = useState(0);      // v20.0.15
+      const [addOpen, setAddOpen] = useState(false);      // v20.0.15 — Add Goal from the profile
+      const { accessTier } = useAuth();
 
       useEffect(() => {
         setLoading(true);
@@ -17033,11 +17093,18 @@
             setGoals(data || []);
             setLoading(false);
           });
-      }, [clientId]);
+      }, [clientId, reloadKey]);
 
       if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
       if (error) return <div style={{ padding: 30, background: `${CB.red}10`, borderRadius: 12, border: `1px solid ${CB.red}30`, color: CB.red, fontSize: 13 }}>Error loading goals: {error}</div>;
-      if (goals.length === 0) return <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>No PCSP goals on file. Add goals in the PCSP Goals module.</div>;
+      // v20.0.15r1 — the first record is created from the empty state too
+      if (goals.length === 0) return (
+        <div style={{ padding: 40, textAlign: "center", color: CB.textLight, fontSize: 14, background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}` }}>
+          <div style={{ marginBottom: 14 }}>No PCSP goals on file.</div>
+          {accessTier !== "deliver" && <PrimaryButton onClick={() => setAddOpen(true)}>{icons.plus({ size: 14 })} Add Goal</PrimaryButton>}
+          {addOpen && <GoalForm personId={clientId} editing={null} onClose={() => setAddOpen(false)} onSaved={() => { setReloadKey(k => k + 1); if (onChanged) onChanged(); }} />}
+        </div>
+      );
 
       // Active = active, in_progress, or no status set. Done = achieved, discontinued.
       const active = goals.filter(g => !g.status || g.status === "active" || g.status === "in_progress");
@@ -17045,7 +17112,12 @@
 
       return (
         <div>
-          <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 12 }}>Active Goals ({active.length})</h3>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+            <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, margin: 0 }}>Active Goals ({active.length})</h3>
+            {/* v20.0.15 — goals are an office-tier write */}
+            {accessTier !== "deliver" && <PrimaryButton onClick={() => setAddOpen(true)}>{icons.plus({ size: 14 })} Add Goal</PrimaryButton>}
+          </div>
+          {addOpen && <GoalForm personId={clientId} editing={null} onClose={() => setAddOpen(false)} onSaved={() => { setReloadKey(k => k + 1); if (onChanged) onChanged(); }} />}
           {active.length === 0 ? (
             <div style={{ padding: 20, textAlign: "center", color: CB.textLight, fontSize: 13, background: CB.white, borderRadius: 12, border: `1px solid ${CB.border}`, marginBottom: 24 }}>No active goals.</div>
           ) : (
@@ -17509,10 +17581,10 @@
       const tabs = [
         { key: "overview", label: "Overview", icon: icons.users, content: <ClientOverviewTab client={client} /> },
         { key: "residence", label: "Residence", icon: icons.heart, content: <ClientResidenceTab clientId={clientId} orgId={orgId} /> }, // v20.0.4
-        { key: "goals", label: "PCSP Goals", icon: icons.crosshair, count: counts.goals, content: <ClientGoalsTab clientId={clientId} /> },
-        { key: "medications", label: "Medications", icon: icons.capsule, count: counts.meds, content: <ClientMedicationsTab clientId={clientId} /> },
-        { key: "notes", label: "Service Notes", icon: icons.fileText, count: counts.notes, content: <ClientNotesTab clientId={clientId} /> },
-        { key: "incidents", label: "Incidents", icon: icons.alertTriangle, count: counts.incidents, content: <ClientIncidentsTab clientId={clientId} /> },
+        { key: "goals", label: "PCSP Goals", icon: icons.crosshair, count: counts.goals, content: <ClientGoalsTab clientId={clientId} onChanged={loadClient} /> },
+        { key: "medications", label: "Medications", icon: icons.capsule, count: counts.meds, content: <ClientMedicationsTab clientId={clientId} onChanged={loadClient} /> },
+        { key: "notes", label: "Service Notes", icon: icons.fileText, count: counts.notes, content: <ClientNotesTab clientId={clientId} onChanged={loadClient} /> },
+        { key: "incidents", label: "Incidents", icon: icons.alertTriangle, count: counts.incidents, content: <ClientIncidentsTab clientId={clientId} onNavigate={onNavigate} /> },
         { key: "contacts", label: "Contacts", icon: icons.heart, content: <ClientContactsTab client={client} /> },
         { key: "services", label: "Services", icon: icons.dashboard, content: <ClientContextsTab clientId={clientId} /> },
         { key: "documents", label: "Documents", icon: icons.fileText, content: (
