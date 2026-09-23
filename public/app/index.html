@@ -14,6 +14,9 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.16r3 (Greptile r2): an empty exceptions list ('[]', the column's NOT NULL default) reads as "No exceptions noted" and as an empty edit box; clearing a note sends null, which correct_evv_session stores as '[]'. -->
+  <!-- v20.0.16r2 (Greptile r1): the correction form refuses to clear a completed visit's clock-out, matching correct_evv_session; the database guard now holds office tiers to a live clock-out only on open sessions. -->
+  <!-- v20.0.16 (small debt — EVV correction RPC): a supervisor's EVV correction is one database call, correct_evv_session (sql/v20.0.16.sql): the reason is required and the evv_edit_log row and the correction land in the same transaction, or neither does. The database now refuses any other office-tier change to clock times or to a completed session's evidence, and the edit log can only be written by that function. -->
   <!-- v20.0.15r1 (Greptile r1): the empty states of the Service Notes, Incidents and PCSP Goals tabs carry the same add action, so a client's first record can be created from the profile. -->
   <!-- v20.0.15 (in-context add actions on the client profile — Tombé, Sep 22): the individual is the record, so the record is where you add to it. Medications tab → Add Medication, PCSP Goals tab → Add Goal, Service Notes tab → New Service Note, Incidents tab → Log Incident, each with the client already set. The Medications page's and PCSP page's inline forms were extracted into standalone MedicationForm / GoalForm components (same fields, same saves) so the profile and the pages share one form each; ServiceNoteForm takes an initialPersonId; Log Incident hands the client to the Incidents page, which opens its form pre-filled. Front-line logins get New Service Note and Log Incident (their own records); Add Medication / Add Goal are office-tier. Each tab reloads after a save; the tab counts refresh. -->
   <!-- v20.0.14r2 (Greptile r2): the monthly MAR PDF derives its day count from the month-end string — r1 removed the Date it had read from. -->
@@ -1679,7 +1682,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.15</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.16</span>
               </div>
             </div>
             {isMobile && (
@@ -8831,6 +8834,7 @@
       // Render structured values as formatted JSON rather than "[object Object]".
       const exceptionsToText = (v) => {
         if (v == null) return "";
+        if (Array.isArray(v) && v.length === 0) return ""; // v20.0.16r3 — the column's empty value ('[]') reads as "no exceptions"
         if (typeof v === "string") return v;
         try { return JSON.stringify(v, null, 2); } catch (_) { return String(v); }
       };
@@ -9381,6 +9385,8 @@
         if (!inChanged && !outChanged && !excChanged) { setEditingEVV(false); return addToast("No changes to save", "info"); }
         if (!reason) return addToast("A reason is required for any manual EVV correction", "error");
         if (inChanged && !nextInIso) return addToast("Clock-in time is required — a visit cannot exist without one", "error");
+        // v20.0.16r2 — same rule as correct_evv_session: a completed visit is never reopened
+        if (outChanged && !nextOutIso && viewing.clock_out_at) return addToast("A completed visit cannot be reopened — correct its clock-out time instead", "error");
 
         // v19.10.2 — DST guardrails on an edited time. Spring-forward creates a
         // nonexistent wall-clock hour; fall-back creates a repeated one. In both
@@ -9409,38 +9415,19 @@
           updates.exceptions = parsed;
         }
 
-        const who = staffProfile ? `${staffProfile.first_name || ""} ${staffProfile.last_name || ""}`.trim() : (user?.email || null);
-        // v20.0.10 — evv_edit_log.edited_by_user_id existed but was never written; attribution now carries both ids.
-        const editedBy = { edited_by_staff_id: staffProfile?.id || null, edited_by_user_id: user?.id || null, edited_by_name: who };
-        const entries = [];
-        if (inChanged) entries.push({ org_id: orgId, session_id: viewing.id, field: "clock_in_at", old_value: prevInIso, new_value: nextInIso, reason, ...editedBy });
-        if (outChanged) entries.push({ org_id: orgId, session_id: viewing.id, field: "clock_out_at", old_value: prevOutIso, new_value: nextOutIso, reason, ...editedBy });
-        if (excChanged) entries.push({ org_id: orgId, session_id: viewing.id, field: "exceptions", old_value: prevExcText || null, new_value: nextExcText || null, reason, ...editedBy });
-
+        // v20.0.16 — ONE database transaction: correct_evv_session requires the
+        // reason, writes one evv_edit_log row per changed field AND applies the
+        // correction, or does neither. (Before: two client requests, audit first,
+        // with a best-effort cleanup that append-only policies had since made a
+        // no-op.) Attribution — staff id, user id, name — is taken server-side.
+        const patch = {};
+        if (inChanged) patch.clock_in_at = nextInIso;
+        if (outChanged) patch.clock_out_at = nextOutIso;
+        if (excChanged) patch.exceptions = updates.exceptions;
         setSavingEVV(true);
-        // v19.10.2 — AUDIT FIRST. The audit row and the correction are two
-        // separate writes (no shared transaction from the client). If we
-        // updated the session first and the audit insert then failed, we'd be
-        // left with an unlogged correction — the exact thing this feature
-        // exists to prevent. So we insert the audit entries first: if that
-        // fails, nothing is corrected and we stop. If the subsequent session
-        // update fails, we're left with a logged-but-unapplied entry (a
-        // harmless orphan / over-log), which is strictly safer than the
-        // reverse. A future hardening can fold both into one Postgres RPC for
-        // true atomicity.
-        const { data: logRows, error: logErr } = await supabase.from("evv_edit_log").insert(entries).select("id");
-        if (logErr) { setSavingEVV(false); return addToast(`Could not record the audit entry, so the correction was not applied: ${logErr.message}`, "error"); }
-
-        const { error } = await supabase.from("evv_sessions").update(updates).eq("id", viewing.id);
+        const { error } = await supabase.rpc("correct_evv_session", { p_session_id: viewing.id, p_patch: patch, p_reason: reason });
         setSavingEVV(false);
-        if (error) {
-          // Roll back the just-written audit rows so they don't linger as a
-          // record of a change that never landed. Best-effort — if this cleanup
-          // itself fails, the orphan is annotated by the toast for follow-up.
-          const ids = (logRows || []).map(r => r.id);
-          if (ids.length) await supabase.from("evv_edit_log").delete().in("id", ids);
-          return addToast(`The correction failed to save and was not applied: ${error.message}`, "error");
-        }
+        if (error) return addToast(`The correction was not applied: ${error.message}`, "error");
         addToast("EVV session updated", "success");
         setViewing(null);
         loadAll();
