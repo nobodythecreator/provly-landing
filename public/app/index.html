@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.19r1 (Greptile r1): reset links return to /app/reset, so only a failed reset link opens the reset form; any other failed auth link shows "invalid or expired" on sign-in; the error hash is cleared once read. send-invite's role labels mirror STAFF_ROLES exactly (same fallback), so an invite and the app never name a role differently. -->
   <!-- v20.0.19 (password reset — small debt): "Forgot password?" on the sign-in screen sends a Supabase recovery email (delivered through Provly's Resend SMTP, from getprovly.com); the link lands on a "Set a new password" screen that saves with auth.updateUser and opens the workspace. The request always answers the same way whether or not the email has an account. An expired or used link returns to sign-in with a clear message. Front-door palette. -->
   <!-- v20.0.18 (inside restyle — Tombé, Sep 22, scope B part 2; sidebar A): the workspace moves to the landing palette. One palette change (CB) does most of it: ink #000 for the frame and headings, forest green #15803D for primary actions, care red #C8102E for errors and destructive states, neutral grays and hairlines, flat surfaces (no card shadows or gradients). Black sidebar with white text; the active page is marked with a red bar. Stat-card icons are monochrome; avatars are ink. Status colors keep their meaning (green active, amber due soon, red expired, gray inactive). Provider Branding colors still drive PDFs only; DEFAULT_BRAND is untouched. -->
   <!-- v20.0.17r1 (Greptile r1): front-door leftovers aligned — sign-up inputs white at 8px and its sections 12px (as sign-in), error boxes in the care-red tint at 8px, invite and no-access pages on paper, and the two front-door spinners in ink rather than the inside's teal. -->
@@ -179,11 +180,19 @@
     // expired/used, #error=…). supabase-js reads and clears the hash while it
     // initialises, so capture the intent first; the PASSWORD_RECOVERY auth
     // event below is the second, independent signal.
+    // r1 (Greptile) — reset links return to /app/reset, so a failed link is
+    // known to be a RESET link only there; any other failed auth link gets a
+    // plain "invalid or expired" on sign-in, never the reset form. The error
+    // hash is cleared once read so a reload does not show it again.
     const AUTH_LINK_AT_LOAD = (() => {
       try {
         const h = new URLSearchParams((window.location.hash || "").replace(/^#/, ""));
         if (h.get("type") === "recovery") return "recovery";
-        if (h.get("error") || h.get("error_code")) return "link_error";
+        if (h.get("error") || h.get("error_code")) {
+          const onResetPath = window.location.pathname.replace(/\/+$/, "") === "/app/reset";
+          try { window.history.replaceState(null, "", "/app"); } catch (_) {}
+          return onResetPath ? "recovery_link_error" : "link_error";
+        }
       } catch (_) {}
       return null;
     })();
@@ -984,10 +993,13 @@
       const { signIn } = useAuth();
       const [email, setEmail] = useState("");
       const [password, setPassword] = useState("");
-      const [error, setError] = useState(AUTH_LINK_AT_LOAD === "link_error" ? "That link is invalid or has expired. Request a new one below." : "");
+      const [error, setError] = useState(
+        AUTH_LINK_AT_LOAD === "recovery_link_error" ? "That reset link is invalid or has expired. Request a new one below."
+        : AUTH_LINK_AT_LOAD === "link_error" ? "That link is invalid or has expired."
+        : "");
       const [loading, setLoading] = useState(false);
       // v20.0.19 — "Forgot password?" view
-      const [mode, setMode] = useState(AUTH_LINK_AT_LOAD === "link_error" ? "forgot" : "signin");
+      const [mode, setMode] = useState(AUTH_LINK_AT_LOAD === "recovery_link_error" ? "forgot" : "signin");
       const [resetSent, setResetSent] = useState(false);
 
       const handleReset = async (e) => {
@@ -995,7 +1007,7 @@
         const addr = email.trim();
         if (!addr) return setError("Enter the email you sign in with");
         setError(""); setLoading(true);
-        const { error: err } = await supabase.auth.resetPasswordForEmail(addr, { redirectTo: `${window.location.origin}/app` });
+        const { error: err } = await supabase.auth.resetPasswordForEmail(addr, { redirectTo: `${window.location.origin}/app/reset` }); // r1 — a path that marks the flow
         setLoading(false);
         // The same answer whether or not the email has an account (Supabase does
         // not reveal it either); only a real send failure or rate limit is shown.

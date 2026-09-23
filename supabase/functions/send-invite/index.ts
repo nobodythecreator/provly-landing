@@ -33,14 +33,15 @@ function json(body: unknown, status = 200): Response {
 // gate is OFF now that reads (v20.0.12) and writes (v20.0.13) are
 // relationship-scoped; an operator login sees and writes only its own home.
 // billing / readonly stay listed but rank 0, so canGrant refuses them.
-// v20.0.19 — how each role reads in the email (the app's STAFF_ROLES labels),
-// so an invite says "as Host Home Operator", not "as hhs_operator".
+// v20.0.19 / r1 — how each role reads in the email. ONE label set: this map
+// mirrors the app's STAFF_ROLES exactly, and roles the app does not list fall
+// back the way the app does (underscores → spaces), so an invite and the app
+// never name a role differently. A new role is added in both places together.
 const ROLE_LABELS: Record<string, string> = {
-  owner: "Owner", admin: "Administrator", supervisor: "Supervisor",
-  dsp: "Direct Support Professional", billing: "Billing", readonly: "Read-only",
-  bcba: "BCBA", rn: "Registered Nurse", house_manager: "House Manager",
-  day_program_director: "Day Program Director", residential_director: "Residential Director",
-  compliance_director: "Compliance Director", hhs_operator: "Host Home Operator",
+  owner: "Owner", admin: "Administrator", compliance_director: "Compliance Director",
+  residential_director: "Residential Director", day_program_director: "Day Program Director",
+  house_manager: "House Manager", dsp: "Direct Support Professional",
+  hhs_operator: "Host Home Operator", bcba: "BCBA", rn: "Registered Nurse",
 };
 const roleLabel = (r: string) => ROLE_LABELS[r] ?? r.replace(/_/g, " ");
 
