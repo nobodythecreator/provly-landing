@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.19 (password reset — small debt): "Forgot password?" on the sign-in screen sends a Supabase recovery email (delivered through Provly's Resend SMTP, from getprovly.com); the link lands on a "Set a new password" screen that saves with auth.updateUser and opens the workspace. The request always answers the same way whether or not the email has an account. An expired or used link returns to sign-in with a clear message. Front-door palette. -->
   <!-- v20.0.18 (inside restyle — Tombé, Sep 22, scope B part 2; sidebar A): the workspace moves to the landing palette. One palette change (CB) does most of it: ink #000 for the frame and headings, forest green #15803D for primary actions, care red #C8102E for errors and destructive states, neutral grays and hairlines, flat surfaces (no card shadows or gradients). Black sidebar with white text; the active page is marked with a red bar. Stat-card icons are monochrome; avatars are ink. Status colors keep their meaning (green active, amber due soon, red expired, gray inactive). Provider Branding colors still drive PDFs only; DEFAULT_BRAND is untouched. -->
   <!-- v20.0.17r1 (Greptile r1): front-door leftovers aligned — sign-up inputs white at 8px and its sections 12px (as sign-in), error boxes in the care-red tint at 8px, invite and no-access pages on paper, and the two front-door spinners in ink rather than the inside's teal. -->
   <!-- v20.0.17 (front door restyle — Tombé, Sep 22, scope B part 1): sign in, sign up, accept invite and "No workspace access" take the landing page's look — ink on paper, the care red for accents and links, the landing's grays, flat cards, 8px radii — with forest green (#15803D) for the one action that completes each screen. Implemented by shadowing CB with FD_CB inside those four screens; the inside of the app is unchanged until v20.0.18. -->
@@ -174,6 +175,19 @@
     // ═══════════════════════════════════════════════════════════════
     // SUPABASE CLIENT
     // ═══════════════════════════════════════════════════════════════
+    // v20.0.19 — a password-reset link lands here with #…type=recovery (or, if
+    // expired/used, #error=…). supabase-js reads and clears the hash while it
+    // initialises, so capture the intent first; the PASSWORD_RECOVERY auth
+    // event below is the second, independent signal.
+    const AUTH_LINK_AT_LOAD = (() => {
+      try {
+        const h = new URLSearchParams((window.location.hash || "").replace(/^#/, ""));
+        if (h.get("type") === "recovery") return "recovery";
+        if (h.get("error") || h.get("error_code")) return "link_error";
+      } catch (_) {}
+      return null;
+    })();
+
     const supabase = window.supabase.createClient(
       'https://zsrnqbmzgypldraifjho.supabase.co',
       'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpzcm5xYm16Z3lwbGRyYWlmamhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM1NTc0NjcsImV4cCI6MjA4OTEzMzQ2N30.-vI3ZvtGKFyoZplqpTt4IxriWEnIPg-PH8eIing93bY'
@@ -410,6 +424,7 @@
       const [user, setUser] = useState(null);
       const [session, setSession] = useState(null);
       const [loading, setLoading] = useState(true);
+      const [recovery, setRecovery] = useState(AUTH_LINK_AT_LOAD === "recovery"); // v20.0.19 — arrived by a reset link
       const [orgId, setOrgId] = useState(null);
       const [staffProfile, setStaffProfile] = useState(null);
       // v20.0.12 — identity from MEMBERSHIP: { role, tier, staffId } straight from
@@ -682,6 +697,7 @@
           setLoading(false);
         });
         const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+          if (_event === "PASSWORD_RECOVERY") setRecovery(true); // v20.0.19
           setSession(session);
           setUser(session?.user ?? null);
           if (session?.user) {
@@ -739,7 +755,7 @@
       const signOut = () => supabase.auth.signOut();
 
       return (
-        <AuthContext.Provider value={{ user, session, loading, brandReady, signIn, signOut, orgId, staffProfile, role, accessTier, identityState, permissions, navItems, enforcement, brand, refetchBrand: fetchOrgId, subscription, refetchSubscription }}>
+        <AuthContext.Provider value={{ user, session, loading, recovery, brandReady, signIn, signOut, orgId, staffProfile, role, accessTier, identityState, permissions, navItems, enforcement, brand, refetchBrand: fetchOrgId, subscription, refetchSubscription }}>
           {children}
         </AuthContext.Provider>
       );
@@ -968,8 +984,25 @@
       const { signIn } = useAuth();
       const [email, setEmail] = useState("");
       const [password, setPassword] = useState("");
-      const [error, setError] = useState("");
+      const [error, setError] = useState(AUTH_LINK_AT_LOAD === "link_error" ? "That link is invalid or has expired. Request a new one below." : "");
       const [loading, setLoading] = useState(false);
+      // v20.0.19 — "Forgot password?" view
+      const [mode, setMode] = useState(AUTH_LINK_AT_LOAD === "link_error" ? "forgot" : "signin");
+      const [resetSent, setResetSent] = useState(false);
+
+      const handleReset = async (e) => {
+        e.preventDefault();
+        const addr = email.trim();
+        if (!addr) return setError("Enter the email you sign in with");
+        setError(""); setLoading(true);
+        const { error: err } = await supabase.auth.resetPasswordForEmail(addr, { redirectTo: `${window.location.origin}/app` });
+        setLoading(false);
+        // The same answer whether or not the email has an account (Supabase does
+        // not reveal it either); only a real send failure or rate limit is shown.
+        if (err && (err.status === 429 || /rate limit/i.test(err.message || ""))) return setError("Too many reset requests. Wait a few minutes and try again.");
+        if (err) return setError("We couldn't send the email just now. Try again in a few minutes.");
+        setResetSent(true);
+      };
 
       const handleSubmit = async (e) => {
         e.preventDefault();
@@ -1006,8 +1039,8 @@
               background: CB.white, borderRadius: 12, padding: "36px 32px",
               border: `1px solid ${CB.border}`, boxShadow: "none",
             }}>
-              <h2 style={{ fontSize: 20, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Welcome back</h2>
-              <p style={{ fontSize: 14, color: CB.textMid, marginBottom: 28 }}>Sign in to your account</p>
+              <h2 style={{ fontSize: 20, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>{mode === "forgot" ? "Reset your password" : "Welcome back"}</h2>
+              <p style={{ fontSize: 14, color: CB.textMid, marginBottom: 28 }}>{mode === "forgot" ? "We'll email you a link to set a new one." : "Sign in to your account"}</p>
 
               {error && (
                 <div style={{
@@ -1020,6 +1053,38 @@
                 </div>
               )}
 
+              {mode === "forgot" ? (resetSent ? (
+                <div style={{ fontSize: 14, color: CB.textMid, lineHeight: 1.6 }}>
+                  If an account exists for <strong style={{ color: CB.navy }}>{email.trim()}</strong>, a reset link is on its way. It works once and expires in an hour.
+                  <div style={{ marginTop: 20 }}>
+                    <a href="#" onClick={e => { e.preventDefault(); setMode("signin"); setResetSent(false); setError(""); }} style={{ color: CB.teal, fontWeight: 600, textDecoration: "none" }}>Back to sign in</a>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div style={{ marginBottom: 28 }}>
+                    <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: CB.text, marginBottom: 6 }}>Email</label>
+                    <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@provider.org" onKeyDown={e => e.key === "Enter" && handleReset(e)}
+                      style={{ width: "100%", padding: "12px 16px", borderRadius: 8, border: `1px solid ${CB.border}`, fontSize: 15, fontFamily: "inherit", color: CB.text, background: FD.paper }} />
+                  </div>
+                  <button onClick={handleReset} disabled={loading} style={{
+                    width: "100%", padding: "14px 24px", borderRadius: 8, border: "none",
+                    background: loading ? CB.textLight : FD.go,
+                    color: CB.white, fontSize: 16, fontWeight: 700, cursor: loading ? "wait" : "pointer",
+                    fontFamily: "inherit", letterSpacing: 0.3, boxShadow: "none",
+                    display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
+                  }}
+                    onMouseEnter={e => { if (!loading) e.currentTarget.style.background = FD.goHover; }}
+                    onMouseLeave={e => { if (!loading) e.currentTarget.style.background = FD.go; }}
+                  >
+                    {loading ? <Spinner size={18} color={CB.white} /> : "Send reset link"}
+                  </button>
+                  <div style={{ textAlign: "center", marginTop: 16 }}>
+                    <a href="#" onClick={e => { e.preventDefault(); setMode("signin"); setError(""); }} style={{ fontSize: 13, color: CB.teal, fontWeight: 600, textDecoration: "none" }}>Back to sign in</a>
+                  </div>
+                </>
+              )) : (
+                <>
               <div style={{ marginBottom: 18 }}>
                 <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: CB.text, marginBottom: 6 }}>Email</label>
                 <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@provider.org" onKeyDown={e => e.key === "Enter" && handleSubmit(e)}
@@ -1043,6 +1108,11 @@
               >
                 {loading ? <Spinner size={18} color={CB.white} /> : "Sign in"}
               </button>
+                  <div style={{ textAlign: "center", marginTop: 16 }}>
+                    <a href="#" onClick={e => { e.preventDefault(); setMode("forgot"); setError(""); setResetSent(false); }} style={{ fontSize: 13, color: CB.teal, fontWeight: 600, textDecoration: "none" }}>Forgot password?</a>
+                  </div>
+                </>
+              )}
             </div>
 
             <div style={{ textAlign: "center", marginTop: 24 }}>
@@ -1707,7 +1777,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.18</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.19</span>
               </div>
             </div>
             {isMobile && (
@@ -20205,8 +20275,77 @@
       );
     }
 
+    // v20.0.19 — the page a reset link opens. The link has already signed the
+    // user in (a short-lived recovery session); this sets the new password and
+    // then opens the workspace with a full reload so identity hydrates cleanly.
+    function ResetPasswordPage() {
+      const CB = FD_CB;
+      const { user, signOut } = useAuth();
+      const [pw, setPw] = useState("");
+      const [pw2, setPw2] = useState("");
+      const [error, setError] = useState("");
+      const [saving, setSaving] = useState(false);
+      const save = async (e) => {
+        e.preventDefault();
+        if (pw.length < 8) return setError("Use at least 8 characters");
+        if (pw !== pw2) return setError("The two passwords don't match");
+        setError(""); setSaving(true);
+        const { error: err } = await supabase.auth.updateUser({ password: pw });
+        if (err) { setSaving(false); return setError(err.message || "Couldn't save the new password. Request a new link."); }
+        window.location.replace("/app");
+      };
+      const field = { width: "100%", padding: "12px 16px", borderRadius: 8, border: `1px solid ${CB.border}`, fontSize: 15, fontFamily: "inherit", color: CB.text, background: FD.paper };
+      // The auth check has finished (App renders this page only once loading is
+      // false). No user means the link did not sign anyone in: say so plainly.
+      if (!user) return (
+        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: FD.paper, padding: 24 }}>
+          <div style={{ width: "100%", maxWidth: 420, textAlign: "center" }}>
+            {icons.shield({ size: 28, color: FD.ink })}
+            <h2 style={{ fontSize: 20, fontWeight: 700, color: CB.navy, margin: "12px 0 6px" }}>This reset link didn't work</h2>
+            <p style={{ fontSize: 14, color: CB.textMid, marginBottom: 20 }}>It may have expired or already been used. Request a new one from the sign-in page.</p>
+            <a href="/app" style={{ color: CB.teal, fontWeight: 600, textDecoration: "none", fontSize: 14 }}>Go to sign in</a>
+          </div>
+        </div>
+      );
+      return (
+        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: FD.paper, padding: 24 }}>
+          <div style={{ width: "100%", maxWidth: 420 }}>
+            <div style={{ textAlign: "center", marginBottom: 28 }}>
+              {icons.shield({ size: 28, color: FD.ink })}
+              <h1 style={{ fontSize: 28, fontWeight: 800, color: CB.navy, letterSpacing: -1, marginTop: 10 }}>Provly</h1>
+            </div>
+            <div style={{ background: CB.white, borderRadius: 12, padding: "32px", border: `1px solid ${CB.border}` }}>
+              <h2 style={{ fontSize: 20, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Set a new password</h2>
+              <p style={{ fontSize: 14, color: CB.textMid, marginBottom: 24 }}>For <strong style={{ color: CB.navy }}>{user.email}</strong></p>
+              {error && (
+                <div style={{ background: "rgba(200,16,46,0.06)", border: "1px solid rgba(200,16,46,0.25)", borderRadius: 8, padding: "12px 16px", marginBottom: 18, fontSize: 14, color: CB.red, fontWeight: 500 }}>{error}</div>
+              )}
+              <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: CB.text, marginBottom: 6 }}>New password</label>
+              <input type="password" autoComplete="new-password" value={pw} onChange={e => setPw(e.target.value)} style={{ ...field, marginBottom: 16 }} />
+              <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: CB.text, marginBottom: 6 }}>Confirm new password</label>
+              <input type="password" autoComplete="new-password" value={pw2} onChange={e => setPw2(e.target.value)} onKeyDown={e => e.key === "Enter" && save(e)} style={{ ...field, marginBottom: 24 }} />
+              <button onClick={save} disabled={saving} style={{
+                width: "100%", padding: "14px 24px", borderRadius: 8, border: "none",
+                background: saving ? CB.textLight : FD.go, color: CB.white, fontSize: 16, fontWeight: 700,
+                cursor: saving ? "wait" : "pointer", fontFamily: "inherit",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
+              }}
+                onMouseEnter={e => { if (!saving) e.currentTarget.style.background = FD.goHover; }}
+                onMouseLeave={e => { if (!saving) e.currentTarget.style.background = FD.go; }}
+              >
+                {saving ? <Spinner size={18} color={CB.white} /> : "Save and sign in"}
+              </button>
+              <div style={{ textAlign: "center", marginTop: 16 }}>
+                <a href="#" onClick={async e => { e.preventDefault(); await signOut(); window.location.replace("/app"); }} style={{ fontSize: 13, color: CB.teal, fontWeight: 600, textDecoration: "none" }}>Cancel</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     function App() {
-      const { user, loading, brandReady, identityState, role, accessTier } = useAuth();
+      const { user, loading, recovery, brandReady, identityState, role, accessTier } = useAuth();
 
       // v19.7.0 — Path-based routing for /signup. Listens to history events
       // so back-button after signup works. Reads window.location.pathname
@@ -20230,6 +20369,10 @@
       // a brief flash of "Hope Haven Services Inc." (DEFAULT_BRAND) or
       // their previous tenant's chrome before the real brand hydrates.
       // Spinner stays visible across the auth->brand transition.
+      // v20.0.19 — arrived by a password-reset link: set the new password first,
+      // ahead of every other gate (the recovery session needs no workspace).
+      if (recovery && !loading) return <ResetPasswordPage />;
+
       // v20.0.13ar1 — a join in progress keeps SignupPage mounted through the
       // SIGNED_IN event, routed ahead of the readiness gate so the gate itself is
       // untouched. The join ends in a full reload of /app (below), which
