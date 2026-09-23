@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.18 (inside restyle — Tombé, Sep 22, scope B part 2; sidebar A): the workspace moves to the landing palette. One palette change (CB) does most of it: ink #000 for the frame and headings, forest green #15803D for primary actions, care red #C8102E for errors and destructive states, neutral grays and hairlines, flat surfaces (no card shadows or gradients). Black sidebar with white text; the active page is marked with a red bar. Stat-card icons are monochrome; avatars are ink. Status colors keep their meaning (green active, amber due soon, red expired, gray inactive). Provider Branding colors still drive PDFs only; DEFAULT_BRAND is untouched. -->
   <!-- v20.0.17r1 (Greptile r1): front-door leftovers aligned — sign-up inputs white at 8px and its sections 12px (as sign-in), error boxes in the care-red tint at 8px, invite and no-access pages on paper, and the two front-door spinners in ink rather than the inside's teal. -->
   <!-- v20.0.17 (front door restyle — Tombé, Sep 22, scope B part 1): sign in, sign up, accept invite and "No workspace access" take the landing page's look — ink on paper, the care red for accents and links, the landing's grays, flat cards, 8px radii — with forest green (#15803D) for the one action that completes each screen. Implemented by shadowing CB with FD_CB inside those four screens; the inside of the app is unchanged until v20.0.18. -->
   <!-- v20.0.16r3 (Greptile r2): an empty exceptions list ('[]', the column's NOT NULL default) reads as "No exceptions noted" and as an empty edit box; clearing a note sends null, which correct_evv_session stores as '[]'. -->
@@ -71,9 +72,9 @@
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body, #root { height: 100%; }
-    body { font-family: 'Outfit', 'Manrope', sans-serif; background: #FAFBFD; }
-    ::selection { background: #00897B; color: white; }
-    input:focus, select:focus, textarea:focus { outline: 2px solid #00897B; outline-offset: -1px; }
+    body { font-family: 'Outfit', 'Manrope', sans-serif; background: #FAFAFA; }
+    ::selection { background: #000000; color: white; }
+    input:focus, select:focus, textarea:focus { outline: 2px solid #000000; outline-offset: -1px; }
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
@@ -137,13 +138,14 @@
     // DESIGN TOKENS — matched exactly to landing page
     // ═══════════════════════════════════════════════════════════════
     const CB = {
-      navy: "#0A1E33", navyLight: "#0F2B46", blue: "#1A73E8", blueLight: "#4A9AF5",
-      teal: "#00897B", tealLight: "#26A69A", tealDark: "#00695C",
-      cream: "#FAFBFD", warm: "#F8F6F3", white: "#FFFFFF",
-      text: "#1A1A2E", textMid: "#4A5568", textLight: "#94A3B8",
-      red: "#E53935", green: "#2E7D32", amber: "#F57F17",
-      border: "#E2E8F0",
-      cardShadow: "0 1px 3px rgba(10,30,51,0.08), 0 8px 32px rgba(10,30,51,0.06)",
+      // v20.0.18 — the landing palette (was navy #0A1E33 / teal #00897B / slate)
+      navy: "#000000", navyLight: "#1A1A1A", blue: "#404040", blueLight: "#737373",   // navy = ink; blue = graphite (informational, not a brand color)
+      teal: "#15803D", tealLight: "#16A34A", tealDark: "#14532D",                     // teal = forest green: primary actions
+      cream: "#FAFAFA", warm: "#F5F5F5", white: "#FFFFFF",
+      text: "#111111", textMid: "#3A3A3A", textLight: "#6F6F6F",
+      red: "#C8102E", green: "#15803D", amber: "#B45309",                             // red = care red: errors, destructive
+      border: "#E5E5E5",
+      cardShadow: "none",                                                             // flat, like the landing page
       sidebarW: 260,
     };
 
@@ -862,13 +864,13 @@
       return (
         <div onClick={onClose} style={{
           position: "fixed", inset: 0, zIndex: 1000,
-          background: "rgba(10,30,51,0.45)", backdropFilter: "blur(4px)",
+          background: "rgba(0,0,0,0.45)", backdropFilter: "blur(4px)",
           display: "flex", alignItems: isMobile ? "flex-end" : "center", justifyContent: "center",
           padding: isMobile ? 0 : 24, animation: "overlayIn 0.2s ease",
         }}>
           <div onClick={e => e.stopPropagation()} style={{
             width: "100%", maxWidth: isMobile ? "100%" : width, maxHeight: isMobile ? "94vh" : "92vh",
-            background: CB.white, borderRadius: isMobile ? "20px 20px 0 0" : 20, boxShadow: "0 24px 80px rgba(10,30,51,0.2)",
+            background: CB.white, borderRadius: isMobile ? "20px 20px 0 0" : 20, boxShadow: "0 24px 80px rgba(0,0,0,0.2)",
             animation: "modalIn 0.25s ease", display: "flex", flexDirection: "column",
           }}>
             {/* Header */}
@@ -928,14 +930,14 @@
       return (
         <button onClick={onClick} disabled={disabled || btnLoading} style={{
           display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
-          padding: "12px 24px", borderRadius: 12, border: "none",
-          background: disabled ? CB.textLight : `linear-gradient(135deg, ${color}, ${color}DD)`,
+          padding: "12px 24px", borderRadius: 8, border: "none",
+          background: disabled ? CB.textLight : color,
           color: CB.white, fontSize: 14, fontWeight: 700, cursor: disabled ? "not-allowed" : "pointer",
-          fontFamily: "inherit", boxShadow: `0 4px 16px ${color}40`,
-          transition: "all 0.2s", width: fullWidth ? "100%" : "auto", opacity: disabled ? 0.6 : 1,
+          fontFamily: "inherit", boxShadow: "none",
+          transition: "filter 0.15s", width: fullWidth ? "100%" : "auto", opacity: disabled ? 0.6 : 1,
         }}
-          onMouseEnter={e => { if (!disabled) e.currentTarget.style.transform = "translateY(-1px)"; }}
-          onMouseLeave={e => e.currentTarget.style.transform = "translateY(0)"}
+          onMouseEnter={e => { if (!disabled) e.currentTarget.style.filter = "brightness(0.88)"; }}
+          onMouseLeave={e => { e.currentTarget.style.filter = "none"; }}
         >
           {btnLoading ? <Spinner size={16} color={CB.white} /> : children}
         </button>
@@ -1700,12 +1702,12 @@
         }}>
           <div style={{ padding: "24px 20px 20px", borderBottom: "1px solid rgba(255,255,255,0.08)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <div style={{ width: 36, height: 36, borderRadius: 10, background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <div style={{ width: 36, height: 36, borderRadius: 10, background: "transparent", display: "flex", alignItems: "center", justifyContent: "center" }}>
                 {icons.shield({ size: 20, color: CB.white })}
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.17</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.18</span>
               </div>
             </div>
             {isMobile && (
@@ -1726,14 +1728,15 @@
                   <button key={item.key} onClick={() => handleNav(item.key)} style={{
                     width: "100%", display: "flex", alignItems: "center", gap: 12,
                     padding: "11px 14px", borderRadius: 10, border: "none",
-                    background: isActive ? "rgba(0,137,123,0.15)" : "transparent",
-                    color: isActive ? CB.tealLight : "rgba(255,255,255,0.55)",
+                    background: isActive ? "#141414" : "transparent",
+                    boxShadow: isActive ? "inset 3px 0 0 #C8102E" : "none",   // v20.0.18 — the active page: a red bar, the landing's accent
+                    color: isActive ? CB.white : "rgba(255,255,255,0.72)",
                     fontSize: 14, fontWeight: isActive ? 600 : 500, fontFamily: "inherit",
                     cursor: "pointer", transition: "all 0.15s", textAlign: "left",
                     marginBottom: 8, animation: `slideIn 0.3s ease ${gi * 0.03}s both`,
                   }}
-                    onMouseEnter={e => { if (!isActive) { e.currentTarget.style.background = "rgba(255,255,255,0.06)"; e.currentTarget.style.color = "rgba(255,255,255,0.85)"; }}}
-                    onMouseLeave={e => { if (!isActive) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "rgba(255,255,255,0.55)"; }}}
+                    onMouseEnter={e => { if (!isActive) { e.currentTarget.style.background = "rgba(255,255,255,0.08)"; e.currentTarget.style.color = "#FFFFFF"; }}}
+                    onMouseLeave={e => { if (!isActive) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "rgba(255,255,255,0.72)"; }}}
                   >
                     {item.icon({ size: 18 })} {item.label}
                   </button>
@@ -1766,14 +1769,15 @@
                           <button key={item.key} onClick={() => handleNav(item.key)} style={{
                             width: "100%", display: "flex", alignItems: "center", gap: 12,
                             padding: "9px 14px 9px 22px", borderRadius: 10, border: "none",
-                            background: isActive ? "rgba(0,137,123,0.15)" : "transparent",
-                            color: isActive ? CB.tealLight : "rgba(255,255,255,0.55)",
+                            background: isActive ? "#141414" : "transparent",
+                            boxShadow: isActive ? "inset 3px 0 0 #C8102E" : "none",   // v20.0.18 — the active page: a red bar, the landing's accent
+                            color: isActive ? CB.white : "rgba(255,255,255,0.72)",
                             fontSize: 13, fontWeight: isActive ? 600 : 500, fontFamily: "inherit",
                             cursor: "pointer", transition: "all 0.15s", textAlign: "left",
                             marginBottom: 1,
                           }}
-                            onMouseEnter={e => { if (!isActive) { e.currentTarget.style.background = "rgba(255,255,255,0.06)"; e.currentTarget.style.color = "rgba(255,255,255,0.85)"; }}}
-                            onMouseLeave={e => { if (!isActive) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "rgba(255,255,255,0.55)"; }}}
+                            onMouseEnter={e => { if (!isActive) { e.currentTarget.style.background = "rgba(255,255,255,0.08)"; e.currentTarget.style.color = "#FFFFFF"; }}}
+                            onMouseLeave={e => { if (!isActive) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "rgba(255,255,255,0.72)"; }}}
                           >
                             {item.icon({ size: 16 })} {item.label}
                           </button>
@@ -1789,9 +1793,9 @@
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
               <div style={{
                 width: 34, height: 34, borderRadius: 10,
-                background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealLight})`,
+                background: CB.white,                                    // v20.0.18 — white chip, ink initial
                 display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: 14, fontWeight: 700, color: CB.white,
+                fontSize: 14, fontWeight: 700, color: CB.navy,
               }}>{(staffProfile?.first_name || user?.email)?.[0]?.toUpperCase() || "U"}</div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: "rgba(255,255,255,0.9)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -1806,7 +1810,7 @@
               background: "transparent", color: "rgba(255,255,255,0.5)", fontSize: 13,
               fontWeight: 600, fontFamily: "inherit", cursor: "pointer", transition: "all 0.15s",
             }}
-              onMouseEnter={e => { e.currentTarget.style.background = "rgba(229,57,53,0.1)"; e.currentTarget.style.color = "#f87171"; e.currentTarget.style.borderColor = "rgba(229,57,53,0.2)"; }}
+              onMouseEnter={e => { e.currentTarget.style.background = "rgba(200,16,46,0.1)"; e.currentTarget.style.color = "#f87171"; e.currentTarget.style.borderColor = "rgba(200,16,46,0.2)"; }}
               onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "rgba(255,255,255,0.5)"; e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)"; }}
             >{icons.logout({ size: 15 })} Sign Out</button>
           </div>
@@ -1817,7 +1821,7 @@
         return (
           <>
             <div onClick={onClose} style={{
-              position: "fixed", inset: 0, background: "rgba(10,30,51,0.5)", backdropFilter: "blur(4px)",
+              position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", backdropFilter: "blur(4px)",
               zIndex: 1000, animation: "overlayIn 0.2s ease",
             }} />
             {sidebar}
@@ -1836,7 +1840,7 @@
         <div
           onClick={onClick}
           style={{
-            background: CB.white, borderRadius: 16, padding: "24px 22px",
+            background: CB.white, borderRadius: 12, padding: "24px 22px",
             border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
             animation: `fadeIn 0.5s ease ${delay}s both`,
             cursor: clickable ? "pointer" : "default",
@@ -1844,23 +1848,19 @@
           }}
           onMouseEnter={e => {
             if (!clickable) return;
-            e.currentTarget.style.transform = "translateY(-2px)";
-            e.currentTarget.style.boxShadow = "0 4px 6px rgba(10,30,51,0.08), 0 12px 40px rgba(10,30,51,0.10)";
-            e.currentTarget.style.borderColor = `${color}40`;
+            e.currentTarget.style.borderColor = CB.navy;               // v20.0.18 — flat: the border darkens instead of a lift shadow
           }}
           onMouseLeave={e => {
             if (!clickable) return;
-            e.currentTarget.style.transform = "translateY(0)";
-            e.currentTarget.style.boxShadow = CB.cardShadow;
             e.currentTarget.style.borderColor = CB.border;
           }}
         >
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
-            <div style={{ width: 40, height: 40, borderRadius: 12, background: `${color}12`, display: "flex", alignItems: "center", justifyContent: "center" }}>
-              {icon({ size: 20, color })}
+            <div style={{ width: 40, height: 40, borderRadius: 10, background: "#F4F4F4", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              {icon({ size: 20, color: CB.navy })}                        {/* v20.0.18 — monochrome stat icons */}
             </div>
             {trend && (
-              <span style={{ fontSize: 12, fontWeight: 700, color: trend > 0 ? CB.green : CB.red, background: trend > 0 ? "rgba(46,125,50,0.08)" : "rgba(229,57,53,0.08)", padding: "3px 8px", borderRadius: 6 }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: trend > 0 ? CB.green : CB.red, background: trend > 0 ? "rgba(21,128,61,0.08)" : "rgba(200,16,46,0.08)", padding: "3px 8px", borderRadius: 6 }}>
                 {trend > 0 ? "+" : ""}{trend}%
               </span>
             )}
@@ -2332,8 +2332,8 @@
 
     // Training deck type metadata — colors + labels for UI
     const DECK_TYPE_META = {
-      universal:        { label: "Universal",        color: "#0A1E33", desc: "SOW 1.8 general staff training — 24 topics required for all staff" },
-      service_code:     { label: "Service Code",     color: "#00897B", desc: "Specific to one or more service codes a staff member may deliver" },
+      universal:        { label: "Universal",        color: "#000000", desc: "SOW 1.8 general staff training — 24 topics required for all staff" },
+      service_code:     { label: "Service Code",     color: "#15803D", desc: "Specific to one or more service codes a staff member may deliver" },
       person_specific:  { label: "Person-Specific",  color: "#D4A537", desc: "Individualized training for each person a staff member supports" },
       role_specific:    { label: "Role-Specific",    color: "#4FC3F7", desc: "Required for a specific job role (e.g., RN-only medication training)" },
     };
@@ -2547,7 +2547,7 @@
                   <label key={String(val)} style={{
                     display: "flex", alignItems: "center", gap: 8, padding: "10px 16px",
                     borderRadius: 10, border: `1px solid ${form.is_active === val ? (val ? CB.green : CB.red) : CB.border}`,
-                    background: form.is_active === val ? (val ? "rgba(46,125,50,0.06)" : "rgba(229,57,53,0.06)") : CB.white,
+                    background: form.is_active === val ? (val ? "rgba(21,128,61,0.06)" : "rgba(200,16,46,0.06)") : CB.white,
                     cursor: "pointer", fontSize: 14, fontWeight: 600, color: form.is_active === val ? (val ? CB.green : CB.red) : CB.textMid,
                     transition: "all 0.15s",
                   }}>
@@ -2610,8 +2610,8 @@
       return (
         <Modal open={open} onClose={onClose} title={`${staff.first_name} ${staff.last_name}`} subtitle={`${roleLabel} ${staff.is_active ? "• Active" : "• Inactive"}`} width={620}>
           {/* Identity strip */}
-          <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 22, padding: "14px 16px", background: `linear-gradient(135deg, ${CB.navy}08, ${CB.teal}08)`, borderRadius: 14, border: `1px solid ${CB.border}` }}>
-            <div style={{ width: 56, height: 56, borderRadius: 14, background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, fontWeight: 800, color: CB.white, flexShrink: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 22, padding: "14px 16px", background: `${CB.cream}`, borderRadius: 14, border: `1px solid ${CB.border}` }}>
+            <div style={{ width: 56, height: 56, borderRadius: 14, background: `${CB.navy}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, fontWeight: 800, color: CB.white, flexShrink: 0 }}>
               {(staff.first_name?.[0] || "") + (staff.last_name?.[0] || "")}
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
@@ -3374,7 +3374,7 @@
                   <label key={String(val)} style={{
                     display: "flex", alignItems: "center", gap: 8, padding: "10px 16px",
                     borderRadius: 10, border: `1px solid ${form.is_active === val ? (val ? CB.green : CB.red) : CB.border}`,
-                    background: form.is_active === val ? (val ? "rgba(46,125,50,0.06)" : "rgba(229,57,53,0.06)") : CB.white,
+                    background: form.is_active === val ? (val ? "rgba(21,128,61,0.06)" : "rgba(200,16,46,0.06)") : CB.white,
                     cursor: "pointer", fontSize: 14, fontWeight: 600, color: form.is_active === val ? (val ? CB.green : CB.red) : CB.textMid,
                   }}>
                     <input type="radio" name="client_status" checked={form.is_active === val} onChange={() => set("is_active", val)} style={{ display: "none" }} />
@@ -3527,7 +3527,7 @@
                         {a.end_date && <span style={{ fontSize: 12, color: CB.textLight }}>exp {new Date(a.end_date + "T00:00:00").toLocaleDateString()}</span>}
                       </div>
                       <button onClick={() => removeAuth(a.id)} style={{
-                        padding: "4px 8px", borderRadius: 6, border: "none", background: "rgba(229,57,53,0.08)",
+                        padding: "4px 8px", borderRadius: 6, border: "none", background: "rgba(200,16,46,0.08)",
                         color: CB.red, cursor: "pointer", fontSize: 12, fontWeight: 600, fontFamily: "inherit",
                       }}>{icons.trash({ size: 13, color: CB.red })}</button>
                     </div>
@@ -3620,8 +3620,8 @@
       return (
         <Modal open={open} onClose={onClose} title={`${client.first_name} ${client.last_name}`} subtitle={client.is_active ? "Active client" : "Inactive client"} width={680}>
           {/* Identity strip */}
-          <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 22, padding: "14px 16px", background: `linear-gradient(135deg, ${CB.teal}08, ${CB.blue}08)`, borderRadius: 14, border: `1px solid ${CB.border}` }}>
-            <div style={{ width: 56, height: 56, borderRadius: 14, background: `linear-gradient(135deg, ${CB.blue}, ${CB.teal})`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, fontWeight: 800, color: CB.white, flexShrink: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 22, padding: "14px 16px", background: `${CB.cream}`, borderRadius: 14, border: `1px solid ${CB.border}` }}>
+            <div style={{ width: 56, height: 56, borderRadius: 14, background: `${CB.navy}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, fontWeight: 800, color: CB.white, flexShrink: 0 }}>
               {(client.first_name?.[0] || "") + (client.last_name?.[0] || "")}
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
@@ -3866,10 +3866,10 @@
       "90_day":            { label: "Due Within 90 Days of Hire",  color: "#F57F17", order: 2, description: "Must complete in first three months" },
       "180_day":           { label: "Due Within 180 Days of Hire", color: "#E65100", order: 3, description: "Must complete in first six months" },
       "annual":            { label: "Annual Renewal",              color: "#1A73E8", order: 4, description: "Renew every year" },
-      "abi":               { label: "ABI-Specific",                color: "#00897B", order: 5, description: "Required for Acquired Brain Injury service codes" },
+      "abi":               { label: "ABI-Specific",                color: "#15803D", order: 5, description: "Required for Acquired Brain Injury service codes" },
       "ongoing":           { label: "Ongoing / As-Needed",         color: "#4A5568", order: 6, description: "No fixed renewal deadline" },
       // Content-based clusters (for future migration)
-      "rhs":               { label: "RHS (Residential Habilitation)", color: "#00897B", order: 10 },
+      "rhs":               { label: "RHS (Residential Habilitation)", color: "#15803D", order: 10 },
       "policy_procedure":  { label: "Policy & Procedure",          color: "#1A73E8", order: 11 },
       "cpr_first_aid":     { label: "CPR / First Aid",             color: "#E53935", order: 12 },
       "organizational":    { label: "Organizational",              color: "#4A5568", order: 13 },
@@ -4069,7 +4069,7 @@
                     return (
                       <div key={s.id} style={{
                         background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`,
-                        boxShadow: "0 1px 3px rgba(10,30,51,0.04)", overflow: "hidden",
+                        boxShadow: "0 1px 3px rgba(0,0,0,0.04)", overflow: "hidden",
                         animation: `fadeIn 0.3s ease ${si * 0.03}s both`,
                       }}>
                         {/* Staff row header */}
@@ -7035,7 +7035,7 @@
     };
 
     const DELIVERY_TYPE_META = {
-      residential: { label: "Residential",   color: "#00897B", description: "Clients live here. RHS, HHS, PPS." },
+      residential: { label: "Residential",   color: "#15803D", description: "Clients live here. RHS, HHS, PPS." },
       day:         { label: "Day / Group",   color: "#1A73E8", description: "Multiple clients receive service together. DSG, SLN, etc." },
       individual:  { label: "Individual",    color: "#F57F17", description: "Single-client service. PBA, PM2, BC, etc." },
     };
@@ -7180,7 +7180,7 @@
                   <label key={String(val)} style={{
                     display: "flex", alignItems: "center", gap: 8, padding: "10px 16px",
                     borderRadius: 10, border: `1px solid ${form.is_active === val ? (val ? CB.green : CB.textLight) : CB.border}`,
-                    background: form.is_active === val ? (val ? "rgba(46,125,50,0.06)" : "rgba(148,163,184,0.08)") : CB.white,
+                    background: form.is_active === val ? (val ? "rgba(21,128,61,0.06)" : "rgba(148,163,184,0.08)") : CB.white,
                     cursor: "pointer", fontSize: 14, fontWeight: 600, color: form.is_active === val ? (val ? CB.green : CB.textLight) : CB.textMid,
                   }}>
                     <input type="radio" name="ctx_status" checked={form.is_active === val} onChange={() => setForm(p => ({ ...p, is_active: val }))} style={{ display: "none" }} />
@@ -7588,7 +7588,7 @@
     // Shift status → visual treatment
     const SHIFT_STATUS_STYLE = {
       scheduled:   { bg: "#1A73E810", border: "#1A73E8", text: "#1A73E8", label: "Scheduled" },
-      in_progress: { bg: "#00897B18", border: "#00897B", text: "#00695C", label: "In Progress" },
+      in_progress: { bg: "#15803D18", border: "#15803D", text: "#14532D", label: "In Progress" },
       completed:   { bg: "#2E7D3218", border: "#2E7D32", text: "#1B5E20", label: "Completed" },
       missed:      { bg: "#E5393518", border: "#E53935", text: "#B71C1C", label: "No-Show" },
       cancelled:   { bg: "#94A3B818", border: "#94A3B8", text: "#475569", label: "Cancelled" },
@@ -8330,7 +8330,7 @@
                                     background: style.bg, border: `1px solid ${style.border}40`, borderLeft: `3px solid ${style.border}`,
                                     transition: "transform 0.1s, box-shadow 0.1s",
                                   }}
-                                    onMouseEnter={e => { e.currentTarget.style.transform = "translateY(-1px)"; e.currentTarget.style.boxShadow = "0 2px 8px rgba(10,30,51,0.08)"; }}
+                                    onMouseEnter={e => { e.currentTarget.style.transform = "translateY(-1px)"; e.currentTarget.style.boxShadow = "0 2px 8px rgba(0,0,0,0.08)"; }}
                                     onMouseLeave={e => { e.currentTarget.style.transform = "translateY(0)"; e.currentTarget.style.boxShadow = "none"; }}
                                   >
                                     <div style={{ fontSize: 10, fontWeight: 700, color: style.text, display: "flex", alignItems: "center", gap: 4 }}>
@@ -8428,7 +8428,7 @@
                                       background: style.bg, border: `1px solid ${style.border}40`, borderLeft: `3px solid ${style.border}`,
                                       transition: "transform 0.1s, box-shadow 0.1s",
                                     }}
-                                      onMouseEnter={e => { e.currentTarget.style.transform = "translateY(-1px)"; e.currentTarget.style.boxShadow = "0 2px 8px rgba(10,30,51,0.08)"; }}
+                                      onMouseEnter={e => { e.currentTarget.style.transform = "translateY(-1px)"; e.currentTarget.style.boxShadow = "0 2px 8px rgba(0,0,0,0.08)"; }}
                                       onMouseLeave={e => { e.currentTarget.style.transform = "translateY(0)"; e.currentTarget.style.boxShadow = "none"; }}
                                     >
                                       <div style={{ fontSize: 10, fontWeight: 700, color: style.text }}>
@@ -9515,7 +9515,7 @@
           {/* Active sessions banner */}
           {activeSessions.length > 0 && (
             <div style={{
-              background: `linear-gradient(135deg, ${CB.blue}08, ${CB.teal}08)`,
+              background: `${CB.cream}`,
               border: `1px solid ${CB.blue}20`, borderRadius: 14, padding: "16px 20px",
               marginBottom: 20, animation: "fadeIn 0.3s ease",
             }}>
@@ -9827,7 +9827,7 @@
               <div style={{
                 display: "flex", alignItems: "center", gap: 10, padding: "12px 16px",
                 borderRadius: 10, marginBottom: 16,
-                background: gpsStatus === "found" ? "rgba(46,125,50,0.06)" : gpsStatus === "error" ? "rgba(229,57,53,0.06)" : "rgba(26,115,232,0.06)",
+                background: gpsStatus === "found" ? "rgba(21,128,61,0.06)" : gpsStatus === "error" ? "rgba(200,16,46,0.06)" : "rgba(64,64,64,0.06)",
                 border: `1px solid ${gpsStatus === "found" ? CB.green : gpsStatus === "error" ? CB.red : CB.blue}20`,
               }}>
                 {gpsStatus === "locating" && <Spinner size={14} color={CB.blue} />}
@@ -9890,8 +9890,8 @@
               <Modal open={true} onClose={() => setGpsHelp(null)} title={gpsHelp.error.short} subtitle={gpsHelp.error.detail}>
                 <div style={{ marginBottom: 16 }}>
                   <div style={{
-                    padding: "12px 16px", borderRadius: 10, background: "rgba(229,57,53,0.06)",
-                    border: "1px solid rgba(229,57,53,0.18)", marginBottom: 18,
+                    padding: "12px 16px", borderRadius: 10, background: "rgba(200,16,46,0.06)",
+                    border: "1px solid rgba(200,16,46,0.18)", marginBottom: 18,
                     display: "flex", gap: 10, alignItems: "flex-start",
                   }}>
                     {icons.alertTriangle ? icons.alertTriangle({ size: 18, color: CB.red }) : null}
@@ -10126,9 +10126,9 @@
       };
 
       const severityStyles = {
-        high: { bg: "rgba(229,57,53,0.06)", border: `${CB.red}20`, color: CB.red, label: "CRITICAL" },
+        high: { bg: "rgba(200,16,46,0.06)", border: `${CB.red}20`, color: CB.red, label: "CRITICAL" },
         medium: { bg: "rgba(245,127,23,0.06)", border: `${CB.amber}20`, color: CB.amber, label: "WARNING" },
-        low: { bg: "rgba(26,115,232,0.06)", border: `${CB.blue}20`, color: CB.blue, label: "INFO" },
+        low: { bg: "rgba(64,64,64,0.06)", border: `${CB.blue}20`, color: CB.blue, label: "INFO" },
       };
 
       const deadlineSeverityColor = { critical: CB.red, high: CB.amber, medium: CB.blue };
@@ -10271,7 +10271,7 @@
                   <div key={dl.id} style={{
                     display: "flex", alignItems: "flex-start", gap: 16, padding: "16px 20px",
                     background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`,
-                    boxShadow: "0 1px 3px rgba(10,30,51,0.04)",
+                    boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
                     animation: `fadeIn 0.3s ease ${i * 0.015}s both`,
                   }}>
                     <div style={{
@@ -11359,7 +11359,7 @@
                   {days.map(d => {
                     const dt = new Date(d + "T00:00:00");
                     const isToday = d === nowStr;
-                    return <th key={d} style={{ padding: "10px 6px", color: isToday ? CB.tealLight : "rgba(255,255,255,0.7)", fontWeight: isToday ? 700 : 600, fontSize: 11, minWidth: 52, background: isToday ? "rgba(0,137,123,0.15)" : "transparent" }}>
+                    return <th key={d} style={{ padding: "10px 6px", color: isToday ? CB.white : "rgba(255,255,255,0.7)", fontWeight: isToday ? 700 : 600, fontSize: 11, minWidth: 52, background: isToday ? "rgba(255,255,255,0.14)" : "transparent" }}>
                       {dt.toLocaleDateString("en-US", { weekday: "short" })}<br/>{dt.getMonth()+1}/{dt.getDate()}
                     </th>;
                   })}
@@ -11610,7 +11610,7 @@
     const GOAL_STATUSES = [
       { value: "active", label: "Active", color: "#2E7D32" },
       { value: "in_progress", label: "In Progress", color: "#1565C0" },
-      { value: "met", label: "Met", color: "#00897B" },
+      { value: "met", label: "Met", color: "#15803D" },
       { value: "partially_met", label: "Partially Met", color: "#F57F17" },
       { value: "not_met", label: "Not Met", color: "#E53935" },
       { value: "discontinued", label: "Discontinued", color: "#94A3B8" },
@@ -11619,7 +11619,7 @@
       { value: 1, label: "No Progress", color: "#E53935" },
       { value: 2, label: "Minimal", color: "#F57F17" },
       { value: 3, label: "Moderate", color: "#1565C0" },
-      { value: 4, label: "Significant", color: "#00897B" },
+      { value: 4, label: "Significant", color: "#15803D" },
       { value: 5, label: "Goal Met", color: "#2E7D32" },
     ];
 
@@ -12327,7 +12327,7 @@
           {/* Date range filter */}
           <div style={{
             display: "flex", alignItems: "center", gap: 12, marginBottom: 20, padding: "14px 20px",
-            background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, boxShadow: "0 1px 3px rgba(10,30,51,0.04)",
+            background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
           }}>
             <span style={{ fontSize: 13, fontWeight: 700, color: CB.navy }}>{icons.calendar({ size: 16, color: CB.navy })} Period:</span>
             <input type="date" value={dateRange.start} onChange={e => setDateRange(p => ({ ...p, start: e.target.value }))} style={{ ...fieldStyle, width: 160, padding: "8px 12px", fontSize: 13 }} />
@@ -14276,7 +14276,7 @@
                         <label key={String(val)} style={{
                           display: "flex", alignItems: "center", gap: 8, padding: "10px 16px",
                           borderRadius: 10, border: `1px solid ${form.medications_on_file === val ? (val ? CB.green : CB.textLight) : CB.border}`,
-                          background: form.medications_on_file === val ? (val ? "rgba(46,125,50,0.06)" : CB.cream) : CB.white,
+                          background: form.medications_on_file === val ? (val ? "rgba(21,128,61,0.06)" : CB.cream) : CB.white,
                           cursor: "pointer", fontSize: 14, fontWeight: 600, color: form.medications_on_file === val ? (val ? CB.green : CB.textMid) : CB.textMid,
                         }}>
                           <input type="radio" name="meds" checked={form.medications_on_file === val} onChange={() => set("medications_on_file", val)} style={{ display: "none" }} />
@@ -14291,7 +14291,7 @@
                         <label key={String(val)} style={{
                           display: "flex", alignItems: "center", gap: 8, padding: "10px 16px",
                           borderRadius: 10, border: `1px solid ${form.pcsp_on_file === val ? (val ? CB.green : CB.textLight) : CB.border}`,
-                          background: form.pcsp_on_file === val ? (val ? "rgba(46,125,50,0.06)" : CB.cream) : CB.white,
+                          background: form.pcsp_on_file === val ? (val ? "rgba(21,128,61,0.06)" : CB.cream) : CB.white,
                           cursor: "pointer", fontSize: 14, fontWeight: 600, color: form.pcsp_on_file === val ? (val ? CB.green : CB.textMid) : CB.textMid,
                         }}>
                           <input type="radio" name="pcsp" checked={form.pcsp_on_file === val} onChange={() => set("pcsp_on_file", val)} style={{ display: "none" }} />
@@ -14343,7 +14343,7 @@
                           {a.rate_per_unit && perms.viewRates && <span style={{ fontSize: 12, color: CB.teal, fontWeight: 700 }}>@ ${Number(a.rate_per_unit).toFixed(2)}</span>}
                         </div>
                         <button onClick={() => removeIntakeAuth(i)} style={{
-                          padding: "4px 8px", borderRadius: 6, border: "none", background: "rgba(229,57,53,0.08)",
+                          padding: "4px 8px", borderRadius: 6, border: "none", background: "rgba(200,16,46,0.08)",
                           color: CB.red, cursor: "pointer", fontSize: 12, fontWeight: 600, fontFamily: "inherit",
                         }}>{icons.trash({ size: 13, color: CB.red })}</button>
                       </div>
@@ -14636,7 +14636,7 @@
           display: "flex", alignItems: "center", gap: 10, padding: "10px 14px",
           borderRadius: 10, cursor: "pointer", transition: "all 0.15s",
           border: `1px solid ${form[field] ? `${CB.green}40` : CB.border}`,
-          background: form[field] ? "rgba(46,125,50,0.04)" : CB.white,
+          background: form[field] ? "rgba(21,128,61,0.04)" : CB.white,
         }}>
           <div style={{
             width: 22, height: 22, borderRadius: 6, flexShrink: 0,
@@ -15318,7 +15318,7 @@
                     {/* Avatar */}
                     <div style={{
                       width: 40, height: 40, borderRadius: 12, flexShrink: 0,
-                      background: isUnread ? `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})` : CB.cream,
+                      background: isUnread ? `${CB.navy}` : CB.cream,
                       display: "flex", alignItems: "center", justifyContent: "center",
                       fontSize: 15, fontWeight: 700, color: isUnread ? CB.white : CB.textMid,
                     }}>{(otherPerson?.first_name || "?")[0].toUpperCase()}</div>
@@ -16037,7 +16037,7 @@
             {result && (
               <div style={{
                 marginTop: 24, padding: 24, borderRadius: 16,
-                background: `linear-gradient(135deg, ${CB.navy}04, ${CB.teal}04)`,
+                background: `${CB.cream}`,
                 border: `1px solid ${CB.border}`, animation: "fadeIn 0.4s ease",
               }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
@@ -16106,7 +16106,7 @@
 
       const initials = (entity.first_name?.[0] || "") + (entity.last_name?.[0] || "");
       const isStaff = entityType === "staff";
-      const gradient = isStaff ? `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})` : `linear-gradient(135deg, ${CB.blue}, ${CB.teal})`;
+      const gradient = isStaff ? `${CB.navy}` : `${CB.navy}`;
 
       // Subtitle line: for staff it's role + status; for client it's SC + status
       let subtitle = "";
@@ -16144,7 +16144,7 @@
           <div style={{
             display: "flex", alignItems: "center", gap: 18, marginBottom: 22,
             padding: isMobile ? "18px 16px" : "22px 24px",
-            background: `linear-gradient(135deg, ${isStaff ? CB.navy : CB.teal}06, ${isStaff ? CB.teal : CB.blue}06)`,
+            background: `${CB.cream}`,
             borderRadius: 16, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
             flexWrap: isMobile ? "wrap" : "nowrap",
           }}>
@@ -16152,7 +16152,7 @@
               width: isMobile ? 64 : 72, height: isMobile ? 64 : 72, borderRadius: 18,
               background: gradient, display: "flex", alignItems: "center", justifyContent: "center",
               fontSize: isMobile ? 26 : 30, fontWeight: 800, color: CB.white, flexShrink: 0,
-              boxShadow: "0 4px 14px rgba(10,30,51,0.15)",
+              boxShadow: "0 4px 14px rgba(0,0,0,0.15)",
             }}>{initials}</div>
             <div style={{ flex: 1, minWidth: 0 }}>
               <h1 style={{ fontSize: isMobile ? 22 : 28, fontWeight: 800, color: CB.navy, letterSpacing: -0.8, lineHeight: 1.15, marginBottom: 6 }}>
@@ -16166,7 +16166,7 @@
           <div style={{
             display: "flex", gap: 4, marginBottom: 20, background: CB.white,
             borderRadius: 12, padding: 4, border: `1px solid ${CB.border}`,
-            boxShadow: "0 1px 3px rgba(10,30,51,0.04)",
+            boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
             overflowX: "auto", WebkitOverflowScrolling: "touch",
           }}>
             {tabs.map(t => (
@@ -17643,7 +17643,7 @@
           <div style={{
             background: CB.blue, color: CB.white, borderRadius: 10, padding: "12px 18px",
             marginBottom: 20, display: "flex", alignItems: "center", gap: 10,
-            fontSize: 14, fontWeight: 600, boxShadow: "0 2px 12px rgba(10,30,51,0.12)",
+            fontSize: 14, fontWeight: 600, boxShadow: "0 2px 12px rgba(0,0,0,0.12)",
           }}>
             {icons.clock({ size: 18, color: CB.white })}
             <span>Payment received — finalizing your subscription. This takes a few seconds…</span>
@@ -17667,7 +17667,7 @@
         <div style={{
           background: bg, color: CB.white, borderRadius: 10, padding: "12px 18px",
           marginBottom: 20, display: "flex", alignItems: "center", justifyContent: "space-between",
-          gap: 14, flexWrap: "wrap", boxShadow: "0 2px 12px rgba(10,30,51,0.12)",
+          gap: 14, flexWrap: "wrap", boxShadow: "0 2px 12px rgba(0,0,0,0.12)",
         }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 14, fontWeight: 600 }}>
             {icons.alertTriangle({ size: 18, color: CB.white })}
@@ -19901,7 +19901,7 @@
                         padding: 18, cursor: "pointer", transition: "all 0.15s",
                         boxShadow: CB.cardShadow,
                       }}
-                        onMouseEnter={e => { e.currentTarget.style.borderColor = CB.teal; e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 8px 20px rgba(10,30,51,0.08)"; }}
+                        onMouseEnter={e => { e.currentTarget.style.borderColor = CB.teal; e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 8px 20px rgba(0,0,0,0.08)"; }}
                         onMouseLeave={e => { e.currentTarget.style.borderColor = CB.border; e.currentTarget.style.transform = "translateY(0)"; e.currentTarget.style.boxShadow = CB.cardShadow; }}
                       >
                         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
@@ -20147,13 +20147,13 @@
             <div style={{
               position: "fixed", top: 0, left: 0, right: 0, zIndex: 49, height: 56,
               background: CB.navy, display: "flex", alignItems: "center", justifyContent: "space-between",
-              padding: "0 16px", boxShadow: "0 2px 8px rgba(10,30,51,0.15)",
+              padding: "0 16px", boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
             }}>
               <button onClick={() => setSidebarOpen(true)} style={{ background: "none", border: "none", cursor: "pointer", padding: 6 }}>
                 {icons.menu({ size: 22, color: CB.white })}
               </button>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <div style={{ width: 28, height: 28, borderRadius: 8, background: `linear-gradient(135deg, ${CB.teal}, ${CB.tealDark})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <div style={{ width: 28, height: 28, borderRadius: 8, background: `${CB.navy}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
                   {icons.shield({ size: 14, color: CB.white })}
                 </div>
                 <span style={{ fontSize: 17, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
@@ -20241,7 +20241,7 @@
       if (loading || (user && (!brandReady || identityState === "pending"))) {
         return (
           <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: CB.cream, flexDirection: "column", gap: 16 }}>
-            <div style={{ width: 48, height: 48, borderRadius: 14, background: `linear-gradient(135deg, ${CB.navy}, ${CB.navyLight})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <div style={{ width: 48, height: 48, borderRadius: 14, background: `${CB.navy}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
               {icons.shield({ size: 24, color: CB.white })}
             </div>
             <Spinner size={22} />
