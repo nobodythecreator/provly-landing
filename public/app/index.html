@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.17r1 (Greptile r1): front-door leftovers aligned — sign-up inputs white at 8px and its sections 12px (as sign-in), error boxes in the care-red tint at 8px, invite and no-access pages on paper, and the two front-door spinners in ink rather than the inside's teal. -->
   <!-- v20.0.17 (front door restyle — Tombé, Sep 22, scope B part 1): sign in, sign up, accept invite and "No workspace access" take the landing page's look — ink on paper, the care red for accents and links, the landing's grays, flat cards, 8px radii — with forest green (#15803D) for the one action that completes each screen. Implemented by shadowing CB with FD_CB inside those four screens; the inside of the app is unchanged until v20.0.18. -->
   <!-- v20.0.16r3 (Greptile r2): an empty exceptions list ('[]', the column's NOT NULL default) reads as "No exceptions noted" and as an empty edit box; clearing a note sends null, which correct_evv_session stores as '[]'. -->
   <!-- v20.0.16r2 (Greptile r1): the correction form refuses to clear a completed visit's clock-out, matching correct_evv_session; the database guard now holds office tiers to a live clock-out only on open sessions. -->
@@ -1008,8 +1009,8 @@
 
               {error && (
                 <div style={{
-                  background: "rgba(229,57,53,0.08)", border: "1px solid rgba(229,57,53,0.2)",
-                  borderRadius: 12, padding: "12px 16px", marginBottom: 20,
+                  background: "rgba(200,16,46,0.06)", border: "1px solid rgba(200,16,46,0.25)",
+                  borderRadius: 8, padding: "12px 16px", marginBottom: 20,
                   display: "flex", alignItems: "center", gap: 10,
                 }}>
                   {icons.alertTriangle({ size: 16, color: CB.red })}
@@ -1339,10 +1340,10 @@
               placeholder={placeholder}
               autoComplete={autoComplete}
               style={{
-                width: "100%", padding: "12px 16px", borderRadius: 12,
+                width: "100%", padding: "12px 16px", borderRadius: 8,
                 border: `1px solid ${errors[name] ? CB.red : CB.border}`,
                 fontSize: 15, fontFamily: "inherit", color: CB.text,
-                background: CB.cream, boxSizing: "border-box",
+                background: FD.paper, boxSizing: "border-box",
               }}
             />
             {errors[name] && (
@@ -1353,7 +1354,7 @@
       };
 
       const sectionStyle = {
-        background: CB.white, borderRadius: 20, padding: "32px",
+        background: CB.white, borderRadius: 12, padding: "32px",
         border: `1px solid ${CB.border}`, boxShadow: "none",
         marginBottom: 20,
       };
@@ -1397,8 +1398,8 @@
             {/* Submit-level error banner */}
             {submitError && (
               <div style={{
-                background: "rgba(229,57,53,0.08)", border: "1px solid rgba(229,57,53,0.2)",
-                borderRadius: 12, padding: "14px 18px", marginBottom: 20,
+                background: "rgba(200,16,46,0.06)", border: "1px solid rgba(200,16,46,0.25)",
+                borderRadius: 8, padding: "14px 18px", marginBottom: 20,
                 display: "flex", alignItems: "center", gap: 12,
               }}>
                 {icons.alertTriangle({ size: 18, color: CB.red })}
@@ -1408,12 +1409,12 @@
 
             {/* v20.0.3 — invite lookup states */}
             {inviteToken && inviteLoading && (
-              <div style={{ textAlign: "center", padding: "8px 0 24px" }}><Spinner size={20} /></div>
+              <div style={{ textAlign: "center", padding: "8px 0 24px" }}><Spinner size={20} color={FD.ink} /></div>
             )}
             {inviteToken && !inviteLoading && !inviteMode && (
               <div style={{
-                background: "rgba(229,57,53,0.08)", border: "1px solid rgba(229,57,53,0.2)",
-                borderRadius: 12, padding: "14px 18px", marginBottom: 20,
+                background: "rgba(200,16,46,0.06)", border: "1px solid rgba(200,16,46,0.25)",
+                borderRadius: 8, padding: "14px 18px", marginBottom: 20,
               }}>
                 <div style={{ fontSize: 14, color: CB.red, fontWeight: 600, marginBottom: 4 }}>
                   {invite && invite.reason === "expired" ? "This invitation has expired."
@@ -1539,13 +1540,13 @@
         return () => { alive = false; };
       }, [token]);
       return (
-        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: CB.cream, flexDirection: "column", gap: 16, padding: 24 }}>
+        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: FD.paper, flexDirection: "column", gap: 16, padding: 24 }}>
           <div style={{ width: 48, height: 48, borderRadius: 14, background: "transparent", display: "flex", alignItems: "center", justifyContent: "center" }}>
             {icons.shield({ size: 24, color: FD.ink })}
           </div>
           {status === "working" && (
             <React.Fragment>
-              <Spinner size={22} />
+              <Spinner size={22} color={FD.ink} />
               <div style={{ fontSize: 15, color: CB.textMid, fontWeight: 500 }}>Accepting your invitation…</div>
             </React.Fragment>
           )}
@@ -20186,7 +20187,7 @@
       const CB = FD_CB; // v20.0.17 — front door: the landing page palette
       const { user, signOut, brand } = useAuth();
       return (
-        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: CB.cream, flexDirection: "column", gap: 16, padding: 24 }}>
+        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: FD.paper, flexDirection: "column", gap: 16, padding: 24 }}>
           <div style={{ width: 48, height: 48, borderRadius: 14, background: "transparent", display: "flex", alignItems: "center", justifyContent: "center" }}>
             {icons.shield({ size: 24, color: FD.ink })}
           </div>
