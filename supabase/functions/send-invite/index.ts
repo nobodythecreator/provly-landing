@@ -33,6 +33,18 @@ function json(body: unknown, status = 200): Response {
 // gate is OFF now that reads (v20.0.12) and writes (v20.0.13) are
 // relationship-scoped; an operator login sees and writes only its own home.
 // billing / readonly stay listed but rank 0, so canGrant refuses them.
+// v20.0.19 / r1 — how each role reads in the email. ONE label set: this map
+// mirrors the app's STAFF_ROLES exactly, and roles the app does not list fall
+// back the way the app does (underscores → spaces), so an invite and the app
+// never name a role differently. A new role is added in both places together.
+const ROLE_LABELS: Record<string, string> = {
+  owner: "Owner", admin: "Administrator", compliance_director: "Compliance Director",
+  residential_director: "Residential Director", day_program_director: "Day Program Director",
+  house_manager: "House Manager", dsp: "Direct Support Professional",
+  hhs_operator: "Host Home Operator", bcba: "BCBA", rn: "Registered Nurse",
+};
+const roleLabel = (r: string) => ROLE_LABELS[r] ?? r.replace(/_/g, " ");
+
 const ALLOWED_INVITE_ROLES = [
   "admin", "supervisor", "dsp", "billing", "readonly", "bcba", "rn",
   "house_manager", "day_program_director", "residential_director",
@@ -211,20 +223,21 @@ Deno.serve(async (req) => {
         ...(org?.email ? { reply_to: org.email } : {}),
         subject: `You're invited to join ${orgName} on Provly`,
         html: `
-          <div style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 520px; margin: 0 auto; color: #0A1E33;">
-            <h2 style="color: #0A1E33;">You're invited to ${escapeHtml(orgName)}</h2>
+          <div style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 520px; margin: 0 auto; color: #000000;">
+            <div style="height: 3px; width: 32px; background: #C8102E; margin-bottom: 18px;"></div>
+            <h2 style="color: #000000;">You're invited to ${escapeHtml(orgName)}</h2>
             <p>${escapeHtml(inviterName)} has invited you${firstName ? `, ${escapeHtml(firstName)},` : ""} to join
-            <strong>${escapeHtml(orgName)}</strong> on Provly as <strong>${escapeHtml(role)}</strong>.</p>
+            <strong>${escapeHtml(orgName)}</strong> on Provly as <strong>${escapeHtml(roleLabel(role))}</strong>.</p>
             <p style="margin: 28px 0;">
               <a href="${inviteUrl}"
-                 style="background: #00897B; color: #ffffff; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-weight: 600;">
+                 style="background: #15803D; color: #ffffff; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600;">
                 Accept invitation
               </a>
             </p>
-            <p style="font-size: 13px; color: #55657a;">This invitation expires in 7 days.
+            <p style="font-size: 13px; color: #6F6F6F;">This invitation expires in 7 days.
             If the button doesn't work, paste this link into your browser:<br>
             <a href="${inviteUrl}">${inviteUrl}</a></p>
-            <p style="font-size: 13px; color: #55657a;">If you weren't expecting this invitation, you can safely ignore this email.</p>
+            <p style="font-size: 13px; color: #6F6F6F;">If you weren't expecting this invitation, you can safely ignore this email.</p>
           </div>
         `,
       }),
