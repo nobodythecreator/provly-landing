@@ -8,6 +8,8 @@
 -- EVV data elements (who, whom, what, where, when) change only through the RPC;
 -- and the RPC no longer reopens a completed visit (clearing a clock-out was the
 -- door to an unlogged edit in between).
+-- r3 (Greptile r2): clearing exceptions stores the column's empty value, '[]'
+-- (the column is NOT NULL) — a cleared note no longer rolls the correction back.
 --
 -- Small debt filed Sep 16 (Greptile on the Item 4 docs): a supervisor's EVV
 -- correction required a reason and an evv_edit_log entry, but only the APP
@@ -98,7 +100,8 @@ BEGIN
     v_out_chg := v_out IS DISTINCT FROM v_old.clock_out_at;
   END IF;
   IF p_patch ? 'exceptions' THEN
-    v_exc := CASE WHEN jsonb_typeof(p_patch->'exceptions') = 'null' THEN NULL ELSE p_patch->'exceptions' END;
+    -- r3 — evv_sessions.exceptions is NOT NULL DEFAULT '[]': "cleared" means the empty list
+    v_exc := CASE WHEN jsonb_typeof(p_patch->'exceptions') = 'null' THEN '[]'::jsonb ELSE p_patch->'exceptions' END;
     v_exc_chg := v_exc IS DISTINCT FROM v_old.exceptions;
   END IF;
 
@@ -296,6 +299,12 @@ SELECT check_name, value, want FROM (
          (SELECT count(*)::text FROM pg_proc p
            WHERE p.pronamespace = 'public'::regnamespace AND p.proname = 'correct_evv_session'
              AND p.prosrc LIKE '%cannot be reopened%'),
+         '1'
+  UNION ALL
+  SELECT 10, 'r3: clearing exceptions stores ''[]'' (column is NOT NULL)',
+         (SELECT count(*)::text FROM pg_proc p
+           WHERE p.pronamespace = 'public'::regnamespace AND p.proname = 'correct_evv_session'
+             AND p.prosrc LIKE '%THEN ''[]''::jsonb ELSE%'),
          '1'
   UNION ALL
   SELECT 7, '(info) evv_edit_log rows today',

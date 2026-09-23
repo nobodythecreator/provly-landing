@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.16r3 (Greptile r2): an empty exceptions list ('[]', the column's NOT NULL default) reads as "No exceptions noted" and as an empty edit box; clearing a note sends null, which correct_evv_session stores as '[]'. -->
   <!-- v20.0.16r2 (Greptile r1): the correction form refuses to clear a completed visit's clock-out, matching correct_evv_session; the database guard now holds office tiers to a live clock-out only on open sessions. -->
   <!-- v20.0.16 (small debt — EVV correction RPC): a supervisor's EVV correction is one database call, correct_evv_session (sql/v20.0.16.sql): the reason is required and the evv_edit_log row and the correction land in the same transaction, or neither does. The database now refuses any other office-tier change to clock times or to a completed session's evidence, and the edit log can only be written by that function. -->
   <!-- v20.0.15r1 (Greptile r1): the empty states of the Service Notes, Incidents and PCSP Goals tabs carry the same add action, so a client's first record can be created from the profile. -->
@@ -8833,6 +8834,7 @@
       // Render structured values as formatted JSON rather than "[object Object]".
       const exceptionsToText = (v) => {
         if (v == null) return "";
+        if (Array.isArray(v) && v.length === 0) return ""; // v20.0.16r3 — the column's empty value ('[]') reads as "no exceptions"
         if (typeof v === "string") return v;
         try { return JSON.stringify(v, null, 2); } catch (_) { return String(v); }
       };
