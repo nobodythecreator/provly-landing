@@ -2,7 +2,7 @@
 
 **How to read this:** ✅ merged and verified · 🔄 in progress (branch open) · ⬜ not started · 🧑 Tombé's task (no code).
 **Rule:** the PR that completes an item flips its box in the same commit, so this file is only ever as stale as the last merge.
-Updated: Sep 23 2026.
+Updated: Sep 24 2026.
 
 ## Done this cycle
 - ✅ v20.0.10 — client-form integrity + EVV edit-with-reason (Sep 7)
@@ -27,13 +27,14 @@ Updated: Sep 23 2026.
 - ✅ v20.0.17 — front door on the landing palette: ink, paper, care red; forest green for the completing action (Sep 22)
 - ✅ v20.0.18 — the inside on the same palette: black sidebar with a red active bar, forest-green primary actions, flat surfaces; status colors keep their meaning (Sep 23)
 - ✅ v20.0.19 — password reset: "Forgot password?" → Supabase recovery email through Provly's Resend SMTP → "Set a new password"; invite email in the new palette and naming the role ("Host Home Operator") (Sep 23)
+- ✅ v20.0.20 — manager delete for draft / rejected service notes (submitted → reject first); database-enforced, every delete copied to the audit log; billed notes no longer deletable (Sep 24)
 
 ## Tier 1 — finish Item 4 (security)
 - 🔄 **Go live with identities.** Operator invites sent Sep 22 (Elena, Kujang, Ethan); Asunta once her email is on file; Siale and Asia held until they have someone to support (no assignment = empty login); assignments kept current as a security control. (The "retire the shared org login" step is void — no shared login ever existed.)
 
 ## Tier 2 — small debts surfaced this cycle
 - ⬜ **AI drafting proxy.** Edge function holding the Anthropic key server-side; the AI page has never worked in production (browser-side calls, no key). Flips the landing row to shipped.
-- ⬜ **Service-note delete (manage).** The database allows a manager to delete an unapproved note; the app has no button. Confirm dialog, unapproved only.
+- ⬜ **Lock billed notes.** The note status `billed` exists but nothing sets it yet; when the UPI e520 export does, a billed note must be locked like an approved one (the lock trigger only covers `approved`) and approved → billed must be the only way in.
 - ⬜ **Deliver-tier service-note insert rule.** Server-side: a front-line note needs a current authorization for its code on its date (or a context that owns the code) — today the form enforces it.
 - ⬜ **UPI, not PRISM.** Compliance-deadline D23 text + EVV export comment; begin "claims" → "payments" vocabulary.
 - 🧑 **Stripe:** delete the orphan Hope Haven customer ($0.00, Aug 1 4:18 PM) — confirm it is not `cus_Uzn7znOlF1QMue` first.
