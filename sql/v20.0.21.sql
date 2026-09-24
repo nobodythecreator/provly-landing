@@ -16,7 +16,18 @@
 -- changes — editing or submitting an existing draft is never blocked by an
 -- authorization that has since closed. Office tiers keep their override;
 -- service-role / SQL-editor writes pass untouched.
+-- r1 (Greptile r1): (a) the v19.2 note-context column is now installed here
+-- (idempotent, exactly as v19.2 documents it), so a context-bearing note is
+-- never saved without its context and then refused; the form's
+-- missing-column retry can no longer fire. (b) the context itself must be
+-- active (is_active = true, as the form loads it) — an archived context no
+-- longer authorizes anything.
 -- ============================================================================
+
+-- 0. v19.2 prerequisite — service_notes.context_id (no-op where it exists)
+ALTER TABLE public.service_notes ADD COLUMN IF NOT EXISTS context_id UUID
+  REFERENCES public.service_delivery_contexts(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_notes_context ON public.service_notes(context_id);
 
 CREATE OR REPLACE FUNCTION public.trg_service_notes_deliver_auth()
 RETURNS trigger
@@ -33,7 +44,7 @@ BEGIN
      AND NEW.person_id IS NOT DISTINCT FROM OLD.person_id
      AND NEW.service_code_id IS NOT DISTINCT FROM OLD.service_code_id
      AND NEW.service_date IS NOT DISTINCT FROM OLD.service_date
-     AND (to_jsonb(NEW) ->> 'context_id') IS NOT DISTINCT FROM (to_jsonb(OLD) ->> 'context_id') THEN
+     AND NEW.context_id IS NOT DISTINCT FROM OLD.context_id THEN
     RETURN NEW;                                                  -- nothing the test depends on changed
   END IF;
 
@@ -47,12 +58,13 @@ BEGIN
 
   -- (2) a group-service context that locks the code, the client an active member
   IF NOT v_ok THEN
-    v_ctx := NULLIF(to_jsonb(NEW) ->> 'context_id', '')::uuid;
+    v_ctx := NEW.context_id;
     IF v_ctx IS NOT NULL THEN
       SELECT EXISTS (
         SELECT 1 FROM public.service_delivery_contexts c
           JOIN public.service_delivery_context_members m ON m.context_id = c.id
-         WHERE c.id = v_ctx AND c.org_id = NEW.org_id AND c.service_code_id = NEW.service_code_id
+         WHERE c.id = v_ctx AND c.org_id = NEW.org_id AND c.is_active = true      -- r1: archived contexts authorize nothing
+           AND c.service_code_id = NEW.service_code_id
            AND m.person_id = NEW.person_id AND m.is_active IS DISTINCT FROM false AND m.end_date IS NULL
       ) INTO v_ok;
     END IF;
@@ -95,6 +107,18 @@ SELECT check_name, value, want FROM (
              AND p.prosrc LIKE '%a.start_date <= NEW.service_date%' AND p.prosrc LIKE '%m.end_date IS NULL%'),
          '1'
   UNION ALL
+  SELECT 6, 'r1: service_notes.context_id present (the v19.2 prerequisite), with its index',
+         (SELECT (EXISTS (SELECT 1 FROM information_schema.columns
+                           WHERE table_schema = 'public' AND table_name = 'service_notes' AND column_name = 'context_id')
+                  AND EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'idx_notes_context'))::text),
+         'true'
+  UNION ALL
+  SELECT 7, 'r1: an archived context authorizes nothing (context must be is_active = true)',
+         (SELECT count(*)::text FROM pg_proc p
+           WHERE p.pronamespace = 'public'::regnamespace AND p.proname = 'trg_service_notes_deliver_auth'
+             AND p.prosrc LIKE '%c.is_active = true%' AND p.prosrc LIKE '%v_ctx := NEW.context_id%'),
+         '1'
+  UNION ALL
   SELECT 4, 'service-note triggers now: lock, delete audit, front-line authorization',
          (SELECT string_agg(t.tgname, ', ' ORDER BY t.tgname) FROM pg_trigger t
            WHERE t.tgrelid = 'public.service_notes'::regclass AND NOT t.tgisinternal
@@ -109,7 +133,7 @@ SELECT check_name, value, want FROM (
                                 AND a.start_date <= n.service_date AND a.end_date >= n.service_date)
              AND NOT EXISTS (SELECT 1 FROM public.service_delivery_contexts c
                                JOIN public.service_delivery_context_members m ON m.context_id = c.id
-                              WHERE c.id = NULLIF(to_jsonb(n) ->> 'context_id', '')::uuid AND c.org_id = n.org_id
+                              WHERE c.id = n.context_id AND c.org_id = n.org_id AND c.is_active = true
                                 AND c.service_code_id = n.service_code_id AND m.person_id = n.person_id
                                 AND m.is_active IS DISTINCT FROM false AND m.end_date IS NULL)),
          'read'
