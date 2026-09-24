@@ -34,7 +34,8 @@ Updated: Sep 24 2026.
 - 🔄 **Go live with identities.** Operator invites sent Sep 22 (Elena, Kujang, Ethan); Asunta once her email is on file; Siale and Asia held until they have someone to support (no assignment = empty login); assignments kept current as a security control. (The "retire the shared org login" step is void — no shared login ever existed.)
 
 ## Tier 2 — small debts surfaced this cycle
-- ⬜ **AI drafting proxy.** Edge function holding the Anthropic key server-side; the AI page has never worked in production (browser-side calls, no key). Flips the landing row to shipped.
+- 🔄 **AI drafting proxy.** v20.0.22 built: `ai-draft` edge function holds the Anthropic key, owner / admin / compliance director only (D2 = A), reads notes under the caller's own access, sends only first name + codes + times + note text, audit row per draft. **Switched off until Provly's BAA with Anthropic is signed** (D1 = A) — then set `AI_BAA_CONFIRMED=true` and flip the landing row to shipped.
+- 🧑 **BAA with Anthropic.** Request a Business Associate Agreement for Provly's API account; compliance lead to review. Unlocks AI drafting.
 - ⬜ **Lock billed notes.** The note status `billed` exists but nothing sets it yet; when the UPI e520 export does, a billed note must be locked like an approved one (the lock trigger only covers `approved`) and approved → billed must be the only way in.
 - ⬜ **UPI, not PRISM.** Compliance-deadline D23 text + EVV export comment; begin "claims" → "payments" vocabulary.
 - 🧑 **Stripe:** delete the orphan Hope Haven customer ($0.00, Aug 1 4:18 PM) — confirm it is not `cus_Uzn7znOlF1QMue` first.
