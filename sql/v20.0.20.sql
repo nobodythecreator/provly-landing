@@ -62,11 +62,11 @@ SELECT check_name, value, want FROM (
              AND p.prosrc LIKE '%''note_deleted''%' AND p.prosrc LIKE '%to_jsonb(OLD)%'),
          'true'
   UNION ALL
-  SELECT 4, 'v20.0.13 tier write policies still in place',
+  SELECT 4, 'tier write policies still in place (v20.0.13''s 116, less evv_edit_log_insert_tier dropped by v20.0.16 — the edit log is written only by correct_evv_session)',
          (SELECT count(*)::text FROM pg_policies p
            WHERE p.schemaname = 'public' AND p.permissive = 'PERMISSIVE' AND p.roles::text = '{authenticated}'
              AND p.policyname IN (p.tablename || '_insert_tier', p.tablename || '_update_tier', p.tablename || '_delete_tier')),
-         '116'
+         '115'
   UNION ALL
   SELECT 5, '(info) notes a manager may delete today: draft / rejected',
          (SELECT (SELECT count(*) FROM public.service_notes WHERE status = 'draft')::text || ' / ' ||
