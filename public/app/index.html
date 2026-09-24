@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.22r1 (Greptile r1): the draft line says when only the latest notes were used ("the latest 200 of N"). ai-draft r1: audit row written before anything is sent (fail closed), newest notes kept over the cap, provider errors logged as status only. -->
   <!-- v20.0.22 (arc: AI drafting proxy; D1 = A, D2 = A): the AI page no longer calls api.anthropic.com from the browser. Shift handoffs and quarterly summaries come from the ai-draft edge function, which holds the Anthropic key, checks the caller is owner / admin / compliance director, reads the notes under the caller's own access, sends only the client's first name, codes, times and note text, and logs each draft (ids and counts only). It refuses every request until AI_BAA_CONFIRMED is set, after Provly's Business Associate Agreement with Anthropic is signed; the page shows that notice. -->
   <!-- v20.0.20 (small debt — manager note delete; D1 = A): a manager can delete a DRAFT or REJECTED service note from its detail view (confirm first); a submitted note is rejected first. sql/v20.0.20.sql makes the database enforce the same rule (billed notes, previously deletable, are not) and writes the whole note to audit_log on every delete. -->
   <!-- v20.0.19r1 (Greptile r1): reset links return to /app/reset, so only a failed reset link opens the reset form; any other failed auth link shows "invalid or expired" on sign-in; the error hash is cleared once read. send-invite's role labels mirror STAFF_ROLES exactly (same fallback), so an invite and the app never name a role differently. -->
@@ -16028,8 +16029,8 @@
         const client = clients.find(c => c.id === selectedClient);
         const name = `${client?.first_name || ""} ${client?.last_name || ""}`.trim();
         setResult(mode === "handoff"
-          ? { type: "handoff", content: data.text, client: name, date: data.start, noteCount: data.noteCount }
-          : { type: "quarterly", content: data.text, client: name, period: `${data.start} to ${data.end}`, noteCount: data.noteCount });
+          ? { type: "handoff", content: data.text, client: name, date: data.start, noteCount: data.noteCount, totalNotes: data.totalNotes, truncated: data.truncated }
+          : { type: "quarterly", content: data.text, client: name, period: `${data.start} to ${data.end}`, noteCount: data.noteCount, totalNotes: data.totalNotes, truncated: data.truncated });
       };
       const generateHandoff = () => requestDraft("handoff");
       const generateQuarterly = () => requestDraft("quarterly");
@@ -16107,7 +16108,7 @@
                       {result.type === "handoff" ? "Shift Handoff Summary" : "Quarterly Progress Summary"}
                     </div>
                     <div style={{ fontSize: 12, color: CB.textLight, marginTop: 2 }}>
-                      {result.client} — {result.type === "handoff" ? result.date : result.period} — {result.noteCount} notes analyzed
+                      {result.client} — {result.type === "handoff" ? result.date : result.period} — {result.truncated ? `the latest ${result.noteCount} of ${result.totalNotes} notes analyzed (narrow the dates to include the rest)` : `${result.noteCount} notes analyzed`}
                     </div>
                   </div>
                   <button onClick={copyToClipboard} style={{

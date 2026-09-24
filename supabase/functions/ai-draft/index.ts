@@ -21,6 +21,13 @@
 // period — never free text — so Provly's key cannot be used as a general
 // chatbot. Each draft writes an audit_log row ('ai_draft') with ids and
 // counts only, no health information.
+//
+// r1 (Greptile r1): (1) the audit row is written BEFORE anything is sent to
+// Anthropic — the disclosure is the send, not the reply — and if it cannot be
+// written, nothing is sent (fail closed). (2) over the 200-note cap the NEWEST
+// notes are kept (read newest-first, then put back in date order), and the
+// reply says how many were used out of how many. (3) a provider error is
+// logged as its status only — never its body, which could echo note text.
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 
@@ -122,15 +129,19 @@ Deno.serve(async (req) => {
       .from("persons").select("id, first_name").eq("id", personId).maybeSingle();
     if (!person) return json({ error: "Client not found" }, 404);
 
-    const { data: notes, error: notesErr } = await asUser
+    // Newest first so the cap keeps the most recent notes; count = all in range.
+    const { data: newestFirst, count: totalNotes, error: notesErr } = await asUser
       .from("service_notes")
-      .select("service_date, start_time, end_time, summary_note, staff_id, service_code_definitions(code, name)")
+      .select("service_date, start_time, end_time, summary_note, staff_id, service_code_definitions(code, name)", { count: "exact" })
       .eq("person_id", personId)
       .gte("service_date", start)
       .lte("service_date", end)
-      .order("service_date").order("start_time")
+      .order("service_date", { ascending: false }).order("start_time", { ascending: false })
       .limit(MAX_NOTES);
     if (notesErr) return json({ error: "Could not read the service notes" }, 500);
+    const notes = (newestFirst || []).slice().reverse();          // back to date order for the draft
+    const total = totalNotes ?? notes.length;
+    const truncated = total > notes.length;
     if (!notes || notes.length === 0) {
       return json({ error: mode === "handoff"
         ? "No notes found for today — try a quarterly summary instead"
@@ -163,6 +174,18 @@ Deno.serve(async (req) => {
       : `Write a quarterly progress summary for ${person.first_name}'s support coordinator covering ${start} to ${end}. ` +
         "Cover: services delivered, progress and patterns seen in the notes, concerns or changes, and anything the coordinator should know. Plain paragraphs.";
 
+    // Audit FIRST — ids and counts only, no health information. If the row
+    // cannot be written, nothing is sent to Anthropic.
+    const { error: auditErr } = await admin.from("audit_log").insert({
+      org_id: member.org_id, user_id: caller.id, action: "ai_draft", table_name: "service_notes",
+      record_id: personId,
+      new_data: { mode, start, end, note_count: notes.length, notes_in_range: total, truncated, model: MODEL },
+    });
+    if (auditErr) {
+      console.error("ai-draft: audit insert failed", auditErr.code || "");
+      return json({ error: "The draft could not be recorded, so nothing was sent. Try again." }, 500);
+    }
+
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -178,7 +201,7 @@ Deno.serve(async (req) => {
       }),
     });
     if (!res.ok) {
-      console.error("ai-draft: Anthropic", res.status, await res.text().catch(() => ""));
+      console.error("ai-draft: Anthropic status", res.status);   // status only — the body could echo note text
       return json({ error: "The AI service did not respond. Try again in a minute." }, 502);
     }
     const data = await res.json();
@@ -186,13 +209,7 @@ Deno.serve(async (req) => {
     const text = (data.content || []).map((c: any) => (c.type === "text" ? c.text : "")).join("").trim();
     if (!text) return json({ error: "No draft was generated. Try again." }, 502);
 
-    // Audit — ids and counts only; no health information in the log.
-    await admin.from("audit_log").insert({
-      org_id: member.org_id, user_id: caller.id, action: "ai_draft", table_name: "service_notes",
-      record_id: personId, new_data: { mode, start, end, note_count: notes.length, model: MODEL },
-    });
-
-    return json({ text, mode, start, end, noteCount: notes.length, clientFirstName: person.first_name });
+    return json({ text, mode, start, end, noteCount: notes.length, totalNotes: total, truncated, clientFirstName: person.first_name });
   } catch (e) {
     console.error("ai-draft unhandled:", e);
     return json({ error: "Unexpected error" }, 500);
