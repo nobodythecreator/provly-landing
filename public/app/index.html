@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.23r1 (Greptile r1): the Billing estimate applies D5 per day — quarter-hour notes for one client, code, day and status are rounded as one total, each note showing its running-total share, so the rows add up to the day's units; the note form's Duration / Units preview uses the same nearest-quarter-hour rounding the save stores; MTP can't be chosen when editing a note either (an existing MTP note keeps its code and stays readable), and a new stand-alone MTP note is refused at save. -->
   <!-- v20.0.23 (e520 arc PR 1 — recording pieces, docs/e520-design.md §3; D5/D6/D7): client profiles gain an Absences tab (from, last day away or ongoing, reason Family / Vacation / Hospital / AWOL / Jail / Other with a required note; office tiers record, front-line logins read; overlaps refused by the database). DSG notes carry "Transported (MTP)", preset to and from — MTP bills from that answer, so MTP leaves the new-note code picker. Quarter-hour units round to the nearest quarter hour (8+ leftover minutes earn a unit) instead of always up — note saves, the notes list and the Billing estimate. sql/v20.0.23.sql runs first. -->
   <!-- v20.0.22r1 (Greptile r1): the draft line says when only the latest notes were used ("the latest 200 of N"). ai-draft r1: audit row written before anything is sent (fail closed), newest notes kept over the cap, provider errors logged as status only. -->
   <!-- v20.0.22 (arc: AI drafting proxy; D1 = A, D2 = A): the AI page no longer calls api.anthropic.com from the browser. Shift handoffs and quarterly summaries come from the ai-draft edge function, which holds the Anthropic key, checks the caller is owner / admin / compliance director, reads the notes under the caller's own access, sends only the client's first name, codes, times and note text, and logs each draft (ids and counts only). It refuses every request until AI_BAA_CONFIRMED is set, after Provly's Business Associate Agreement with Anthropic is signed; the page shows that notice. -->
@@ -6256,6 +6257,10 @@
         // locks that code AND the client is an active member of it (the context
         // is the authorization for group service); everything else needs a
         // direct current authorization.
+        // v20.0.23r1 (e520 D6) — no new stand-alone MTP note, even through a context that locks MTP
+        if (serviceCodes.find(sc => sc.id === form.service_code_id)?.code === "MTP") {
+          return addToast("MTP is recorded on the DSG note (Transported), not as its own note", "error");
+        }
         const codeIsCurrent = currentAuths.some(a => a.service_code_id === form.service_code_id);
         const ctx = form.context_id ? contexts.find(c => c.id === form.context_id) : null;
         const codeViaContext = !!ctx && ctx.service_code_id === form.service_code_id
@@ -6513,7 +6518,7 @@
                       const [eh, em] = form.end_time.split(":").map(Number);
                       let mins = (eh * 60 + em) - (sh * 60 + sm);
                       if (mins < 0) mins += 1440;
-                      return `${Math.floor(mins/60)}h ${mins%60}m → ${Math.ceil(mins/15)} units`;
+                      return `${Math.floor(mins/60)}h ${mins%60}m → ${roundQuarterHours(mins)} units`; // v20.0.23r1 — same rounding the save stores
                     }
                     return "Select a service code";
                   }
@@ -6561,7 +6566,7 @@
                     const [eh, em] = form.end_time.split(":").map(Number);
                     let mins = (eh * 60 + em) - (sh * 60 + sm);
                     if (mins < 0) mins += 1440;
-                    const units = Math.ceil(mins / 15);
+                    const units = roundQuarterHours(mins); // v20.0.23r1 — same rounding the save stores
                     return (
                       <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         <span>{Math.floor(mins/60)}h {mins%60}m</span>
@@ -6717,6 +6722,11 @@
       };
 
       const saveEdit = async () => {
+        // v20.0.23r1 (e520 D6) — a note is never moved onto MTP; the ride is recorded on the DSG note
+        const toCode = serviceCodes.find(sc => sc.id === editForm.service_code_id);
+        if (toCode?.code === "MTP" && editForm.service_code_id !== viewing.service_code_id) {
+          return addToast("MTP is recorded on the DSG note (Transported), not as its own note", "error");
+        }
         setSaving(true);
         let duration_minutes = null;
         if (editForm.start_time && editForm.end_time) {
@@ -7019,7 +7029,7 @@
                     {editing ? (
                       <select style={{ ...fieldStyle, padding: "6px 10px", fontSize: 12, fontWeight: 700, width: "auto", minWidth: 180, background: CB.white }}
                         value={editForm.service_code_id} onChange={e => setEditForm(p => ({ ...p, service_code_id: e.target.value }))}>
-                        {serviceCodes.map(sc => <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}</option>)}
+                        {serviceCodes.filter(sc => sc.code !== "MTP" || sc.id === viewing.service_code_id).map(sc => <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}</option>)}{/* v20.0.23r1 (e520 D6) — MTP is answered on the DSG note; an MTP note keeps its code */}
                       </select>
                     ) : (
                       <Badge text={viewing.service_code_definitions?.code || "?"} color={CB.blue} />
@@ -12348,6 +12358,33 @@
 
           const { data: notes } = await query;
 
+          // v20.0.23r1 (e520 D5) — quarter-hour notes for the same client, code,
+          // day and status are rounded as ONE total (nearest quarter hour, 8+
+          // leftover minutes earn a unit). Each note shows its running-total
+          // share — units through this note minus units before it — so a day's
+          // rows add up to exactly the day's units. Status stays in the key
+          // because only approved notes will ever reach the payment file.
+          const qhUnitsByNote = {};
+          {
+            const groups = {};
+            (notes || []).forEach(n => {
+              const c = n.service_code_definitions?.code;
+              const r = BILLING_RULES[c];
+              if ((r && r.unit_type !== "quarter_hour") || !n.duration_minutes) return;
+              const k = `${n.persons?.id}|${n.service_code_definitions?.id}|${n.service_date}|${n.status || "draft"}`;
+              (groups[k] = groups[k] || []).push(n);
+            });
+            Object.values(groups).forEach(list => {
+              list.sort((a, b) => String(a.start_time || "").localeCompare(String(b.start_time || "")) || String(a.id).localeCompare(String(b.id)));
+              let cum = 0;
+              list.forEach(n => {
+                const before = roundQuarterHours(cum);
+                cum += Number(n.duration_minutes) || 0;
+                qhUnitsByNote[n.id] = roundQuarterHours(cum) - before;
+              });
+            });
+          }
+
           // Pull all auths for rate lookup
           const { data: auths } = await supabase.from(AUTH_VIEW)
             .select("id, person_id, service_code_id, authorized_units, used_units, rate_per_unit, service_code_definitions(code)");
@@ -12366,7 +12403,7 @@
             const auth = authMap[authKey];
             const authRate = auth?.rate_per_unit ? Number(auth.rate_per_unit) : null;
 
-            let units = ((!rule || rule.unit_type === "quarter_hour") && note.duration_minutes) ? roundQuarterHours(note.duration_minutes) : (note.billable_units || calculateBillableUnits(code, note.duration_minutes)); // v20.0.23 — D5 estimate from the minutes (stored units on older notes were rounded up)
+            let units = (note.id in qhUnitsByNote) ? qhUnitsByNote[note.id] : (note.billable_units || calculateBillableUnits(code, note.duration_minutes)); // v20.0.23r1 — D5 per day (stored units on older notes were rounded up, per note)
             let rate = null;
             let amount = null;
 
