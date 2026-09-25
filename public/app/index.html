@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.23 (e520 arc PR 1 — recording pieces, docs/e520-design.md §3; D5/D6/D7): client profiles gain an Absences tab (from, last day away or ongoing, reason Family / Vacation / Hospital / AWOL / Jail / Other with a required note; office tiers record, front-line logins read; overlaps refused by the database). DSG notes carry "Transported (MTP)", preset to and from — MTP bills from that answer, so MTP leaves the new-note code picker. Quarter-hour units round to the nearest quarter hour (8+ leftover minutes earn a unit) instead of always up — note saves, the notes list and the Billing estimate. sql/v20.0.23.sql runs first. -->
   <!-- v20.0.22r1 (Greptile r1): the draft line says when only the latest notes were used ("the latest 200 of N"). ai-draft r1: audit row written before anything is sent (fail closed), newest notes kept over the cap, provider errors logged as status only. -->
   <!-- v20.0.22 (arc: AI drafting proxy; D1 = A, D2 = A): the AI page no longer calls api.anthropic.com from the browser. Shift handoffs and quarterly summaries come from the ai-draft edge function, which holds the Anthropic key, checks the caller is owner / admin / compliance director, reads the notes under the caller's own access, sends only the client's first name, codes, times and note text, and logs each draft (ids and counts only). It refuses every request until AI_BAA_CONFIRMED is set, after Provly's Business Associate Agreement with Anthropic is signed; the page shows that notice. -->
   <!-- v20.0.20 (small debt — manager note delete; D1 = A): a manager can delete a DRAFT or REJECTED service note from its detail view (confirm first); a submitted note is rejected first. sql/v20.0.20.sql makes the database enforce the same rule (billed notes, previously deletable, are not) and writes the whole note to audit_log on every delete. -->
@@ -1792,7 +1793,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.22</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.23</span>
               </div>
             </div>
             {isMobile && (
@@ -5878,12 +5879,20 @@
       return rule.rate || null;
     }
 
+    // v20.0.23 (e520 D5) — minutes → quarter-hour units: whole quarter hours,
+    // plus one more when 8+ minutes are left over (nearest quarter hour; was
+    // always-up). The e520 engine applies the same rule per person + code + day.
+    function roundQuarterHours(minutes) {
+      const m = Math.max(0, Math.round(Number(minutes) || 0));
+      return Math.floor(m / 15) + (m % 15 >= 8 ? 1 : 0);
+    }
+
     function calculateBillableUnits(serviceCode, durationMinutes) {
       const rule = BILLING_RULES[serviceCode];
-      if (!rule) return durationMinutes ? Math.ceil(durationMinutes / 15) : null;
+      if (!rule) return durationMinutes ? roundQuarterHours(durationMinutes) : null;
       switch (rule.unit_type) {
         case "quarter_hour":
-          return durationMinutes ? Math.ceil(durationMinutes / 15) : null;
+          return durationMinutes ? roundQuarterHours(durationMinutes) : null;
         case "daily":
           return 1;
         case "session":
@@ -5891,7 +5900,7 @@
         case "tiered_daily":
           return 1;
         default:
-          return durationMinutes ? Math.ceil(durationMinutes / 15) : null;
+          return durationMinutes ? roundQuarterHours(durationMinutes) : null;
       }
     }
 
@@ -5905,7 +5914,7 @@
 
     function getBillingLabel(serviceCode, durationMinutes) {
       const rule = BILLING_RULES[serviceCode];
-      if (!rule) return durationMinutes ? `${Math.ceil(durationMinutes / 15)} units (qtr-hr)` : "—";
+      if (!rule) return durationMinutes ? `${roundQuarterHours(durationMinutes)} units (qtr-hr)` : "—";
       const units = calculateBillableUnits(serviceCode, durationMinutes);
       switch (rule.unit_type) {
         case "quarter_hour":
@@ -6008,6 +6017,17 @@
       { id: "D37", category: "Operations", title: "Client Satisfaction Survey", description: "Administer satisfaction surveys to all clients and families annually", frequency: "Annual", daysToComplete: 365, recurring: true, severity: "medium" },
       { id: "D38", category: "Operations", title: "Staff Performance Evaluations", description: "Complete annual performance evaluations for all staff", frequency: "Annual", daysToComplete: 365, recurring: true, severity: "medium" },
     ];
+
+    // v20.0.23 (e520 D6) — the ride to and from the day program is a fact about
+    // the DSG day, recorded on the DSG note. MTP bills one day per approved DSG
+    // note whose answer is not "none"; a stand-alone MTP note never bills.
+    const TRANSPORT_OPTIONS = [
+      { value: "to_and_from", label: "To and from the program" },
+      { value: "to",          label: "To the program only" },
+      { value: "from",        label: "From the program only" },
+      { value: "none",        label: "No ride by our staff" },
+    ];
+    const transportLabel = (v) => (TRANSPORT_OPTIONS.find(o => o.value === v) || {}).label || "—";
 
     function ServiceNoteForm({ open, onClose, onSaved, initialPersonId = null }) { // v20.0.15 — opened from a client profile with the client set
       const { addToast } = useToast();
@@ -6168,6 +6188,7 @@
 
       const handleCodeChange = (scId) => {
         set("service_code_id", scId);
+        set("transport", "to_and_from"); // v20.0.23 (e520 D6) — every code choice starts from the preset
         const code = serviceCodes.find(s => s.id === scId);
         setSelectedCode(code?.code || null);
         setExtraFields({});
@@ -6282,6 +6303,7 @@
           billable_units: calculateBillableUnits(selectedCode, duration_minutes),
           summary_note: fullNote,
           status: "draft",
+          transport: selectedCode === "DSG" ? (form.transport || "to_and_from") : null, // v20.0.23 (e520 D6) — the database presets and enforces the same
         };
         if (form.goal_id) insertPayload.goal_id = form.goal_id;
         if (form.context_id) insertPayload.context_id = form.context_id; // v19.2
@@ -6441,6 +6463,7 @@
                 const hasAuth = currentAuths.some(a => a.service_code_id === sc.id); // v20.0.13br1 — current on the service date
                 if (form.person_id && !hasAuth && !(showAllCodes && !frontLine)) return null;
                 if (!form.person_id && frontLine) return null;
+                if (sc.code === "MTP" && form.service_code_id !== sc.id) return null; // v20.0.23 (e520 D6) — MTP is answered on the DSG note
                 return <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}{hasAuth ? " ✓" : ""}</option>;
               })}
             </select>
@@ -6564,6 +6587,16 @@
                 <Badge text={selectedCode} color={CB.blue} />
                 <span style={{ fontSize: 13, fontWeight: 700, color: CB.navy }}>Required Documentation</span>
               </div>
+              {selectedCode === "DSG" && (
+                <FormField label="Transported (MTP)" required>
+                  <select style={fieldStyle} value={form.transport || "to_and_from"} onChange={e => set("transport", e.target.value)}>
+                    {TRANSPORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                  <div style={{ marginTop: 4, fontSize: 11, color: CB.textLight }}>
+                    MTP is billed from this answer. Change it only on a day our staff didn't drive both ways — a family drop-off, a one-way ride.
+                  </div>
+                </FormField>
+              )}
               {dynamicFields.map(field => (
                 <FormField key={field.key} label={field.label}>
                   {field.type === "textarea" ? (
@@ -6626,7 +6659,7 @@
       const loadNotes = async () => {
         setLoading(true);
         // v19.2 — try with context join, fall back if column/relationship missing
-        const baseSel = "id, service_date, start_time, end_time, duration_minutes, billable_units, status, summary_note, service_code_id, staff_id, staff_ids, staff!service_notes_staff_id_fkey(first_name, last_name), persons(first_name, last_name), service_code_definitions(code, name)";
+        const baseSel = "id, service_date, start_time, end_time, duration_minutes, billable_units, status, transport, summary_note, service_code_id, staff_id, staff_ids, staff!service_notes_staff_id_fkey(first_name, last_name), persons(first_name, last_name), service_code_definitions(code, name)";
         const ctxSel = baseSel + ", context_id, service_delivery_contexts(id, name, delivery_type)";
         let res = await supabase.from("service_notes").select(ctxSel).order("service_date", { ascending: false }).limit(500);
         if (res.error && /(column|relationship).*context/i.test(res.error.message || "")) {
@@ -6679,6 +6712,7 @@
           start_time: note.start_time?.slice(0, 5) || "",
           end_time: note.end_time?.slice(0, 5) || "",
           service_code_id: note.service_code_id || "",
+          transport: note.transport || "to_and_from", // v20.0.23 (e520 D6)
         });
       };
 
@@ -6706,6 +6740,7 @@
         if (editForm.service_code_id && editForm.service_code_id !== viewing.service_code_id) {
           updatePayload.service_code_id = editForm.service_code_id;
         }
+        if (code === "DSG") updatePayload.transport = editForm.transport || "to_and_from"; // v20.0.23 (e520 D6) — other codes: the database sets NULL
         const { error } = await supabase.from("service_notes").update(updatePayload).eq("id", viewing.id);
         setSaving(false);
         if (error) return addToast(error.message, "error");
@@ -6780,7 +6815,7 @@
           const code = r.service_code_definitions?.code;
           const rule = BILLING_RULES[code];
           if (!rule) {
-            const units = r.billable_units || (r.duration_minutes ? Math.ceil(r.duration_minutes / 15) : null);
+            const units = r.duration_minutes ? roundQuarterHours(r.duration_minutes) : (r.billable_units || null); // v20.0.23 — D5 from the minutes
             return units ? <span><span style={{ fontWeight: 600 }}>{units}</span> <span style={{ fontSize: 11, color: CB.textLight }}>qtr-hr</span></span> : "—";
           }
           if (rule.unit_type === "tiered_daily") {
@@ -6794,7 +6829,7 @@
               </span>
             );
           }
-          const units = r.billable_units || calculateBillableUnits(code, r.duration_minutes);
+          const units = (rule.unit_type === "quarter_hour" && r.duration_minutes) ? roundQuarterHours(r.duration_minutes) : (r.billable_units || calculateBillableUnits(code, r.duration_minutes)); // v20.0.23 — D5 from the minutes
           if (!units && units !== 0) return "—";
           return (
             <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
@@ -6990,6 +7025,19 @@
                       <Badge text={viewing.service_code_definitions?.code || "?"} color={CB.blue} />
                     )}
                     <Badge text={editForm.status || viewing.status || "draft"} color={statusColors[editForm.status || viewing.status] || CB.textLight} />
+                    {(() => { // v20.0.23 (e520 D6) — the MTP answer on a DSG note
+                      const editCode = serviceCodes.find(sc => sc.id === editForm.service_code_id)?.code || viewing.service_code_definitions?.code;
+                      if ((editing ? editCode : viewing.service_code_definitions?.code) !== "DSG") return null;
+                      return editing ? (
+                        <select style={{ ...fieldStyle, padding: "6px 10px", fontSize: 12, width: "auto", minWidth: 200, background: CB.white }}
+                          value={editForm.transport || "to_and_from"} onChange={e => setEditForm(p => ({ ...p, transport: e.target.value }))}
+                          aria-label="Transported (MTP)">
+                          {TRANSPORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                        </select>
+                      ) : (
+                        <Badge text={`MTP: ${transportLabel(viewing.transport || "to_and_from")}`} color={CB.blue} />
+                      );
+                    })()}
                     <span style={{ fontSize: 13, color: CB.textMid }}>
                       by {viewing.staff?.first_name} {viewing.staff?.last_name}
                       {viewing.co_staff && viewing.co_staff.length > 0 && (
@@ -12318,7 +12366,7 @@
             const auth = authMap[authKey];
             const authRate = auth?.rate_per_unit ? Number(auth.rate_per_unit) : null;
 
-            let units = note.billable_units || calculateBillableUnits(code, note.duration_minutes);
+            let units = ((!rule || rule.unit_type === "quarter_hour") && note.duration_minutes) ? roundQuarterHours(note.duration_minutes) : (note.billable_units || calculateBillableUnits(code, note.duration_minutes)); // v20.0.23 — D5 estimate from the minutes (stored units on older notes were rounded up)
             let rate = null;
             let amount = null;
 
@@ -17235,6 +17283,196 @@
     // Census rules are MIRROR rules: the UI warns and records, the review
     // surface flags; nothing blocks the recording of reality (D2 doctrine).
     // ═══════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════
+    // v20.0.23 (e520 design §3.1, D7) — ABSENCES. Full days a client was away:
+    // first day away, last day away (blank = ongoing), a reason, and a note that
+    // Other requires. The database refuses overlaps and an Other without a note;
+    // the e520 export bills nothing inside an absence and splits every payment
+    // line around it. Office tiers record; front-line logins see their client's.
+    // ═══════════════════════════════════════════════════════════════
+    const ABSENCE_REASONS = [
+      { value: "family",   label: "Family" },
+      { value: "vacation", label: "Vacation" },
+      { value: "hospital", label: "Hospital" },
+      { value: "awol",     label: "AWOL" },
+      { value: "jail",     label: "Jail" },
+      { value: "other",    label: "Other" },
+    ];
+    const absenceReasonLabel = (v) => (ABSENCE_REASONS.find(r => r.value === v) || {}).label || v || "—";
+    const absenceErrorMessage = (error) => {
+      const msg = error?.message || "request failed";
+      if (error?.code === "23P01" || /person_absences_no_overlap/.test(msg)) return "This overlaps an absence already on record for this client";
+      if (/person_absences_other_note_chk/.test(msg)) return "Other needs a note saying what the absence was";
+      if (/person_absences_dates_chk/.test(msg)) return "The last day away can't be before the first day away";
+      return msg;
+    };
+
+    function ClientAbsencesTab({ clientId }) {
+      const { addToast } = useToast();
+      const { orgId, accessTier } = useAuth();
+      const canRecord = accessTier === "manage" || accessTier === "operate";
+      const [rows, setRows] = useState([]);
+      const [loadedOnce, setLoadedOnce] = useState(false);
+      const [loadError, setLoadError] = useState(null);   // a failed read is an error, never "no absences"
+      const [addOpen, setAddOpen] = useState(false);
+      const [endTarget, setEndTarget] = useState(null);   // the ongoing absence being closed
+      const [saving, setSaving] = useState(false);
+      const blankForm = () => ({ start_date: ymd(), end_date: "", reason: "", note: "" });
+      const [form, setForm] = useState(blankForm);
+      const [endDate, setEndDate] = useState(ymd());
+      const loadSeq = useRef(0);
+
+      const load = async () => {
+        const seq = ++loadSeq.current;
+        setLoadError(null);
+        const { data, error } = await supabase.from("person_absences")
+          .select("id, start_date, end_date, reason, note")
+          .eq("person_id", clientId)
+          .order("start_date", { ascending: false });
+        if (seq !== loadSeq.current) return;            // superseded by a newer load
+        setLoadedOnce(true);
+        if (error) { setLoadError(error.message || "request failed"); return; } // keep the last good rows
+        setRows(data || []);
+      };
+      useEffect(() => { setRows([]); setLoadedOnce(false); load(); }, [clientId]);
+
+      const fmtD = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString() : "—";
+      const daysAway = (a) => a.end_date ? Math.round((Date.parse(a.end_date) - Date.parse(a.start_date)) / 86400000) + 1 : null;
+
+      const handleAdd = async () => {
+        if (!form.start_date) return addToast("First day away is required", "error");
+        if (!form.reason) return addToast("Choose a reason", "error");
+        if (form.end_date && form.end_date < form.start_date) return addToast("The last day away can't be before the first day away", "error");
+        if (form.reason === "other" && !form.note.trim()) return addToast("Other needs a note saying what the absence was", "error");
+        setSaving(true);
+        const { data, error } = await supabase.from("person_absences").insert({
+          org_id: orgId, person_id: clientId,
+          start_date: form.start_date, end_date: form.end_date || null,
+          reason: form.reason, note: form.note.trim() || null,
+        }).select("id");
+        setSaving(false);
+        if (error) return addToast(absenceErrorMessage(error), "error");
+        if (!data || data.length === 0) return addToast("Not recorded — your role can't record absences", "error");
+        addToast("Absence recorded", "success");
+        setAddOpen(false); setForm(blankForm());
+        load();
+      };
+
+      const handleEnd = async () => {
+        if (!endTarget) return;
+        if (!endDate) return addToast("Last day away is required", "error");
+        if (endDate < endTarget.start_date) return addToast("The last day away can't be before the first day away", "error");
+        setSaving(true);
+        const { data, error } = await supabase.from("person_absences")
+          .update({ end_date: endDate }).eq("id", endTarget.id).select("id");
+        setSaving(false);
+        if (error) return addToast(absenceErrorMessage(error), "error");
+        if (!data || data.length === 0) return addToast("Not saved — your role can't change absences", "error");
+        addToast("Return recorded", "success");
+        setEndTarget(null);
+        load();
+      };
+
+      const handleDelete = async (a) => {
+        const span = a.end_date ? `${fmtD(a.start_date)} – ${fmtD(a.end_date)}` : `since ${fmtD(a.start_date)}`;
+        if (!confirm(`Delete this ${absenceReasonLabel(a.reason)} absence (${span})?\n\nThe deletion is written to the audit log.`)) return;
+        const { data, error } = await supabase.from("person_absences").delete().eq("id", a.id).select("id");
+        if (error) return addToast(absenceErrorMessage(error), "error");
+        if (!data || data.length === 0) return addToast("Not deleted — your role can't change absences", "error");
+        addToast("Absence deleted", "success");
+        load();
+      };
+
+      if (!loadedOnce) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
+
+      return (
+        <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, padding: 20 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+            <h4 style={{ fontSize: 15, fontWeight: 700, color: CB.navy }}>Absences</h4>
+            {canRecord && (
+              <PrimaryButton onClick={() => { setForm(blankForm()); setAddOpen(true); }}>{icons.plus({ size: 14 })} Record Absence</PrimaryButton>
+            )}
+          </div>
+          <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 16 }}>
+            Days away are not billed, and the month's payment lines are split around them.
+          </div>
+
+          {loadError && (
+            <div role="alert" style={{ padding: "12px 14px", borderRadius: 10, border: `1px solid ${CB.red}`, color: CB.red, fontSize: 13, marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+              <span>Couldn't load absences ({loadError}).</span>
+              <SecondaryButton onClick={load}>Retry</SecondaryButton>
+            </div>
+          )}
+
+          {!loadError && rows.length === 0 && (
+            <div style={{ padding: "14px 16px", borderRadius: 12, border: `1px dashed ${CB.border}`, color: CB.textLight, fontSize: 13 }}>
+              No absences on record.
+            </div>
+          )}
+
+          {rows.length > 0 && (
+            <div style={{ display: "grid", gap: 6 }}>
+              {rows.map(a => (
+                <div key={a.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "10px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, fontSize: 13, flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <Badge text={absenceReasonLabel(a.reason)} color={CB.blue} />
+                    {!a.end_date && <Badge text="Ongoing" color={CB.amber} />}
+                    <span style={{ fontWeight: 600, color: CB.navy }}>
+                      {a.end_date ? `${fmtD(a.start_date)} – ${fmtD(a.end_date)}` : `Since ${fmtD(a.start_date)}`}
+                    </span>
+                    {a.end_date && <span style={{ color: CB.textLight }}>{daysAway(a)} day{daysAway(a) === 1 ? "" : "s"}</span>}
+                    {a.note && <span style={{ color: CB.textMid }}>— {a.note}</span>}
+                  </div>
+                  {canRecord && (
+                    <div style={{ display: "flex", gap: 6 }}>
+                      {!a.end_date && <SecondaryButton onClick={() => { setEndDate(ymd()); setEndTarget(a); }}>Record Return</SecondaryButton>}
+                      <SecondaryButton onClick={() => handleDelete(a)} color={CB.red}>Delete</SecondaryButton>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <Modal open={addOpen} onClose={() => setAddOpen(false)} title="Record Absence" subtitle="Full days away. Leave the last day blank while the client is still away.">
+            <FormRow>
+              <FormField label="First Day Away" required half>
+                <input style={fieldStyle} type="date" value={form.start_date} onChange={e => setForm(p => ({ ...p, start_date: e.target.value }))} />
+              </FormField>
+              <FormField label="Last Day Away" half>
+                <input style={fieldStyle} type="date" value={form.end_date} onChange={e => setForm(p => ({ ...p, end_date: e.target.value }))} />
+              </FormField>
+            </FormRow>
+            <FormField label="Reason" required>
+              <select style={fieldStyle} value={form.reason} onChange={e => setForm(p => ({ ...p, reason: e.target.value }))}>
+                <option value="">Select a reason…</option>
+                {ABSENCE_REASONS.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
+              </select>
+            </FormField>
+            <FormField label="Note" required={form.reason === "other"}>
+              <textarea style={{ ...fieldStyle, minHeight: 64, resize: "vertical" }} value={form.note} onChange={e => setForm(p => ({ ...p, note: e.target.value }))}
+                placeholder={form.reason === "other" ? "Required — what the absence was" : "Optional"} />
+            </FormField>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 8 }}>
+              <SecondaryButton onClick={() => setAddOpen(false)}>Cancel</SecondaryButton>
+              <PrimaryButton onClick={handleAdd} loading={saving}>{icons.save({ size: 15 })} Record</PrimaryButton>
+            </div>
+          </Modal>
+
+          <Modal open={!!endTarget} onClose={() => setEndTarget(null)} title="Record Return"
+            subtitle={endTarget ? `${absenceReasonLabel(endTarget.reason)} absence since ${fmtD(endTarget.start_date)}` : ""}>
+            <FormField label="Last Day Away" required>
+              <input style={fieldStyle} type="date" value={endDate} onChange={e => setEndDate(e.target.value)} />
+            </FormField>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 8 }}>
+              <SecondaryButton onClick={() => setEndTarget(null)}>Cancel</SecondaryButton>
+              <PrimaryButton onClick={handleEnd} loading={saving}>{icons.save({ size: 15 })} Save</PrimaryButton>
+            </div>
+          </Modal>
+        </div>
+      );
+    }
+
     function ClientResidenceTab({ clientId, orgId }) {
       const { addToast } = useToast();
       const [placements, setPlacements] = useState([]);
@@ -17653,6 +17891,7 @@
       const tabs = [
         { key: "overview", label: "Overview", icon: icons.users, content: <ClientOverviewTab client={client} /> },
         { key: "residence", label: "Residence", icon: icons.heart, content: <ClientResidenceTab clientId={clientId} orgId={orgId} /> }, // v20.0.4
+        { key: "absences", label: "Absences", icon: icons.calendar, content: <ClientAbsencesTab clientId={clientId} /> }, // v20.0.23 (e520 D7)
         { key: "goals", label: "PCSP Goals", icon: icons.crosshair, count: counts.goals, content: <ClientGoalsTab clientId={clientId} onChanged={loadClient} /> },
         { key: "medications", label: "Medications", icon: icons.capsule, count: counts.meds, content: <ClientMedicationsTab clientId={clientId} onChanged={loadClient} /> },
         { key: "notes", label: "Service Notes", icon: icons.fileText, count: counts.notes, content: <ClientNotesTab clientId={clientId} onChanged={loadClient} /> },
