@@ -22,6 +22,9 @@
 -- r2: the SQL editor can leave request.jwt.claims as an empty string, which is
 --     not valid JSON; the self-test now starts from '{}' ("nobody signed in"), and
 --     an early stop names the step it stopped at.
+-- r3: lines are filled in order of their start dates (then file order), so a shared
+--     monthly cap always goes to the earliest documented days, whatever order UPI
+--     lists the lines in. The export keeps the file's order.
 -- Run on production in the Supabase SQL editor. Idempotent. Nothing calls the
 -- engine until PR 3 (v20.0.25) ships the page. The last statement is the
 -- verification table, including a synthetic end-to-end self-test (January 2001,
@@ -804,7 +807,8 @@ BEGIN
   RETURNING id INTO v_batch;
 
   v_next := v_max_ln + 1;
-  FOR r IN SELECT x FROM jsonb_array_elements(v_rows) AS x ORDER BY (x->>'ord')::integer LOOP
+  -- r3: fill in date order so shared caps go to the earliest days; the export keeps file order (ord)
+  FOR r IN SELECT x FROM jsonb_array_elements(v_rows) AS x ORDER BY (x->>'start')::date, (x->>'ord')::integer LOOP
     v_next := public.e520_fill_line(v_batch, v_org, r, v_next);
   END LOOP;
 
@@ -1111,8 +1115,9 @@ BEGIN
   SELECT id INTO v_dsg FROM service_code_definitions WHERE code = 'DSG' LIMIT 1;
   SELECT id INTO v_slh FROM service_code_definitions WHERE code = 'SLH' LIMIT 1;
   SELECT id INTO v_rps FROM service_code_definitions WHERE code = 'RPS' LIMIT 1;
+  -- r3: the two SLH lines are listed out of date order (the 16th–31st line first)
   v_csv := chr(65279) || v_hdr || E'\r\n' || v_l1 || E'\r\n' || v_l2 || E'\r\n' || v_l3 || E'\r\n' || v_l4
-           || E'\r\n' || v_l5 || E'\r\n' || v_l6 || E'\r\n' || v_l7;
+           || E'\r\n' || v_l5 || E'\r\n' || v_l7 || E'\r\n' || v_l6;
 
   BEGIN
     -- ── the synthetic month ──
@@ -1207,8 +1212,8 @@ BEGIN
       || E'\r\n' || '8,selftest@example.com,Selftest E520,099999999,HHS,230.85,D,01/11/2001,01/31/2001,1,365,Test Coordinator,31'
       || E'\r\n' || '4,selftest@example.com,Selftest E520,099999999,DSG,127,D,01/11/2001,01/31/2001,1,244,Test Coordinator,22'
       || E'\r\n' || '5,selftest@example.com,Selftest E520,099999999,MTP,20.8,D,01/11/2001,01/31/2001,1,244,Test Coordinator,22'
-      || E'\r\n' || '6,selftest@example.com,Selftest E520,099999999,SLH,9.31,Q,01/01/2001,01/09/2001,2,100,Test Coordinator,3'
-      || E'\r\n' || '7,selftest@example.com,Selftest E520,099999999,SLH,9.31,Q,01/16/2001,01/31/2001,1,100,Test Coordinator,3';
+      || E'\r\n' || '7,selftest@example.com,Selftest E520,099999999,SLH,9.31,Q,01/16/2001,01/31/2001,1,100,Test Coordinator,3'
+      || E'\r\n' || '6,selftest@example.com,Selftest E520,099999999,SLH,9.31,Q,01/01/2001,01/09/2001,2,100,Test Coordinator,3';
     SELECT (export_csv = v_expect)::text INTO v_txt FROM e520_batches WHERE id = v_batch;
     v_res := v_res || jsonb_build_array(jsonb_build_array(5, 'T5 export byte for byte: BOM, CRLF, UPI values verbatim, only units / dates / new numbers changed', v_txt, 'true'));
 
@@ -1223,7 +1228,7 @@ BEGIN
     SELECT string_agg(line_number || ':' || to_char(start_date, 'MM/DD') || '-' || to_char(end_date, 'MM/DD') || '=' || units, ', ' ORDER BY ord)
            || '; capped ' || bool_or(flags @> '[{"kind":"capped"}]'::jsonb)::text
       INTO v_txt FROM e520_lines WHERE batch_id = v_batch AND service_code = 'SLH' AND action <> 'remove';
-    v_res := v_res || jsonb_build_array(jsonb_build_array(8, 'T8 one monthly max shared by two SLH lines', v_txt, '6:01/01-01/09=2, 7:01/16-01/31=1; capped true'));
+    v_res := v_res || jsonb_build_array(jsonb_build_array(8, 'T8 one monthly max shared by two SLH lines listed out of date order: the earliest days get it', v_txt, '7:01/16-01/31=1, 6:01/01-01/09=2; capped true'));
 
     -- ── T9: a rebuild replaces the draft ──
     v_step := 'T9 rebuild';
