@@ -32,6 +32,9 @@
 --     line's first day in care and authorized); used units count those lines. Later corrections
 --     to care, discharge or authorizations no longer move or clear a billed month — releasing
 --     the line does. The placement / discharge / authorization-change recount triggers retire.
+-- r7 (Greptile r5): an authorization with billed HAP months can't be deleted, rejected or moved
+--     to another client / code by a signed-in user (release the lines first); a HAP month billed
+--     while no authorization was on file attaches to the authorization entered for it later.
 -- 🟢 Run in the Supabase SQL editor. Idempotent. The first statement adds the
 -- 'monthly' unit label and commits on its own (a new enum label can't be used in
 -- the transaction that adds it); everything after it is one transaction that rolls
@@ -64,6 +67,42 @@ ALTER TABLE public.e520_lines
   ADD COLUMN IF NOT EXISTS authorization_id uuid REFERENCES public.person_service_authorizations (id) ON DELETE SET NULL;
 COMMENT ON COLUMN public.e520_lines.authorization_id IS
   'v20.0.24a r6: for HAP lines, the authorization the month is billed under (the one covering the line''s first day in care and authorized, when the line was filled). HAP used units count these.';
+
+-- ── 1c. r7: the authorization a HAP month is billed under ─────────────────
+-- the non-rejected authorization covering the line's first day in care (placement on file, not
+-- after discharge) and authorized; when several cover it: later-starting, then later-ending, then id
+CREATE OR REPLACE FUNCTION public.e520_hap_billing_auth(p_org uuid, p_person uuid, p_code_id uuid, p_s date, p_e date)
+RETURNS uuid
+LANGUAGE plpgsql
+STABLE
+SET search_path TO 'public'
+AS $$
+DECLARE
+  v_first date;
+  v_auth  uuid;
+BEGIN
+  SELECT min(gs::date) INTO v_first
+    FROM generate_series(p_s, p_e, interval '1 day') AS gs
+   WHERE EXISTS (SELECT 1 FROM person_placements pl
+                  WHERE pl.org_id = p_org AND pl.person_id = p_person
+                    AND pl.start_date <= gs::date AND (pl.end_date IS NULL OR pl.end_date >= gs::date))
+     AND NOT EXISTS (SELECT 1 FROM persons p
+                      WHERE p.id = p_person AND p.discharge_date IS NOT NULL AND p.discharge_date < gs::date)
+     AND EXISTS (SELECT 1 FROM person_service_authorizations a
+                  WHERE a.org_id = p_org AND a.person_id = p_person AND a.service_code_id = p_code_id
+                    AND a.status::text <> 'rejected'
+                    AND (a.start_date IS NULL OR a.start_date <= gs::date) AND (a.end_date IS NULL OR a.end_date >= gs::date));
+  IF v_first IS NULL THEN RETURN NULL; END IF;
+  SELECT a.id INTO v_auth
+    FROM person_service_authorizations a
+   WHERE a.org_id = p_org AND a.person_id = p_person AND a.service_code_id = p_code_id
+     AND a.status::text <> 'rejected'
+     AND (a.start_date IS NULL OR a.start_date <= v_first) AND (a.end_date IS NULL OR a.end_date >= v_first)
+   ORDER BY coalesce(a.start_date, '-infinity'::date) DESC, coalesce(a.end_date, 'infinity'::date) DESC, a.id DESC
+   LIMIT 1;
+  RETURN v_auth;
+END;
+$$;
 
 -- ── 2. The engine's line filler: HAP rule + rejected authorizations never cover ──
 -- one UPI line → filled line(s), split parts, or a removed line; returns the next free line number
@@ -262,24 +301,7 @@ BEGIN
     -- r6: the authorization this month is billed under — the one covering the first day in care and
     --     authorized (later-starting, then later-ending, then id, when several cover it)
     IF v_need_auth THEN
-      SELECT min(gs::date) INTO v_first
-        FROM generate_series(v_s, v_e, interval '1 day') AS gs
-       WHERE EXISTS (SELECT 1 FROM person_placements pl
-                      WHERE pl.org_id = p_org AND pl.person_id = v_person
-                        AND pl.start_date <= gs::date AND (pl.end_date IS NULL OR pl.end_date >= gs::date))
-         AND NOT EXISTS (SELECT 1 FROM persons p
-                          WHERE p.id = v_person AND p.discharge_date IS NOT NULL AND p.discharge_date < gs::date)
-         AND EXISTS (SELECT 1 FROM person_service_authorizations a
-                      WHERE a.org_id = p_org AND a.person_id = v_person AND a.service_code_id = v_code_id
-                        AND a.status::text <> 'rejected'
-                        AND (a.start_date IS NULL OR a.start_date <= gs::date) AND (a.end_date IS NULL OR a.end_date >= gs::date));
-      SELECT a.id INTO v_hap_auth
-        FROM person_service_authorizations a
-       WHERE a.org_id = p_org AND a.person_id = v_person AND a.service_code_id = v_code_id
-         AND a.status::text <> 'rejected'
-         AND (a.start_date IS NULL OR a.start_date <= v_first) AND (a.end_date IS NULL OR a.end_date >= v_first)
-       ORDER BY coalesce(a.start_date, '-infinity'::date) DESC, coalesce(a.end_date, 'infinity'::date) DESC, a.id DESC
-       LIMIT 1;
+      v_hap_auth := public.e520_hap_billing_auth(p_org, v_person, v_code_id, v_s, v_e);
     END IF;
     IF v_incare < v_total_days THEN
       v_flags := v_flags || jsonb_build_array(jsonb_build_object('kind', 'partial_month',
@@ -625,6 +647,69 @@ CREATE TRIGGER e520_lines_hap_units
   FOR EACH ROW WHEN (NEW.released_at IS NOT NULL AND OLD.released_at IS NULL)
   EXECUTE FUNCTION public.trg_e520_hap_units();
 
+-- r7: an authorization that has billed HAP months (live lines in uploaded files) can't be deleted,
+--     rejected, or moved to another client / code by a signed-in user — release the lines first
+CREATE OR REPLACE FUNCTION public.trg_psa_billed_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'public'
+AS $$
+DECLARE
+  v_breaking boolean;
+BEGIN
+  IF auth.uid() IS NOT NULL THEN                                  -- service role / SQL editor repairs pass
+    IF TG_OP = 'DELETE' THEN
+      v_breaking := true;
+    ELSE
+      v_breaking := (NEW.status::text = 'rejected' AND OLD.status::text <> 'rejected')
+                 OR NEW.person_id IS DISTINCT FROM OLD.person_id
+                 OR NEW.service_code_id IS DISTINCT FROM OLD.service_code_id
+                 OR NEW.org_id IS DISTINCT FROM OLD.org_id;
+    END IF;
+    IF v_breaking AND EXISTS (SELECT 1 FROM e520_lines l JOIN e520_batches b ON b.id = l.batch_id
+                               WHERE l.authorization_id = OLD.id AND l.action <> 'remove'
+                                 AND l.released_at IS NULL AND b.status = 'uploaded') THEN
+      RAISE EXCEPTION 'This authorization has billed HAP months. Release those payment lines before deleting it, rejecting it, or moving it to another client or code.';
+    END IF;
+  END IF;
+  IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS psa_billed_guard ON public.person_service_authorizations;
+CREATE TRIGGER psa_billed_guard
+  BEFORE UPDATE OR DELETE ON public.person_service_authorizations
+  FOR EACH ROW EXECUTE FUNCTION public.trg_psa_billed_guard();
+
+-- r7: an authorization is entered or changed → billed HAP lines for that client with NO authorization
+--     (billed while none was on file) attach to the one covering their first day in care and
+--     authorized. Lines that already recorded an authorization never move.
+CREATE OR REPLACE FUNCTION public.trg_psa_attach_hap()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'public'
+AS $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM service_code_definitions c WHERE c.id = NEW.service_code_id AND c.code = 'HAP') THEN
+    RETURN NULL;
+  END IF;
+  UPDATE e520_lines l
+     SET authorization_id = public.e520_hap_billing_auth(l.org_id, l.person_id, NEW.service_code_id, l.start_date, l.end_date)
+    FROM e520_batches b
+   WHERE b.id = l.batch_id AND b.status = 'uploaded'
+     AND l.org_id = NEW.org_id AND l.person_id = NEW.person_id AND l.service_code = 'HAP'
+     AND l.action <> 'remove' AND l.released_at IS NULL AND l.authorization_id IS NULL;
+  PERFORM public.provly_recompute_monthly_auths(NEW.org_id, NEW.person_id);
+  RETURN NULL;
+END;
+$$;
+DROP TRIGGER IF EXISTS psa_attach_hap ON public.person_service_authorizations;
+CREATE TRIGGER psa_attach_hap
+  AFTER INSERT OR UPDATE OF person_id, service_code_id, start_date, end_date, status ON public.person_service_authorizations
+  FOR EACH ROW EXECUTE FUNCTION public.trg_psa_attach_hap();
+
 -- r6: retired — a billed month keeps the authorization it recorded, so authorization, placement
 --     and discharge changes no longer move it
 DROP TRIGGER IF EXISTS psa_monthly_recount ON public.person_service_authorizations;
@@ -672,6 +757,9 @@ REVOKE ALL ON FUNCTION public.trg_psa_used_units() FROM PUBLIC, anon, authentica
 REVOKE ALL ON FUNCTION public.provly_recompute_monthly_auths(uuid, uuid) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.trg_e520_hap_units() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.trg_service_notes_code_guard() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.e520_hap_billing_auth(uuid, uuid, uuid, date, date) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.trg_psa_billed_guard() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.trg_psa_attach_hap() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.e520_fill_line(uuid, uuid, jsonb, integer) FROM PUBLIC, anon, authenticated;
 
 -- ── 4. Self-test: the full e520 suite (T1–T16) plus HAP and used units (T17–T21), on a synthetic month (January 2001, an inactive test client) run
@@ -767,6 +855,9 @@ DECLARE
   v_auth_hap2 uuid;
   v_hap_fmt text := 'Jan 1-14: %s, Jan 15-31: %s';
   v_hap_line uuid;
+  v_batch4 uuid;
+  v_auth_hap3 uuid;
+  v_orphan text;
   v_l11    text := '11,selftest@example.com,Selftest E520,099999999,PBA,10.00,Q,01/01/2001,01/31/2001,0,100,Test Coordinator,100';
   v_csv    text;
   v_expect text;
@@ -1160,6 +1251,50 @@ BEGIN
     v_res := v_res || jsonb_build_array(jsonb_build_array(28, 'T28 releasing the billed HAP line gives the month back', v_txt,
                        'Jan 1-14: 0, Jan 15-31: 0'));
 
+    -- T29: HAP billed while NO authorization was on file, then one is entered → the line attaches to it
+    v_step := 'T29 HAP billed before its authorization';
+    DELETE FROM person_service_authorizations WHERE id IN (v_auth_hap, v_auth_hap2);   -- nothing billed under them now
+    UPDATE person_placements SET start_date = DATE '2001-01-01' WHERE person_id = v_person;
+    UPDATE persons SET discharge_date = DATE '2001-01-20' WHERE id = v_person;
+    v_batch4 := public.e520_build('selftest-3.csv', v_csv, v_org);
+    SELECT export_sha256 INTO v_txt FROM e520_batches WHERE id = v_batch4;
+    PERFORM public.e520_mark_uploaded(v_batch4, v_txt, NULL);
+    SELECT (authorization_id IS NULL)::text INTO v_orphan
+      FROM e520_lines WHERE batch_id = v_batch4 AND service_code = 'HAP' AND action <> 'remove';
+    v_auth_hap3 := pg_temp.e520_test_insert('person_service_authorizations', jsonb_build_object('org_id', v_org, 'person_id', v_person,
+      'service_code_id', (SELECT id FROM service_code_definitions WHERE code = 'HAP'), 'authorized_units', 12, 'used_units', 0,
+      'start_date', '2001-01-01', 'end_date', '2001-01-31', 'rate_per_unit', 567, 'status', 'approved'));
+    SELECT format('billed with none on file %s; after entering one: used %s, line attached %s', v_orphan,
+                  (SELECT used_units FROM person_service_authorizations WHERE id = v_auth_hap3),
+                  (SELECT (authorization_id = v_auth_hap3)::text FROM e520_lines
+                    WHERE batch_id = v_batch4 AND service_code = 'HAP' AND action <> 'remove')) INTO v_txt;
+    v_res := v_res || jsonb_build_array(jsonb_build_array(29, 'T29 a HAP month billed with no authorization on file attaches to the one entered later', v_txt,
+                       'billed with none on file true; after entering one: used 1, line attached true'));
+
+    -- T30: a signed-in user can't delete or reject an authorization with a billed HAP month
+    v_step := 'T30 billed authorization guard';
+    v_txt := '';
+    BEGIN
+      PERFORM set_config('request.jwt.claims', json_build_object('sub', gen_random_uuid(), 'role', 'authenticated')::text, true);
+      v_msg := NULL;
+      BEGIN
+        DELETE FROM person_service_authorizations WHERE id = v_auth_hap3;
+      EXCEPTION WHEN raise_exception THEN v_msg := SQLERRM;
+      END;
+      v_txt := CASE WHEN v_msg LIKE 'This authorization has billed HAP months%' THEN 'delete refused' ELSE 'DELETE: ' || coalesce(v_msg, 'allowed') END;
+      v_msg := NULL;
+      BEGIN
+        UPDATE person_service_authorizations SET status = 'rejected' WHERE id = v_auth_hap3;
+      EXCEPTION WHEN raise_exception THEN v_msg := SQLERRM;
+      END;
+      v_txt := v_txt || '; ' || CASE WHEN v_msg LIKE 'This authorization has billed HAP months%' THEN 'reject refused' ELSE 'REJECT: ' || coalesce(v_msg, 'allowed') END;
+      RAISE EXCEPTION 'v20024a_rollback';
+    EXCEPTION WHEN raise_exception THEN
+      IF SQLERRM <> 'v20024a_rollback' THEN RAISE; END IF;
+    END;
+    v_res := v_res || jsonb_build_array(jsonb_build_array(30, 'T30 an authorization with a billed HAP month can''t be deleted or rejected', v_txt,
+                       'delete refused; reject refused'));
+
     RAISE EXCEPTION 'v20024a_rollback';                          -- undo the whole synthetic month
   EXCEPTION WHEN others THEN
     IF SQLERRM <> 'v20024a_rollback' THEN
@@ -1172,9 +1307,9 @@ BEGIN
     INTO v_fail
     FROM jsonb_array_elements(v_res) AS e
    WHERE (e->>2) IS DISTINCT FROM (e->>3);
-  IF v_fail IS NOT NULL OR jsonb_array_length(v_res) <> 28 THEN
+  IF v_fail IS NOT NULL OR jsonb_array_length(v_res) <> 30 THEN
     RAISE EXCEPTION 'v20.0.24a self-test failed, so nothing in this file was applied: %',
-      coalesce(v_fail, format('%s of 28 checks ran', jsonb_array_length(v_res)));
+      coalesce(v_fail, format('%s of 30 checks ran', jsonb_array_length(v_res)));
   END IF;
 
   INSERT INTO v20024a_selftest (n, item, value, want)
@@ -1198,16 +1333,17 @@ SELECT * FROM (
       WHERE t.tgrelid = 'public.service_notes'::regclass AND t.tgname = 'service_note_auth_update'),
     'true'
   UNION ALL
-  SELECT 3, 'recount triggers (authorization dates, file uploaded, line released) + HAP / MTP note guard + the line''s authorization column; retired triggers and functions gone',
+  SELECT 3, 'recount triggers (authorization dates, file uploaded, line released) + HAP / MTP note guard + the line''s authorization column + billed-authorization guard + adoption; retired triggers and functions gone',
     ((SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.person_service_authorizations'::regclass AND tgname = 'psa_used_units')
      + (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.e520_batches'::regclass AND tgname = 'e520_batches_hap_units')
      + (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.e520_lines'::regclass AND tgname = 'e520_lines_hap_units')
      + (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.service_notes'::regclass AND tgname = 'service_notes_code_guard')
-     + (SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'e520_lines' AND column_name = 'authorization_id'))::text
+     + (SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'e520_lines' AND column_name = 'authorization_id')
+     + (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.person_service_authorizations'::regclass AND tgname IN ('psa_billed_guard', 'psa_attach_hap')))::text
     || ' + ' || ((SELECT count(*) FROM pg_trigger WHERE tgname IN ('psa_monthly_recount', 'person_placements_hap_units', 'persons_hap_units'))
                  + (SELECT count(*) FROM pg_proc WHERE pronamespace = 'public'::regnamespace
                      AND proname IN ('trg_hap_units_recompute', 'trg_psa_monthly_recount', 'trg_hap_care_recount')))::text,
-    '5 + 0'
+    '7 + 0'
   UNION ALL
   SELECT 4, 'authorizations whose used units don''t match the rule',
     (SELECT count(*)::text FROM public.person_service_authorizations a
