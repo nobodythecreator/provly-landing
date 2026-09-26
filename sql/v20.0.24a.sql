@@ -14,6 +14,12 @@
 --       placement changes, and runs regardless of who approves.
 --   Coverage: a REJECTED authorization never covers a day.
 -- r1: T17–T19 read the uploaded batch (the first draft is replaced by T9's rebuild).
+-- r2: verification row 2 checks each event on its own (Postgres prints them as INSERT OR DELETE OR UPDATE).
+-- r3 (Greptile r1): HAP used units = months billed (live HAP lines in uploaded files),
+--     recounted when a file is marked uploaded or a line released — never stale, and the
+--     placement / discharge triggers go; an authorization that exists but is only rejected
+--     covers nothing (only "none on file" falls back to UPI's line); a HAP or MTP service
+--     note is refused by the database (HAP is documented by the placement, MTP by the DSG note).
 -- 🟢 Run in the Supabase SQL editor. Idempotent. The first statement adds the
 -- 'monthly' unit label and commits on its own (a new enum label can't be used in
 -- the transaction that adds it); everything after it is one transaction that rolls
@@ -106,6 +112,7 @@ DECLARE
   v_this_ln  integer;
   v_line_id  uuid;
   v_incare   integer;
+  v_inplace  integer;
 BEGIN
   -- 1. who, what, which unit
   SELECT count(*), (array_agg(p.id))[1] INTO v_nperson, v_person
@@ -145,14 +152,22 @@ BEGIN
                    'detail', 'No placement on file covers these dates'));
     END IF;
   END IF;
+  -- r3: ANY authorization on file (whatever its status) means coverage is checked; only
+  --     "none on file" falls back to UPI's line. A rejected one never covers a day.
   v_need_auth := EXISTS (SELECT 1 FROM person_service_authorizations a
                           WHERE a.org_id = p_org AND a.person_id = v_person AND a.service_code_id = v_code_id
-                            AND a.status::text <> 'rejected'
                             AND (a.start_date IS NULL OR a.start_date <= v_e) AND (a.end_date IS NULL OR a.end_date >= v_s));
   IF NOT v_need_auth THEN
     v_flags := v_flags || jsonb_build_array(jsonb_build_object('kind', 'no_authorization',
                  'detail', 'No Provly authorization covers these dates; UPI''s line is used as the authority'));
   ELSE
+    IF NOT EXISTS (SELECT 1 FROM person_service_authorizations a
+                    WHERE a.org_id = p_org AND a.person_id = v_person AND a.service_code_id = v_code_id
+                      AND a.status::text <> 'rejected'
+                      AND (a.start_date IS NULL OR a.start_date <= v_e) AND (a.end_date IS NULL OR a.end_date >= v_s)) THEN
+      v_flags := v_flags || jsonb_build_array(jsonb_build_object('kind', 'rejected_authorization',
+                   'detail', 'The only authorization on file for these dates is rejected, so no day is covered'));
+    END IF;
     SELECT a.rate_per_unit INTO v_auth_rate
       FROM person_service_authorizations a
      WHERE a.org_id = p_org AND a.person_id = v_person AND a.service_code_id = v_code_id
@@ -189,6 +204,13 @@ BEGIN
   -- 3b. v20.0.24a HAP (rent): the placement proves the month. One unit for a month with any
   --     day in care (placement on file, not after discharge); absences never reduce it.
   IF v_code = 'HAP' THEN
+    SELECT count(*) INTO v_inplace
+      FROM generate_series(v_s, v_e, interval '1 day') AS gs
+     WHERE EXISTS (SELECT 1 FROM person_placements pl
+                    WHERE pl.org_id = p_org AND pl.person_id = v_person
+                      AND pl.start_date <= gs::date AND (pl.end_date IS NULL OR pl.end_date >= gs::date))
+       AND NOT EXISTS (SELECT 1 FROM persons p
+                        WHERE p.id = v_person AND p.discharge_date IS NOT NULL AND p.discharge_date < gs::date);
     SELECT count(*) INTO v_incare
       FROM generate_series(v_s, v_e, interval '1 day') AS gs
      WHERE EXISTS (SELECT 1 FROM person_placements pl
@@ -202,8 +224,10 @@ BEGIN
                           AND a.status::text <> 'rejected'
                           AND (a.start_date IS NULL OR a.start_date <= gs::date) AND (a.end_date IS NULL OR a.end_date >= gs::date)));
     v_total_days := v_e - v_s + 1;
-    IF v_incare = 0 THEN
+    IF v_inplace = 0 THEN
       v_reason := 'Not in care on any of these dates (no placement, or after discharge)';
+    ELSIF v_incare = 0 THEN
+      v_reason := 'No authorization that isn''t rejected covers the days in care';
     ELSIF coalesce(v_cap, 1) <= 0 THEN
       v_reason := 'HAP is already billed for this month';
     END IF;
@@ -386,16 +410,13 @@ BEGIN
   IF v_code IS NULL OR p_person IS NULL THEN RETURN 0; END IF;
 
   IF v_code = 'HAP' OR v_unit = 'monthly' THEN
-    -- months with any day in care: a placement on file, not after discharge, not in the future
-    SELECT count(DISTINCT date_trunc('month', gs))::integer INTO v_units
-      FROM person_placements pl
-      JOIN persons p ON p.id = pl.person_id
-      CROSS JOIN LATERAL generate_series(
-             greatest(pl.start_date, coalesce(p_start, pl.start_date)),
-             least(coalesce(pl.end_date, current_date), coalesce(p_end, current_date),
-                   coalesce(p.discharge_date, current_date), current_date),
-             interval '1 day') AS gs
-     WHERE pl.org_id = p_org AND pl.person_id = p_person;
+    -- r3: months BILLED — live lines for this code in files marked uploaded, within the
+    --     authorization's dates. HAP has no notes, so billing is when a month is used.
+    SELECT count(DISTINCT date_trunc('month', l.start_date))::integer INTO v_units
+      FROM e520_lines l JOIN e520_batches b ON b.id = l.batch_id
+     WHERE l.org_id = p_org AND l.person_id = p_person AND l.service_code = v_code
+       AND l.action <> 'remove' AND l.released_at IS NULL AND b.status = 'uploaded'
+       AND l.start_date BETWEEN v_lo AND v_hi;
   ELSIF v_code = 'MTP' THEN
     -- one per DSG day with a ride by our staff
     SELECT count(DISTINCT n.service_date)::integer INTO v_units
@@ -498,42 +519,84 @@ CREATE TRIGGER psa_used_units
   BEFORE INSERT OR UPDATE OF person_id, service_code_id, start_date, end_date ON public.person_service_authorizations
   FOR EACH ROW EXECUTE FUNCTION public.trg_psa_used_units();
 
--- a placement or a discharge date changes → recount that client's monthly (HAP) authorizations
-CREATE OR REPLACE FUNCTION public.trg_hap_units_recompute()
+-- r3: the placement / discharge recount is gone (HAP counts months billed, not months in care)
+DROP TRIGGER IF EXISTS person_placements_hap_units ON public.person_placements;
+DROP TRIGGER IF EXISTS persons_hap_units ON public.persons;
+DROP FUNCTION IF EXISTS public.trg_hap_units_recompute();
+
+-- recount one client's monthly (HAP) authorizations
+CREATE OR REPLACE FUNCTION public.provly_recompute_monthly_auths(p_org uuid, p_person uuid)
+RETURNS void
+LANGUAGE plpgsql
+SET search_path TO 'public'
+AS $$
+BEGIN
+  UPDATE person_service_authorizations a
+     SET used_units = x.u
+    FROM (SELECT a2.id, public.provly_auth_used_units(a2.org_id, a2.person_id, a2.service_code_id, a2.start_date, a2.end_date) AS u
+            FROM person_service_authorizations a2 JOIN service_code_definitions c ON c.id = a2.service_code_id
+           WHERE a2.org_id = p_org AND a2.person_id = p_person
+             AND (c.code = 'HAP' OR c.billing_unit::text = 'monthly')) x
+   WHERE a.id = x.id AND a.used_units IS DISTINCT FROM x.u;
+END;
+$$;
+
+-- a file marked uploaded, or a line released → recount the HAP authorizations it touches
+CREATE OR REPLACE FUNCTION public.trg_e520_hap_units()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path TO 'public'
 AS $$
 DECLARE
-  v_person uuid;
-  v_org    uuid;
+  r record;
 BEGIN
-  IF TG_TABLE_NAME = 'persons' THEN
-    v_person := NEW.id; v_org := NEW.org_id;
-  ELSIF TG_OP = 'DELETE' THEN
-    v_person := OLD.person_id; v_org := OLD.org_id;
-  ELSE
-    v_person := NEW.person_id; v_org := NEW.org_id;
+  IF TG_TABLE_NAME = 'e520_batches' THEN
+    FOR r IN SELECT DISTINCT l.org_id, l.person_id FROM e520_lines l
+              WHERE l.batch_id = NEW.id AND l.service_code = 'HAP' AND l.person_id IS NOT NULL LOOP
+      PERFORM public.provly_recompute_monthly_auths(r.org_id, r.person_id);
+    END LOOP;
+  ELSIF NEW.service_code = 'HAP' AND NEW.person_id IS NOT NULL THEN
+    PERFORM public.provly_recompute_monthly_auths(NEW.org_id, NEW.person_id);
   END IF;
-  UPDATE person_service_authorizations a
-     SET used_units = x.u
-    FROM (SELECT a2.id, public.provly_auth_used_units(a2.org_id, a2.person_id, a2.service_code_id, a2.start_date, a2.end_date) AS u
-            FROM person_service_authorizations a2 JOIN service_code_definitions c ON c.id = a2.service_code_id
-           WHERE a2.org_id = v_org AND a2.person_id = v_person
-             AND (c.code = 'HAP' OR c.billing_unit::text = 'monthly')) x
-   WHERE a.id = x.id AND a.used_units IS DISTINCT FROM x.u;
   RETURN NULL;
 END;
 $$;
-DROP TRIGGER IF EXISTS person_placements_hap_units ON public.person_placements;
-CREATE TRIGGER person_placements_hap_units
-  AFTER INSERT OR UPDATE OR DELETE ON public.person_placements
-  FOR EACH ROW EXECUTE FUNCTION public.trg_hap_units_recompute();
-DROP TRIGGER IF EXISTS persons_hap_units ON public.persons;
-CREATE TRIGGER persons_hap_units
-  AFTER UPDATE OF discharge_date ON public.persons
-  FOR EACH ROW EXECUTE FUNCTION public.trg_hap_units_recompute();
+DROP TRIGGER IF EXISTS e520_batches_hap_units ON public.e520_batches;
+CREATE TRIGGER e520_batches_hap_units
+  AFTER UPDATE OF status ON public.e520_batches
+  FOR EACH ROW WHEN (NEW.status = 'uploaded' AND OLD.status IS DISTINCT FROM 'uploaded')
+  EXECUTE FUNCTION public.trg_e520_hap_units();
+DROP TRIGGER IF EXISTS e520_lines_hap_units ON public.e520_lines;
+CREATE TRIGGER e520_lines_hap_units
+  AFTER UPDATE OF released_at ON public.e520_lines
+  FOR EACH ROW WHEN (NEW.released_at IS NOT NULL AND OLD.released_at IS NULL)
+  EXECUTE FUNCTION public.trg_e520_hap_units();
+
+-- r3: HAP and MTP aren't documented by their own service notes
+CREATE OR REPLACE FUNCTION public.trg_service_notes_code_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path TO 'public'
+AS $$
+DECLARE
+  v_code text;
+BEGIN
+  IF auth.uid() IS NULL THEN RETURN NEW; END IF;                 -- service role / SQL editor
+  SELECT code INTO v_code FROM service_code_definitions WHERE id = NEW.service_code_id;
+  IF v_code = 'HAP' THEN
+    RAISE EXCEPTION 'HAP is documented by the client''s placement, not a service note';
+  END IF;
+  IF v_code = 'MTP' THEN
+    RAISE EXCEPTION 'MTP is recorded on the DSG note (Transported), not as its own note';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS service_notes_code_guard ON public.service_notes;
+CREATE TRIGGER service_notes_code_guard
+  BEFORE INSERT OR UPDATE OF service_code_id ON public.service_notes
+  FOR EACH ROW EXECUTE FUNCTION public.trg_service_notes_code_guard();
 
 -- recount every authorization once, now
 UPDATE public.person_service_authorizations a
@@ -544,7 +607,9 @@ REVOKE ALL ON FUNCTION public.provly_auth_used_units(uuid, uuid, uuid, date, dat
 REVOKE ALL ON FUNCTION public.provly_recompute_auth_units(uuid, uuid, uuid, date) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.update_authorization_units() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.trg_psa_used_units() FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.trg_hap_units_recompute() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.provly_recompute_monthly_auths(uuid, uuid) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.trg_e520_hap_units() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.trg_service_notes_code_guard() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.e520_fill_line(uuid, uuid, jsonb, integer) FROM PUBLIC, anon, authenticated;
 
 -- ── 4. Self-test: the full e520 suite (T1–T16) plus HAP and used units (T17–T21), on a synthetic month (January 2001, an inactive test client) run
@@ -634,6 +699,10 @@ DECLARE
   v_auth_a uuid;
   v_auth_b uuid;
   v_auth_c uuid;
+  v_auth_hap uuid;
+  v_pba    uuid;
+  v_hap_draft integer;
+  v_l11    text := '11,selftest@example.com,Selftest E520,099999999,PBA,10.00,Q,01/01/2001,01/31/2001,0,100,Test Coordinator,100';
   v_csv    text;
   v_expect text;
   v_txt    text;
@@ -659,10 +728,11 @@ BEGIN
   SELECT id INTO v_dsg FROM service_code_definitions WHERE code = 'DSG' LIMIT 1;
   SELECT id INTO v_slh FROM service_code_definitions WHERE code = 'SLH' LIMIT 1;
   SELECT id INTO v_rps FROM service_code_definitions WHERE code = 'RPS' LIMIT 1;
+  SELECT id INTO v_pba FROM service_code_definitions WHERE code = 'PBA' LIMIT 1;
   -- r3: the two SLH lines are listed out of date order (the 16th–31st line first)
   v_csv := chr(65279) || v_hdr || E'\r\n' || v_l1 || E'\r\n' || v_l2 || E'\r\n' || v_l3 || E'\r\n' || v_l4
            || E'\r\n' || v_l5 || E'\r\n' || v_l7 || E'\r\n' || v_l6
-           || E'\r\n' || v_l8 || E'\r\n' || v_l9 || E'\r\n' || v_l10;
+           || E'\r\n' || v_l8 || E'\r\n' || v_l9 || E'\r\n' || v_l10 || E'\r\n' || v_l11;
 
   BEGIN
     -- ── the synthetic month ──
@@ -734,6 +804,17 @@ BEGIN
       'billable_units', 4, 'summary_note', 'e520 self-test', 'status', 'approved'));
 
     v_step := 'recording the absence';
+    -- r3: PBA with a documented hour but only a REJECTED authorization → nothing is covered
+    PERFORM pg_temp.e520_test_insert('service_notes', jsonb_build_object('org_id', v_org, 'person_id', v_person, 'staff_id', v_staff,
+      'service_code_id', v_pba, 'service_date', '2001-01-08', 'start_time', '13:00', 'end_time', '14:00', 'duration_minutes', 60,
+      'billable_units', 4, 'summary_note', 'e520 self-test', 'status', 'approved'));
+    PERFORM pg_temp.e520_test_insert('person_service_authorizations', jsonb_build_object('org_id', v_org, 'person_id', v_person,
+      'service_code_id', v_pba, 'authorized_units', 100, 'used_units', 0, 'start_date', '2001-01-01', 'end_date', '2001-01-31', 'rate_per_unit', 10, 'status', 'rejected'));
+    -- r3: a HAP authorization for January (its used units = months billed)
+    v_auth_hap := pg_temp.e520_test_insert('person_service_authorizations', jsonb_build_object('org_id', v_org, 'person_id', v_person,
+      'service_code_id', (SELECT id FROM service_code_definitions WHERE code = 'HAP'), 'authorized_units', 12, 'used_units', 0,
+      'start_date', '2001-01-01', 'end_date', '2001-01-31', 'rate_per_unit', 567, 'status', 'approved'));
+
     -- a hospital day on the 10th
     INSERT INTO person_absences (org_id, person_id, start_date, end_date, reason)
     VALUES (v_org, v_person, DATE '2001-01-10', DATE '2001-01-10', 'hospital');
@@ -752,7 +833,7 @@ BEGIN
 
     SELECT string_agg(line_number || ':' || to_char(start_date, 'MM/DD') || '-' || to_char(end_date, 'MM/DD') || '=' || units, ', ' ORDER BY ord)
       INTO v_txt FROM e520_lines WHERE batch_id = v_batch AND service_code = 'HHS' AND action <> 'remove';
-    v_res := v_res || jsonb_build_array(jsonb_build_array(3, 'T3 HHS: split around the absence, new part numbered after the file''s highest', v_txt, '2:01/01-01/09=3, 11:01/11-01/31=1'));
+    v_res := v_res || jsonb_build_array(jsonb_build_array(3, 'T3 HHS: split around the absence, new part numbered after the file''s highest', v_txt, '2:01/01-01/09=3, 12:01/11-01/31=1'));
 
     SELECT action || ': ' || coalesce(remove_reason, '') INTO v_txt
       FROM e520_lines WHERE batch_id = v_batch AND service_code = 'DSI';
@@ -761,7 +842,7 @@ BEGIN
     v_expect := chr(65279) || v_hdr
       || E'\r\n' || '1,selftest@example.com,Selftest E520,099999999,SLN,8.27,Q,01/01/2001,01/04/2001,2,520,Test Coordinator,100'
       || E'\r\n' || '2,selftest@example.com,Selftest E520,099999999,HHS,230.85,D,01/01/2001,01/09/2001,3,365,Test Coordinator,31'
-      || E'\r\n' || '11,selftest@example.com,Selftest E520,099999999,HHS,230.85,D,01/11/2001,01/31/2001,1,365,Test Coordinator,31'
+      || E'\r\n' || '12,selftest@example.com,Selftest E520,099999999,HHS,230.85,D,01/11/2001,01/31/2001,1,365,Test Coordinator,31'
       || E'\r\n' || '4,selftest@example.com,Selftest E520,099999999,DSG,127,D,01/11/2001,01/31/2001,1,244,Test Coordinator,22'
       || E'\r\n' || '5,selftest@example.com,Selftest E520,099999999,MTP,20.8,D,01/11/2001,01/31/2001,1,244,Test Coordinator,22'
       || E'\r\n' || '7,selftest@example.com,Selftest E520,099999999,SLH,9.31,Q,01/16/2001,01/31/2001,1,100,Test Coordinator,3'
@@ -782,6 +863,8 @@ BEGIN
            || '; capped ' || bool_or(flags @> '[{"kind":"capped"}]'::jsonb)::text
       INTO v_txt FROM e520_lines WHERE batch_id = v_batch AND service_code = 'SLH' AND action <> 'remove';
     v_res := v_res || jsonb_build_array(jsonb_build_array(8, 'T8 one monthly max shared by two SLH lines listed out of date order: the earliest days get it', v_txt, '7:01/16-01/31=1, 6:01/01-01/09=2; capped true'));
+
+    SELECT used_units INTO v_hap_draft FROM person_service_authorizations WHERE id = v_auth_hap;
 
     -- ── T9: a rebuild replaces the draft ──
     v_step := 'T9 rebuild';
@@ -937,6 +1020,41 @@ BEGIN
     SELECT code || ' ' || billing_unit::text INTO v_txt FROM service_code_definitions WHERE code = 'HAP';
     v_res := v_res || jsonb_build_array(jsonb_build_array(21, 'T21 HAP is in the code table as a monthly code', v_txt, 'HAP monthly'));
 
+    v_step := 'T22-T24';
+    SELECT action || ': ' || coalesce(remove_reason, '') INTO v_txt
+      FROM e520_lines WHERE batch_id = v_batch2 AND service_code = 'PBA';
+    v_res := v_res || jsonb_build_array(jsonb_build_array(22, 'T22 an authorization that is only rejected covers nothing', v_txt,
+                       'remove: No day on this line falls inside a placement or authorization'));
+
+    SELECT format('draft %s, uploaded %s', v_hap_draft, (SELECT used_units FROM person_service_authorizations WHERE id = v_auth_hap)) INTO v_txt;
+    v_res := v_res || jsonb_build_array(jsonb_build_array(23, 'T23 HAP used units = months billed (counted when the file is marked uploaded)', v_txt,
+                       'draft 0, uploaded 1'));
+
+    v_txt := '';
+    BEGIN
+      PERFORM set_config('request.jwt.claims', json_build_object('sub', gen_random_uuid(), 'role', 'authenticated')::text, true);
+      v_msg := NULL;
+      BEGIN
+        PERFORM pg_temp.e520_test_insert('service_notes', jsonb_build_object('org_id', v_org, 'person_id', v_person, 'staff_id', v_staff,
+          'service_code_id', (SELECT id FROM service_code_definitions WHERE code = 'HAP'), 'service_date', '2001-01-09',
+          'start_time', '09:00', 'end_time', '10:00', 'duration_minutes', 60, 'billable_units', 1, 'summary_note', 'e520 self-test', 'status', 'draft'));
+      EXCEPTION WHEN raise_exception THEN v_msg := SQLERRM;
+      END;
+      v_txt := CASE WHEN v_msg LIKE 'HAP is documented by the client''s placement%' THEN 'HAP refused' ELSE 'HAP: ' || coalesce(v_msg, 'accepted') END;
+      v_msg := NULL;
+      BEGIN
+        PERFORM pg_temp.e520_test_insert('service_notes', jsonb_build_object('org_id', v_org, 'person_id', v_person, 'staff_id', v_staff,
+          'service_code_id', (SELECT id FROM service_code_definitions WHERE code = 'MTP'), 'service_date', '2001-01-09',
+          'start_time', '09:00', 'end_time', '10:00', 'duration_minutes', 60, 'billable_units', 1, 'summary_note', 'e520 self-test', 'status', 'draft'));
+      EXCEPTION WHEN raise_exception THEN v_msg := SQLERRM;
+      END;
+      v_txt := v_txt || '; ' || CASE WHEN v_msg LIKE 'MTP is recorded on the DSG note%' THEN 'MTP refused' ELSE 'MTP: ' || coalesce(v_msg, 'accepted') END;
+      RAISE EXCEPTION 'v20024a_rollback';
+    EXCEPTION WHEN raise_exception THEN
+      IF SQLERRM <> 'v20024a_rollback' THEN RAISE; END IF;
+    END;
+    v_res := v_res || jsonb_build_array(jsonb_build_array(24, 'T24 no HAP or MTP service notes from a signed-in user', v_txt, 'HAP refused; MTP refused'));
+
     RAISE EXCEPTION 'v20024a_rollback';                          -- undo the whole synthetic month
   EXCEPTION WHEN others THEN
     IF SQLERRM <> 'v20024a_rollback' THEN
@@ -949,9 +1067,9 @@ BEGIN
     INTO v_fail
     FROM jsonb_array_elements(v_res) AS e
    WHERE (e->>2) IS DISTINCT FROM (e->>3);
-  IF v_fail IS NOT NULL OR jsonb_array_length(v_res) <> 21 THEN
+  IF v_fail IS NOT NULL OR jsonb_array_length(v_res) <> 24 THEN
     RAISE EXCEPTION 'v20.0.24a self-test failed, so nothing in this file was applied: %',
-      coalesce(v_fail, format('%s of 21 checks ran', jsonb_array_length(v_res)));
+      coalesce(v_fail, format('%s of 24 checks ran', jsonb_array_length(v_res)));
   END IF;
 
   INSERT INTO v20024a_selftest (n, item, value, want)
@@ -970,15 +1088,18 @@ SELECT * FROM (
     'HAP monthly evv=false' AS want
   UNION ALL
   SELECT 2, 'used-units trigger fires on insert, update and delete',
-    (SELECT (pg_get_triggerdef(t.oid) LIKE '%INSERT OR UPDATE OR DELETE%')::text FROM pg_trigger t
+    (SELECT (pg_get_triggerdef(t.oid) LIKE '%INSERT%' AND pg_get_triggerdef(t.oid) LIKE '%UPDATE%'
+             AND pg_get_triggerdef(t.oid) LIKE '%DELETE%')::text FROM pg_trigger t
       WHERE t.tgrelid = 'public.service_notes'::regclass AND t.tgname = 'service_note_auth_update'),
     'true'
   UNION ALL
-  SELECT 3, 'recount triggers: authorization dates, placements, discharge date',
+  SELECT 3, 'recount triggers: authorization dates, file uploaded, line released; HAP / MTP note guard; old placement triggers gone',
     ((SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.person_service_authorizations'::regclass AND tgname = 'psa_used_units')
-     + (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.person_placements'::regclass AND tgname = 'person_placements_hap_units')
-     + (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.persons'::regclass AND tgname = 'persons_hap_units'))::text,
-    '3'
+     + (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.e520_batches'::regclass AND tgname = 'e520_batches_hap_units')
+     + (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.e520_lines'::regclass AND tgname = 'e520_lines_hap_units')
+     + (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.service_notes'::regclass AND tgname = 'service_notes_code_guard'))::text
+    || ' + ' || ((SELECT count(*) FROM pg_trigger WHERE tgname IN ('person_placements_hap_units', 'persons_hap_units')))::text,
+    '4 + 0'
   UNION ALL
   SELECT 4, 'authorizations whose used units don''t match the rule',
     (SELECT count(*)::text FROM public.person_service_authorizations a
