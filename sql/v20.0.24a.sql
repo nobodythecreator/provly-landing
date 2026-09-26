@@ -24,6 +24,9 @@
 --     FIRST AUTHORIZED DAY (a Jan 1–31 line billed under an authorization from Jan 15 counts
 --     for that authorization); one authorization per month when two meet mid-month; any
 --     authorization change recounts the client's HAP months; a rejected authorization uses 0.
+-- r5 (Greptile r3): the attribution day is the line's first day IN CARE (placement on file,
+--     not after discharge) AND authorized — the days the engine billed on; placement changes
+--     (both clients, if one moves) and discharge-date changes recount HAP months again.
 -- 🟢 Run in the Supabase SQL editor. Idempotent. The first statement adds the
 -- 'monthly' unit label and commits on its own (a new enum label can't be used in
 -- the transaction that adds it); everything after it is one transaction that rolls
@@ -422,12 +425,19 @@ BEGIN
     -- r4: a billed month counts toward the authorization covering the line's FIRST AUTHORIZED
     --     DAY (the line keeps UPI's start date, which can fall before the authorization); when
     --     several cover that day, the later-starting one takes it (then the later-ending, then id).
+    -- r5: that day must also be IN CARE (a placement on file, not after discharge), the same
+    --     test e520_fill_line bills on.
     SELECT count(DISTINCT date_trunc('month', f.line_start))::integer INTO v_units
       FROM (
         SELECT l.start_date AS line_start,
                (SELECT min(gs::date)
                   FROM generate_series(l.start_date, l.end_date, interval '1 day') AS gs
-                 WHERE EXISTS (SELECT 1 FROM person_service_authorizations a
+                 WHERE EXISTS (SELECT 1 FROM person_placements pl
+                                WHERE pl.org_id = p_org AND pl.person_id = p_person
+                                  AND pl.start_date <= gs::date AND (pl.end_date IS NULL OR pl.end_date >= gs::date))
+                   AND NOT EXISTS (SELECT 1 FROM persons pp
+                                    WHERE pp.id = p_person AND pp.discharge_date IS NOT NULL AND pp.discharge_date < gs::date)
+                   AND EXISTS (SELECT 1 FROM person_service_authorizations a
                                 WHERE a.org_id = p_org AND a.person_id = p_person AND a.service_code_id = p_code_id
                                   AND a.status::text <> 'rejected'
                                   AND (a.start_date IS NULL OR a.start_date <= gs::date)
@@ -552,7 +562,8 @@ CREATE TRIGGER psa_used_units
   BEFORE INSERT OR UPDATE OF person_id, service_code_id, start_date, end_date, status ON public.person_service_authorizations
   FOR EACH ROW EXECUTE FUNCTION public.trg_psa_used_units();
 
--- r3: the placement / discharge recount is gone (HAP counts months billed, not months in care)
+-- r3: the old in-care month count and its triggers are retired (HAP counts months billed);
+-- r5 re-creates the placement / discharge triggers below for the attribution day
 DROP TRIGGER IF EXISTS person_placements_hap_units ON public.person_placements;
 DROP TRIGGER IF EXISTS persons_hap_units ON public.persons;
 DROP FUNCTION IF EXISTS public.trg_hap_units_recompute();
@@ -631,6 +642,38 @@ CREATE TRIGGER psa_monthly_recount
   ON public.person_service_authorizations
   FOR EACH ROW EXECUTE FUNCTION public.trg_psa_monthly_recount();
 
+-- r5: a placement or a discharge date changes → recount HAP months (the attribution day is a
+--     day in care). A placement moved to another client recounts both clients.
+CREATE OR REPLACE FUNCTION public.trg_hap_care_recount()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'public'
+AS $$
+BEGIN
+  IF TG_TABLE_NAME = 'persons' THEN
+    PERFORM public.provly_recompute_monthly_auths(NEW.org_id, NEW.id);
+    RETURN NULL;
+  END IF;
+  IF TG_OP IN ('UPDATE', 'DELETE') THEN
+    PERFORM public.provly_recompute_monthly_auths(OLD.org_id, OLD.person_id);
+  END IF;
+  IF TG_OP = 'INSERT'
+     OR (TG_OP = 'UPDATE' AND (NEW.person_id IS DISTINCT FROM OLD.person_id OR NEW.org_id IS DISTINCT FROM OLD.org_id)) THEN
+    PERFORM public.provly_recompute_monthly_auths(NEW.org_id, NEW.person_id);
+  END IF;
+  RETURN NULL;
+END;
+$$;
+DROP TRIGGER IF EXISTS person_placements_hap_units ON public.person_placements;
+CREATE TRIGGER person_placements_hap_units
+  AFTER INSERT OR DELETE OR UPDATE ON public.person_placements
+  FOR EACH ROW EXECUTE FUNCTION public.trg_hap_care_recount();
+DROP TRIGGER IF EXISTS persons_hap_units ON public.persons;
+CREATE TRIGGER persons_hap_units
+  AFTER UPDATE OF discharge_date ON public.persons
+  FOR EACH ROW EXECUTE FUNCTION public.trg_hap_care_recount();
+
 -- r3: HAP and MTP aren't documented by their own service notes
 CREATE OR REPLACE FUNCTION public.trg_service_notes_code_guard()
 RETURNS trigger
@@ -671,6 +714,7 @@ REVOKE ALL ON FUNCTION public.provly_recompute_monthly_auths(uuid, uuid) FROM PU
 REVOKE ALL ON FUNCTION public.trg_e520_hap_units() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.trg_service_notes_code_guard() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.trg_psa_monthly_recount() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.trg_hap_care_recount() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.e520_fill_line(uuid, uuid, jsonb, integer) FROM PUBLIC, anon, authenticated;
 
 -- ── 4. Self-test: the full e520 suite (T1–T16) plus HAP and used units (T17–T21), on a synthetic month (January 2001, an inactive test client) run
@@ -764,6 +808,7 @@ DECLARE
   v_pba    uuid;
   v_hap_draft integer;
   v_auth_hap2 uuid;
+  v_hap_fmt text := 'Jan 1-14: %s, Jan 15-31: %s';
   v_l11    text := '11,selftest@example.com,Selftest E520,099999999,PBA,10.00,Q,01/01/2001,01/31/2001,0,100,Test Coordinator,100';
   v_csv    text;
   v_expect text;
@@ -1129,6 +1174,23 @@ BEGIN
     v_res := v_res || jsonb_build_array(jsonb_build_array(25, 'T25 two HAP authorizations meet mid-month: the month counts once, and adding one recounts the other', v_txt,
                        'Jan 1-14: 1, Jan 15-31: 0'));
 
+    -- T26: care now begins Jan 15 (placement moved) → the Jan 1–14 authorization never covered a
+    --      day in care, so the month moves to the Jan 15 one — recounted by the placement trigger
+    v_step := 'T26 HAP attribution follows care';
+    UPDATE person_placements SET start_date = DATE '2001-01-15' WHERE person_id = v_person;
+    SELECT format(v_hap_fmt, (SELECT used_units FROM person_service_authorizations WHERE id = v_auth_hap2),
+                  (SELECT used_units FROM person_service_authorizations WHERE id = v_auth_hap)) INTO v_txt;
+    v_res := v_res || jsonb_build_array(jsonb_build_array(26, 'T26 care begins Jan 15: the month counts toward the authorization covering a day in care', v_txt,
+                       'Jan 1-14: 0, Jan 15-31: 1'));
+
+    -- T27: the discharge date moves before care begins → no day in care → neither authorization
+    v_step := 'T27 HAP attribution follows discharge';
+    UPDATE persons SET discharge_date = DATE '2001-01-14' WHERE id = v_person;
+    SELECT format(v_hap_fmt, (SELECT used_units FROM person_service_authorizations WHERE id = v_auth_hap2),
+                  (SELECT used_units FROM person_service_authorizations WHERE id = v_auth_hap)) INTO v_txt;
+    v_res := v_res || jsonb_build_array(jsonb_build_array(27, 'T27 a discharge date change recounts: no day in care, no authorization uses the month', v_txt,
+                       'Jan 1-14: 0, Jan 15-31: 0'));
+
     RAISE EXCEPTION 'v20024a_rollback';                          -- undo the whole synthetic month
   EXCEPTION WHEN others THEN
     IF SQLERRM <> 'v20024a_rollback' THEN
@@ -1141,9 +1203,9 @@ BEGIN
     INTO v_fail
     FROM jsonb_array_elements(v_res) AS e
    WHERE (e->>2) IS DISTINCT FROM (e->>3);
-  IF v_fail IS NOT NULL OR jsonb_array_length(v_res) <> 25 THEN
+  IF v_fail IS NOT NULL OR jsonb_array_length(v_res) <> 27 THEN
     RAISE EXCEPTION 'v20.0.24a self-test failed, so nothing in this file was applied: %',
-      coalesce(v_fail, format('%s of 25 checks ran', jsonb_array_length(v_res)));
+      coalesce(v_fail, format('%s of 27 checks ran', jsonb_array_length(v_res)));
   END IF;
 
   INSERT INTO v20024a_selftest (n, item, value, want)
@@ -1167,14 +1229,16 @@ SELECT * FROM (
       WHERE t.tgrelid = 'public.service_notes'::regclass AND t.tgname = 'service_note_auth_update'),
     'true'
   UNION ALL
-  SELECT 3, 'recount triggers: authorization dates, file uploaded, line released, authorization changes; HAP / MTP note guard; old placement triggers gone',
+  SELECT 3, 'recount triggers (authorization dates, file uploaded, line released, authorization changes, placements, discharge) + HAP / MTP note guard; retired function gone',
     ((SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.person_service_authorizations'::regclass AND tgname = 'psa_used_units')
      + (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.e520_batches'::regclass AND tgname = 'e520_batches_hap_units')
      + (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.e520_lines'::regclass AND tgname = 'e520_lines_hap_units')
      + (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.service_notes'::regclass AND tgname = 'service_notes_code_guard')
-     + (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.person_service_authorizations'::regclass AND tgname = 'psa_monthly_recount'))::text
-    || ' + ' || ((SELECT count(*) FROM pg_trigger WHERE tgname IN ('person_placements_hap_units', 'persons_hap_units')))::text,
-    '5 + 0'
+     + (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.person_service_authorizations'::regclass AND tgname = 'psa_monthly_recount')
+     + (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.person_placements'::regclass AND tgname = 'person_placements_hap_units')
+     + (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.persons'::regclass AND tgname = 'persons_hap_units'))::text
+    || ' + ' || ((SELECT count(*) FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname = 'trg_hap_units_recompute'))::text,
+    '7 + 0'
   UNION ALL
   SELECT 4, 'authorizations whose used units don''t match the rule',
     (SELECT count(*)::text FROM public.person_service_authorizations a
