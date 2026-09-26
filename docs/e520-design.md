@@ -2,7 +2,7 @@
 
 Status: **approved** (v1.0 Sep 25; v1.1 Sep 26 records what the build settled) · Tier 3 arc "Billing: UPI e520 payment-file export" · `docs/e520-design.md`.
 
-**v1.1 changes:** October is the shadow run (§9); the RPCs are SECURITY DEFINER and the e520 tables are read-only to clients (§6–§7); how caps and reservations behave day by day (§5.4); authorization trims use any Provly authorization on file (§5.3); HAP and unsupported unit types (§8); the author-only Submit and bulk approve from v20.0.23a (§2); known limits (§11).
+**v1.1 changes:** October is the shadow run (§9); the RPCs are SECURITY DEFINER and the e520 tables are read-only to clients (§6–§7); how caps and reservations behave day by day (§5.4); authorization trims use any Provly authorization on file (§5.3, day by day, gaps are breaks); caps shared across lines of the same month (§5.4); HAP and unsupported unit types (§8); the author-only Submit and bulk approve from v20.0.23a (§2); known limits (§11).
 
 ## 1. What it does
 
@@ -102,7 +102,7 @@ Every type is 0 on a day inside a recorded absence. Rounding is `floor(m/15) + (
 
 ### 5.3 Date ranges
 
-The downloaded span passes through unless a residential placement (RHS, HHS, PPS) starts or ends inside it (trim), the authorization starts or ends inside it (trim), or an absence falls inside it (split). The authorization trim uses every Provly authorization on file for that client and code that overlaps the span, whatever its status; with none on file the span is left alone and the line is flagged, because UPI's line is the authority. A split keeps the original line number on its first part; later parts take the next numbers after the file's highest. A part with 0 units is dropped. Dates Provly writes use UPI's own form, mm/dd/yyyy.
+The downloaded span passes through, and coverage is checked day by day. A day is a break (never billed) when it falls inside a recorded absence, outside every residential placement on file (RHS, HHS, PPS), or outside every Provly authorization on file for that client and code, whatever the authorization's status. A gap between two placements or two authorizations is therefore a break too. With no placement or no authorization on file, that check is skipped and the line is flagged, because UPI's line is the authority. Each run of billable days between breaks becomes the line or one of its split parts. A split keeps the original line number on its first part; later parts take the next numbers after the file's highest. A part with 0 units is dropped. Dates Provly writes use UPI's own form, mm/dd/yyyy.
 
 ### 5.4 Caps and flags
 
@@ -118,7 +118,7 @@ The downloaded span passes through unless a residential placement (RHS, HHS, PPS
 | Residential day with neither note nor absence | day not billed | document the day or record the absence |
 | Approved notes with no UPI line | not in the file | delivered but not in the budget |
 
-Caps are applied day by day in date order. A day that bills anything reserves all of its notes, so a note's minutes can never be counted again; days beyond the cap reserve nothing and stay free for a supplemental once the SC raises the max. A day that bills nothing (for example a missing EVV visit) reserves nothing, so a corrected EVV can bill it later.
+The monthly max is shared by every live line for the same client, code and month, in this file and in files already uploaded; remaining units are shared by the lines of this file (a supplemental starts from its own fresh download). Caps are applied day by day in date order. A day that bills anything reserves all of its notes, so a note's minutes can never be counted again; days beyond the cap reserve nothing and stay free for a supplemental once the SC raises the max. A day that bills nothing (for example a missing EVV visit) reserves nothing, so a corrected EVV can bill it later. A note is eligible for a unit whenever no live line holds it for that code, even if it is billed for another code: when an MTP line is denied and released, a supplemental can bill that MTP day again from the DSG note that is still billed for DSG.
 
 ### 5.5 Writing the file
 

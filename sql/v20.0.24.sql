@@ -13,6 +13,15 @@
 --   Lock       billed is locked like approved, with no Reopen; approved → billed
 --              only through e520_mark_uploaded, billed → approved only through
 --              e520_release_line.
+-- r1 (Greptile r1): a note is eligible for a unit if no LIVE line holds it for that
+--     code (so a released MTP day can be reclaimed from a DSG note still billed for
+--     DSG); placement / authorization coverage is checked day by day (gaps are
+--     breaks, never billed); monthly max and remaining units are shared by every
+--     line for the same client, code and month; the self-test builds its test data
+--     against the real schema and now ROLLS THE WHOLE FILE BACK if any check fails.
+-- r2: the SQL editor can leave request.jwt.claims as an empty string, which is
+--     not valid JSON; the self-test now starts from '{}' ("nobody signed in"), and
+--     an early stop names the step it stopped at.
 -- Run on production in the Supabase SQL editor. Idempotent. Nothing calls the
 -- engine until PR 3 (v20.0.25) ships the page. The last statement is the
 -- verification table, including a synthetic end-to-end self-test (January 2001,
@@ -285,7 +294,7 @@ BEGIN
     SELECT array_agg(n.id ORDER BY n.start_time NULLS LAST, n.id) INTO v_ids
       FROM service_notes n JOIN service_code_definitions c ON c.id = n.service_code_id
      WHERE n.org_id = p_org AND n.person_id = p_person AND c.code = 'DSG'
-       AND n.service_date = p_day AND n.status = 'approved'
+       AND n.service_date = p_day AND n.status IN ('approved', 'billed')   -- r1: billed for DSG can still back a released MTP day
        AND coalesce(n.transport, 'to_and_from') <> 'none'
        AND NOT EXISTS (SELECT 1 FROM e520_line_notes x
                         WHERE x.note_id = n.id AND x.service_code = 'MTP' AND NOT x.released);
@@ -303,7 +312,7 @@ BEGIN
     INTO v_ids, v_mins, o_null_min
     FROM service_notes n
    WHERE n.org_id = p_org AND n.person_id = p_person AND n.service_code_id = p_code_id
-     AND n.service_date = p_day AND n.status = 'approved'
+     AND n.service_date = p_day AND n.status IN ('approved', 'billed')      -- r1: eligibility is "no live unit for this code", not the status
      AND NOT EXISTS (SELECT 1 FROM e520_line_notes x
                       WHERE x.note_id = n.id AND x.service_code = p_code AND NOT x.released);
   o_null_min := coalesce(o_null_min, false);
@@ -350,6 +359,9 @@ END;
 $$;
 
 -- one UPI line → filled line(s), split parts, or a removed line; returns the next free line number
+-- r1: placement and authorization coverage is checked DAY BY DAY (a gap between two
+--     placements or two authorizations is a break, never billed); monthly max and
+--     remaining units are shared by every line for the same client, code and month.
 CREATE OR REPLACE FUNCTION public.e520_fill_line(p_batch uuid, p_org uuid, p_row jsonb, p_next_ln integer)
 RETURNS integer
 LANGUAGE plpgsql
@@ -359,13 +371,11 @@ DECLARE
   c_residential constant text[] := ARRAY['RHS', 'HHS', 'PPS'];
   v_ord      integer := (p_row->>'ord')::integer;
   v_ln       integer := (p_row->>'line_number')::integer;
-  v_src_s    date    := (p_row->>'start')::date;
-  v_src_e    date    := (p_row->>'end')::date;
+  v_s        date    := (p_row->>'start')::date;
+  v_e        date    := (p_row->>'end')::date;
   v_code     text    := p_row->>'code';
   v_unit     text    := p_row->>'unit';
   v_rate_txt text    := p_row->>'rate';
-  v_s        date    := (p_row->>'start')::date;
-  v_e        date    := (p_row->>'end')::date;
   v_next     integer := p_next_ln;
   v_flags    jsonb   := '[]'::jsonb;
   v_reason   text;
@@ -373,12 +383,16 @@ DECLARE
   v_nperson  integer;
   v_code_id  uuid;
   v_evv      boolean;
-  v_cnt      integer;
-  v_lo       date;
-  v_hi       date;
+  v_need_place boolean := false;
+  v_need_auth  boolean := false;
   v_auth_rate numeric;
+  v_max      integer;
+  v_rem      integer;
+  v_prior_month integer := 0;
+  v_prior_batch integer := 0;
   v_cap      integer;
   v_d        date;
+  v_covered  boolean;
   v_absent   boolean;
   dr         record;
   v_days     jsonb := '[]'::jsonb;
@@ -388,6 +402,9 @@ DECLARE
   v_new_notes jsonb;
   v_evv_gap  text[] := '{}';
   v_absent_notes text[] := '{}';
+  v_outside_notes text[] := '{}';
+  v_outside  integer := 0;
+  v_total_days integer := 0;
   v_undoc    integer := 0;
   v_null_min boolean := false;
   v_documented integer := 0;
@@ -422,82 +439,88 @@ BEGIN
     v_reason := format('Unit type %s isn''t supported yet; fill this line by hand', v_unit);
   END IF;
 
-  -- 2. trims: residential placement, then authorization (D1: UPI's line stays the authority)
-  IF v_reason IS NULL AND v_code = ANY (c_residential) THEN
-    SELECT count(*), min(greatest(pl.start_date, v_s)), max(least(coalesce(pl.end_date, v_e), v_e))
-      INTO v_cnt, v_lo, v_hi
-      FROM person_placements pl
-     WHERE pl.org_id = p_org AND pl.person_id = v_person
-       AND pl.start_date <= v_e AND (pl.end_date IS NULL OR pl.end_date >= v_s);
-    IF v_cnt = 0 THEN
-      v_flags := v_flags || jsonb_build_array(jsonb_build_object('kind', 'no_placement',
-                   'detail', 'No placement on file covers these dates'));
-    ELSIF v_lo > v_s OR v_hi < v_e THEN
-      v_flags := v_flags || jsonb_build_array(jsonb_build_object('kind', 'trimmed',
-                   'detail', format('Dates trimmed to the placement: %s to %s', to_char(v_lo, 'MM/DD/YYYY'), to_char(v_hi, 'MM/DD/YYYY'))));
-      v_s := v_lo; v_e := v_hi;
-    END IF;
-  END IF;
-
-  IF v_reason IS NULL THEN
-    SELECT count(*), min(greatest(coalesce(a.start_date, v_s), v_s)), max(least(coalesce(a.end_date, v_e), v_e))
-      INTO v_cnt, v_lo, v_hi
-      FROM person_service_authorizations a
-     WHERE a.org_id = p_org AND a.person_id = v_person AND a.service_code_id = v_code_id
-       AND (a.start_date IS NULL OR a.start_date <= v_e) AND (a.end_date IS NULL OR a.end_date >= v_s);
-    IF v_cnt = 0 THEN
-      v_flags := v_flags || jsonb_build_array(jsonb_build_object('kind', 'no_authorization',
-                   'detail', 'No Provly authorization covers these dates; UPI''s line is used as the authority'));
-    ELSE
-      IF v_lo > v_s OR v_hi < v_e THEN
-        v_flags := v_flags || jsonb_build_array(jsonb_build_object('kind', 'trimmed',
-                     'detail', format('Dates trimmed to the authorization: %s to %s', to_char(v_lo, 'MM/DD/YYYY'), to_char(v_hi, 'MM/DD/YYYY'))));
-        v_s := v_lo; v_e := v_hi;
-      END IF;
-      SELECT a.rate_per_unit INTO v_auth_rate
-        FROM person_service_authorizations a
-       WHERE a.org_id = p_org AND a.person_id = v_person AND a.service_code_id = v_code_id
-         AND (a.start_date IS NULL OR a.start_date <= v_e) AND (a.end_date IS NULL OR a.end_date >= v_s)
-       ORDER BY a.start_date DESC NULLS LAST LIMIT 1;
-      IF v_auth_rate IS NOT NULL AND v_rate_txt ~ '^[0-9]+(\.[0-9]+)?$'
-         AND round(v_rate_txt::numeric, 2) <> round(v_auth_rate, 2) THEN
-        v_flags := v_flags || jsonb_build_array(jsonb_build_object('kind', 'rate_mismatch',
-                     'detail', format('UPI''s rate %s differs from Provly''s authorization rate %s; UPI''s rate is sent', v_rate_txt, round(v_auth_rate, 2))));
-      END IF;
-    END IF;
-    IF v_s > v_e THEN v_reason := 'The placement and authorization dates leave no days on this line'; END IF;
-  END IF;
-
   IF v_reason IS NOT NULL THEN
     INSERT INTO e520_lines (batch_id, org_id, ord, line_number, source_line_number, raw, person_id, service_code,
                             unit_type, start_date, end_date, source_start_date, source_end_date, units, action,
                             remove_reason, flags)
     VALUES (p_batch, p_org, v_ord * 100, v_ln, v_ln, p_row->'vals', v_person, v_code,
-            v_unit, v_src_s, v_src_e, v_src_s, v_src_e, 0, 'remove', v_reason, v_flags);
+            v_unit, v_s, v_e, v_s, v_e, 0, 'remove', v_reason, v_flags);
     RETURN v_next;
   END IF;
 
-  -- 3. caps: monthly max and remaining units (both from UPI's own line)
-  IF coalesce(p_row->>'max', '') ~ '^[0-9]+$' THEN v_cap := (p_row->>'max')::integer; END IF;
-  IF coalesce(p_row->>'remaining', '') ~ '^[0-9]+$' THEN
-    v_cap := CASE WHEN v_cap IS NULL THEN (p_row->>'remaining')::integer
-                  ELSE least(v_cap, (p_row->>'remaining')::integer) END;
+  -- 2. which coverage applies (D1: with none on file, UPI's line is the authority)
+  IF v_code = ANY (c_residential) THEN
+    v_need_place := EXISTS (SELECT 1 FROM person_placements pl
+                             WHERE pl.org_id = p_org AND pl.person_id = v_person
+                               AND pl.start_date <= v_e AND (pl.end_date IS NULL OR pl.end_date >= v_s));
+    IF NOT v_need_place THEN
+      v_flags := v_flags || jsonb_build_array(jsonb_build_object('kind', 'no_placement',
+                   'detail', 'No placement on file covers these dates'));
+    END IF;
   END IF;
-  IF v_unit = 'M' THEN v_cap := least(coalesce(v_cap, 1), 1); END IF;
+  v_need_auth := EXISTS (SELECT 1 FROM person_service_authorizations a
+                          WHERE a.org_id = p_org AND a.person_id = v_person AND a.service_code_id = v_code_id
+                            AND (a.start_date IS NULL OR a.start_date <= v_e) AND (a.end_date IS NULL OR a.end_date >= v_s));
+  IF NOT v_need_auth THEN
+    v_flags := v_flags || jsonb_build_array(jsonb_build_object('kind', 'no_authorization',
+                 'detail', 'No Provly authorization covers these dates; UPI''s line is used as the authority'));
+  ELSE
+    SELECT a.rate_per_unit INTO v_auth_rate
+      FROM person_service_authorizations a
+     WHERE a.org_id = p_org AND a.person_id = v_person AND a.service_code_id = v_code_id
+       AND (a.start_date IS NULL OR a.start_date <= v_e) AND (a.end_date IS NULL OR a.end_date >= v_s)
+     ORDER BY a.start_date DESC NULLS LAST LIMIT 1;
+    IF v_auth_rate IS NOT NULL AND v_rate_txt ~ '^[0-9]+(\.[0-9]+)?$'
+       AND round(v_rate_txt::numeric, 2) <> round(v_auth_rate, 2) THEN
+      v_flags := v_flags || jsonb_build_array(jsonb_build_object('kind', 'rate_mismatch',
+                   'detail', format('UPI''s rate %s differs from Provly''s authorization rate %s; UPI''s rate is sent', v_rate_txt, round(v_auth_rate, 2))));
+    END IF;
+  END IF;
 
-  -- 4. every day of the span (D7: nothing inside a recorded absence)
+  -- 3. caps, shared by every live line for this client + code + month (this file, and uploaded files)
+  SELECT coalesce(sum(l.units), 0),
+         coalesce(sum(l.units) FILTER (WHERE l.batch_id = p_batch), 0)
+    INTO v_prior_month, v_prior_batch
+    FROM e520_lines l JOIN e520_batches b ON b.id = l.batch_id
+   WHERE l.org_id = p_org AND l.person_id = v_person AND l.service_code = v_code
+     AND l.action <> 'remove' AND l.released_at IS NULL
+     AND date_trunc('month', l.start_date) = date_trunc('month', v_s)
+     AND (l.batch_id = p_batch OR b.status = 'uploaded');
+  IF coalesce(p_row->>'max', '') ~ '^[0-9]+$' THEN
+    v_max := (p_row->>'max')::integer;
+    v_cap := greatest(v_max - v_prior_month, 0);          -- the month's max, less what other lines already bill
+  END IF;
+  IF coalesce(p_row->>'remaining', '') ~ '^[0-9]+$' THEN
+    v_rem := (p_row->>'remaining')::integer;             -- UPI's remaining, as of this download, less this file's other lines
+    v_cap := CASE WHEN v_cap IS NULL THEN greatest(v_rem - v_prior_batch, 0)
+                  ELSE least(v_cap, greatest(v_rem - v_prior_batch, 0)) END;
+  END IF;
+  IF v_unit = 'M' THEN v_cap := least(coalesce(v_cap, 1), greatest(1 - v_prior_month, 0)); END IF;
+
+  -- 4. every day of the span: outside coverage or inside an absence is a break (D7)
   FOR v_d IN SELECT gs::date FROM generate_series(v_s, v_e, interval '1 day') AS gs LOOP
+    v_total_days := v_total_days + 1;
+    v_covered := (NOT v_need_place
+                   OR EXISTS (SELECT 1 FROM person_placements pl
+                               WHERE pl.org_id = p_org AND pl.person_id = v_person
+                                 AND pl.start_date <= v_d AND (pl.end_date IS NULL OR pl.end_date >= v_d)))
+             AND (NOT v_need_auth
+                   OR EXISTS (SELECT 1 FROM person_service_authorizations a
+                               WHERE a.org_id = p_org AND a.person_id = v_person AND a.service_code_id = v_code_id
+                                 AND (a.start_date IS NULL OR a.start_date <= v_d) AND (a.end_date IS NULL OR a.end_date >= v_d)));
     SELECT EXISTS (SELECT 1 FROM person_absences ab
                     WHERE ab.org_id = p_org AND ab.person_id = v_person
                       AND ab.start_date <= v_d AND (ab.end_date IS NULL OR ab.end_date >= v_d))
       INTO v_absent;
-    IF v_absent THEN
+    IF NOT v_covered OR v_absent THEN
       IF EXISTS (SELECT 1 FROM service_notes n JOIN service_code_definitions c ON c.id = n.service_code_id
                   WHERE n.org_id = p_org AND n.person_id = v_person AND n.service_date = v_d
-                    AND n.status = 'approved'
+                    AND n.status IN ('approved', 'billed')
                     AND c.code = CASE WHEN v_code = 'MTP' THEN 'DSG' ELSE v_code END) THEN
-        v_absent_notes := v_absent_notes || to_char(v_d, 'MM/DD');
+        IF v_absent THEN v_absent_notes := v_absent_notes || to_char(v_d, 'MM/DD');
+        ELSE v_outside_notes := v_outside_notes || to_char(v_d, 'MM/DD'); END IF;
       END IF;
+      IF NOT v_covered THEN v_outside := v_outside + 1; END IF;
       v_days := v_days || jsonb_build_array(jsonb_build_object('d', v_d, 'absent', true, 'u', 0, 'notes', '[]'::jsonb));
       CONTINUE;
     END IF;
@@ -536,6 +559,12 @@ BEGIN
     v_flags := v_flags || jsonb_build_array(jsonb_build_object('kind', 'evv_gap',
                  'detail', format('EVV and notes disagree on %s; the lower count is billed', array_to_string(v_evv_gap, ', '))));
   END IF;
+  IF v_outside > 0 THEN
+    v_flags := v_flags || jsonb_build_array(jsonb_build_object('kind', 'outside_coverage',
+                 'detail', format('%s day(s) fall outside the placement or authorization and are not billed%s', v_outside,
+                                  CASE WHEN coalesce(array_length(v_outside_notes, 1), 0) > 0
+                                       THEN '; approved notes on ' || array_to_string(v_outside_notes, ', ') ELSE '' END)));
+  END IF;
   IF v_undoc > 0 THEN
     v_flags := v_flags || jsonb_build_array(jsonb_build_object('kind', 'undocumented_days',
                  'detail', format('%s day(s) have neither an approved note nor a recorded absence', v_undoc)));
@@ -550,16 +579,18 @@ BEGIN
   END IF;
   IF v_unit <> 'M' AND v_documented > v_running THEN
     v_flags := v_flags || jsonb_build_array(jsonb_build_object('kind', 'capped',
-                 'detail', format('%s more unit(s) documented than the monthly max or remaining units allow; ask the SC to raise it, then send a supplemental', v_documented - v_running)));
+                 'detail', format('%s more unit(s) documented than the monthly max or remaining units allow%s; ask the SC to raise it, then send a supplemental',
+                                  v_documented - v_running,
+                                  CASE WHEN v_prior_month > 0 THEN format(' (%s already on other lines this month)', v_prior_month) ELSE '' END)));
   END IF;
 
-  -- 7. runs of consecutive days between absences become the line and its split parts
+  -- 7. runs of consecutive days between breaks become the line and its split parts
   v_seg_s := NULL;
   FOR v_day IN
     SELECT x FROM jsonb_array_elements(v_days2 || jsonb_build_array(jsonb_build_object('absent', true, 'used', 0, 'notes', '[]'::jsonb)))
                   WITH ORDINALITY AS t(x, o) ORDER BY o
   LOOP
-    IF (v_day->>'absent')::boolean THEN                          -- an absence (or the end sentinel) closes a run
+    IF (v_day->>'absent')::boolean THEN                          -- a break (or the end sentinel) closes a run
       IF v_seg_s IS NOT NULL THEN
         IF v_seg_units > 0 THEN
           v_kept := v_kept + 1;
@@ -568,8 +599,8 @@ BEGIN
                                   service_code, unit_type, start_date, end_date, source_start_date,
                                   source_end_date, units, action, flags)
           VALUES (p_batch, p_org, v_ord * 100 + v_kept, v_this_ln, v_ln, p_row->'vals', v_person,
-                  v_code, v_unit, v_seg_s, v_seg_e, v_src_s,
-                  v_src_e, v_seg_units, CASE WHEN v_kept = 1 THEN 'fill' ELSE 'split' END,
+                  v_code, v_unit, v_seg_s, v_seg_e, v_s,
+                  v_e, v_seg_units, CASE WHEN v_kept = 1 THEN 'fill' ELSE 'split' END,
                   CASE WHEN v_kept = 1 THEN v_flags ELSE '[]'::jsonb END)
           RETURNING id INTO v_line_id;
           INSERT INTO e520_line_notes (line_id, org_id, note_id, service_code, service_date, units)
@@ -594,8 +625,9 @@ BEGIN
                             unit_type, start_date, end_date, source_start_date, source_end_date, units, action,
                             remove_reason, flags)
     VALUES (p_batch, p_org, v_ord * 100, v_ln, v_ln, p_row->'vals', v_person, v_code,
-            v_unit, v_src_s, v_src_e, v_src_s, v_src_e, 0, 'remove',
-            CASE WHEN v_documented > 0 THEN 'No units left under the monthly max or remaining units'
+            v_unit, v_s, v_e, v_s, v_e, 0, 'remove',
+            CASE WHEN v_outside = v_total_days THEN 'No day on this line falls inside a placement or authorization'
+                 WHEN v_documented > 0 THEN 'No units left under the monthly max or remaining units'
                  ELSE 'No approved documentation for these dates' END,
             v_flags);
   END IF;
@@ -783,7 +815,7 @@ BEGIN
       FROM (
         SELECT n.person_id, c.code, count(*) AS cnt, min(n.service_date) AS first_day, max(n.service_date) AS last_day
           FROM service_notes n JOIN service_code_definitions c ON c.id = n.service_code_id
-         WHERE n.org_id = v_org AND n.status = 'approved'
+         WHERE n.org_id = v_org AND n.status IN ('approved', 'billed')
            AND n.service_date >= v_month AND n.service_date < (v_month + interval '1 month')::date
            AND c.code <> 'MTP'
            AND NOT EXISTS (SELECT 1 FROM e520_line_notes x
@@ -838,7 +870,7 @@ BEGIN
     FROM e520_line_notes x
     JOIN e520_lines l ON l.id = x.line_id
     JOIN service_notes n ON n.id = x.note_id
-   WHERE l.batch_id = p_batch AND NOT x.released AND n.status <> 'approved';
+   WHERE l.batch_id = p_batch AND NOT x.released AND n.status NOT IN ('approved', 'billed');
   IF v_bad > 0 THEN
     RAISE EXCEPTION '% note(s) behind this file are no longer approved. Rebuild it before uploading.', v_bad;
   END IF;
@@ -979,18 +1011,72 @@ GRANT EXECUTE ON FUNCTION public.e520_delete_draft(uuid) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.e520_set_upi_record(uuid, integer) TO authenticated;
 
 -- ── 7. Self-test: a synthetic month (January 2001, an inactive test client) run
---       end to end, then rolled back. Results go to a session temp table.
+--       end to end, then rolled back. r1: if ANY check fails, or the test can't
+--       run, the whole file is rolled back — nothing in it is applied — and the
+--       error lists each failing check. Results go to a session temp table.
 CREATE TEMP TABLE IF NOT EXISTS v20024_selftest (n integer, item text, value text, want text) ON COMMIT PRESERVE ROWS;
 TRUNCATE v20024_selftest;
+
+-- test-data helper (session-only): inserts a row, filling any other NOT NULL column
+-- that has no default with a neutral value, so the test never depends on the schema's
+-- optional-vs-required choices (r1: persons.date_of_birth, note times)
+CREATE OR REPLACE FUNCTION pg_temp.e520_test_insert(p_table text, p_given jsonb)
+RETURNS uuid
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_rel  regclass := ('public.' || p_table)::regclass;
+  v_cols text := '';
+  v_vals text := '';
+  k      text;
+  v_typ  text;
+  c      record;
+  v_id   uuid;
+BEGIN
+  FOR k IN SELECT jsonb_object_keys(p_given) LOOP
+    SELECT format_type(a.atttypid, a.atttypmod) INTO v_typ
+      FROM pg_attribute a WHERE a.attrelid = v_rel AND a.attname = k AND NOT a.attisdropped;
+    v_cols := v_cols || ', ' || quote_ident(k);
+    v_vals := v_vals || ', ' || CASE WHEN jsonb_typeof(p_given->k) = 'null' THEN 'NULL'
+                                     ELSE quote_literal(p_given->>k) END || '::' || v_typ;
+  END LOOP;
+  FOR c IN
+    SELECT a.attname, format_type(a.atttypid, a.atttypmod) AS typ, t.typtype, t.typcategory, a.atttypid
+      FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid
+     WHERE a.attrelid = v_rel AND a.attnum > 0 AND NOT a.attisdropped AND a.attnotnull
+       AND NOT a.atthasdef AND a.attidentity = '' AND a.attgenerated = ''
+       AND NOT (p_given ? a.attname::text)
+  LOOP
+    v_cols := v_cols || ', ' || quote_ident(c.attname);
+    v_vals := v_vals || ', ' || CASE
+      WHEN c.typtype = 'e' THEN format('(SELECT e.enumlabel FROM pg_enum e WHERE e.enumtypid = %s ORDER BY e.enumsortorder LIMIT 1)::%s', c.atttypid, c.typ)
+      WHEN c.typ = 'date' THEN '''1990-01-01''::date'
+      WHEN c.typ LIKE 'timestamp%' THEN 'now()'
+      WHEN c.typ LIKE 'time%' THEN '''00:00''::time'
+      WHEN c.typ = 'boolean' THEN 'false'
+      WHEN c.typcategory = 'N' THEN '0'
+      WHEN c.typ IN ('jsonb', 'json') THEN '''{}''::' || c.typ
+      WHEN c.typ = 'uuid' THEN 'gen_random_uuid()'
+      WHEN c.typcategory = 'A' THEN '''{}''::' || c.typ
+      ELSE quote_literal('e520 self-test') || '::' || c.typ END;
+  END LOOP;
+  EXECUTE format('INSERT INTO public.%I (%s) VALUES (%s) RETURNING id', p_table, substr(v_cols, 3), substr(v_vals, 3))
+    INTO v_id;
+  RETURN v_id;
+END;
+$$;
 
 DO $$
 DECLARE
   v_res    jsonb := '[]'::jsonb;
+  v_fail   text;
   v_org    uuid;
   v_staff  uuid;
   v_sln    uuid;
   v_hhs    uuid;
+  v_dsg    uuid;
   v_slh    uuid;
+  v_rps    uuid;
   v_person uuid;
   v_batch  uuid;
   v_batch2 uuid;
@@ -999,83 +1085,155 @@ DECLARE
   v_l1     text := '1,selftest@example.com,Selftest E520,099999999,SLN,8.27,Q,01/01/2001,01/31/2001,0,520,Test Coordinator,100';
   v_l2     text := '2,selftest@example.com,Selftest E520,099999999,HHS,230.85,D,01/01/2001,01/31/2001,0,365,Test Coordinator,31';
   v_l3     text := '3,selftest@example.com,Selftest E520,099999999,DSI,88.42,D,01/01/2001,01/31/2001,0,244,Test Coordinator,22';
+  v_l4     text := '4,selftest@example.com,Selftest E520,099999999,DSG,127,D,01/01/2001,01/31/2001,0,244,Test Coordinator,22';
+  v_l5     text := '5,selftest@example.com,Selftest E520,099999999,MTP,20.8,D,01/01/2001,01/31/2001,0,244,Test Coordinator,22';
+  v_l6     text := '6,selftest@example.com,Selftest E520,099999999,SLH,9.31,Q,01/01/2001,01/15/2001,0,100,Test Coordinator,3';
+  v_l7     text := '7,selftest@example.com,Selftest E520,099999999,SLH,9.31,Q,01/16/2001,01/31/2001,0,100,Test Coordinator,3';
   v_csv    text;
   v_expect text;
   v_txt    text;
   v_msg    text;
   v_n      integer;
+  v_n2     integer;
   v_billed uuid;
   v_extra  uuid;
   v_sln_line uuid;
+  v_mtp_line uuid;
   v_ok     boolean;
+  v_step   text := 'setup';
 BEGIN
+  -- r2: start from a valid "nobody signed in" state. The SQL editor can hold the
+  -- claims setting as an empty string, which the login helpers can't read as JSON.
+  PERFORM set_config('request.jwt.claims', '{}', true);
   SELECT s.org_id, s.id INTO v_org, v_staff FROM staff s ORDER BY s.id LIMIT 1;
   SELECT id INTO v_sln FROM service_code_definitions WHERE code = 'SLN' LIMIT 1;
   SELECT id INTO v_hhs FROM service_code_definitions WHERE code = 'HHS' LIMIT 1;
+  SELECT id INTO v_dsg FROM service_code_definitions WHERE code = 'DSG' LIMIT 1;
   SELECT id INTO v_slh FROM service_code_definitions WHERE code = 'SLH' LIMIT 1;
-  v_csv := chr(65279) || v_hdr || E'\r\n' || v_l1 || E'\r\n' || v_l2 || E'\r\n' || v_l3;
+  SELECT id INTO v_rps FROM service_code_definitions WHERE code = 'RPS' LIMIT 1;
+  v_csv := chr(65279) || v_hdr || E'\r\n' || v_l1 || E'\r\n' || v_l2 || E'\r\n' || v_l3 || E'\r\n' || v_l4
+           || E'\r\n' || v_l5 || E'\r\n' || v_l6 || E'\r\n' || v_l7;
 
   BEGIN
-    -- the synthetic month
-    INSERT INTO persons (org_id, first_name, last_name, identification_number, is_active)
-    VALUES (v_org, 'E520', 'Selftest', '099999999', false) RETURNING id INTO v_person;
-    INSERT INTO service_notes (org_id, person_id, staff_id, service_code_id, service_date, start_time, end_time,
-                               duration_minutes, billable_units, summary_note, status) VALUES
-      (v_org, v_person, v_staff, v_sln, DATE '2001-01-04', TIME '09:00', TIME '09:20', 20, 1, 'e520 self-test', 'approved'),
-      (v_org, v_person, v_staff, v_sln, DATE '2001-01-04', TIME '10:00', TIME '10:20', 20, 1, 'e520 self-test', 'approved'),
-      (v_org, v_person, v_staff, v_sln, DATE '2001-01-05', TIME '09:00', TIME '11:07', 127, 8, 'e520 self-test', 'approved'),
-      (v_org, v_person, v_staff, v_hhs, DATE '2001-01-01', NULL, NULL, NULL, 1, 'e520 self-test', 'approved'),
-      (v_org, v_person, v_staff, v_hhs, DATE '2001-01-02', NULL, NULL, NULL, 1, 'e520 self-test', 'approved'),
-      (v_org, v_person, v_staff, v_hhs, DATE '2001-01-03', NULL, NULL, NULL, 1, 'e520 self-test', 'approved'),
-      (v_org, v_person, v_staff, v_hhs, DATE '2001-01-12', NULL, NULL, NULL, 1, 'e520 self-test', 'approved'),
-      (v_org, v_person, v_staff, v_slh, DATE '2001-01-07', TIME '13:00', TIME '13:30', 30, 2, 'e520 self-test', 'approved');
-    INSERT INTO evv_sessions (org_id, staff_id, person_id, service_code_id, clock_in_at, clock_out_at) VALUES
-      (v_org, v_staff, v_person, v_sln, TIMESTAMP '2001-01-04 09:00' AT TIME ZONE 'America/Denver', TIMESTAMP '2001-01-04 09:45' AT TIME ZONE 'America/Denver'),
-      (v_org, v_staff, v_person, v_sln, TIMESTAMP '2001-01-05 09:00' AT TIME ZONE 'America/Denver', TIMESTAMP '2001-01-05 10:50' AT TIME ZONE 'America/Denver');
+    -- ── the synthetic month ──
+    v_step := 'creating the test client';
+    v_person := pg_temp.e520_test_insert('persons', jsonb_build_object(
+      'org_id', v_org, 'first_name', 'E520', 'last_name', 'Selftest', 'identification_number', '099999999', 'is_active', false));
+
+    v_step := 'creating SLN notes, EVV visits and authorizations';
+    -- SLN: two 20-minute notes on the 4th (EVV 35 min → the lesser count), one 127-minute note on the 5th (in an authorization gap)
+    PERFORM pg_temp.e520_test_insert('service_notes', jsonb_build_object('org_id', v_org, 'person_id', v_person, 'staff_id', v_staff,
+      'service_code_id', v_sln, 'service_date', '2001-01-04', 'start_time', '09:00', 'end_time', '09:20', 'duration_minutes', 20,
+      'billable_units', 1, 'summary_note', 'e520 self-test', 'status', 'approved'));
+    PERFORM pg_temp.e520_test_insert('service_notes', jsonb_build_object('org_id', v_org, 'person_id', v_person, 'staff_id', v_staff,
+      'service_code_id', v_sln, 'service_date', '2001-01-04', 'start_time', '10:00', 'end_time', '10:20', 'duration_minutes', 20,
+      'billable_units', 1, 'summary_note', 'e520 self-test', 'status', 'approved'));
+    PERFORM pg_temp.e520_test_insert('service_notes', jsonb_build_object('org_id', v_org, 'person_id', v_person, 'staff_id', v_staff,
+      'service_code_id', v_sln, 'service_date', '2001-01-05', 'start_time', '09:00', 'end_time', '11:07', 'duration_minutes', 127,
+      'billable_units', 8, 'summary_note', 'e520 self-test', 'status', 'approved'));
+    PERFORM pg_temp.e520_test_insert('evv_sessions', jsonb_build_object('org_id', v_org, 'staff_id', v_staff, 'person_id', v_person,
+      'service_code_id', v_sln,
+      'clock_in_at', (TIMESTAMP '2001-01-04 09:00' AT TIME ZONE 'America/Denver'),
+      'clock_out_at', (TIMESTAMP '2001-01-04 09:35' AT TIME ZONE 'America/Denver')));
+    PERFORM pg_temp.e520_test_insert('evv_sessions', jsonb_build_object('org_id', v_org, 'staff_id', v_staff, 'person_id', v_person,
+      'service_code_id', v_sln,
+      'clock_in_at', (TIMESTAMP '2001-01-05 09:00' AT TIME ZONE 'America/Denver'),
+      'clock_out_at', (TIMESTAMP '2001-01-05 10:50' AT TIME ZONE 'America/Denver')));
+    -- SLN authorizations with a gap on the 5th
+    PERFORM pg_temp.e520_test_insert('person_service_authorizations', jsonb_build_object('org_id', v_org, 'person_id', v_person,
+      'service_code_id', v_sln, 'authorized_units', 100, 'used_units', 0, 'start_date', '2001-01-01', 'end_date', '2001-01-04', 'rate_per_unit', 8.27));
+    PERFORM pg_temp.e520_test_insert('person_service_authorizations', jsonb_build_object('org_id', v_org, 'person_id', v_person,
+      'service_code_id', v_sln, 'authorized_units', 100, 'used_units', 0, 'start_date', '2001-01-06', 'end_date', '2001-01-31', 'rate_per_unit', 8.27));
+
+    v_step := 'creating HHS notes';
+    -- HHS: daily notes on the 1st–3rd and the 12th
+    PERFORM pg_temp.e520_test_insert('service_notes', jsonb_build_object('org_id', v_org, 'person_id', v_person, 'staff_id', v_staff,
+      'service_code_id', v_hhs, 'service_date', d::date, 'start_time', '08:00', 'end_time', '16:00', 'duration_minutes', 480,
+      'billable_units', 1, 'summary_note', 'e520 self-test', 'status', 'approved'))
+      FROM unnest(ARRAY[DATE '2001-01-01', DATE '2001-01-02', DATE '2001-01-03', DATE '2001-01-12']) AS d;
+
+    v_step := 'creating the DSG note';
+    -- DSG on the 15th (transport preset to_and_from by the database) → one DSG day and one MTP day
+    PERFORM pg_temp.e520_test_insert('service_notes', jsonb_build_object('org_id', v_org, 'person_id', v_person, 'staff_id', v_staff,
+      'service_code_id', v_dsg, 'service_date', '2001-01-15', 'start_time', '09:00', 'end_time', '15:00', 'duration_minutes', 360,
+      'billable_units', 1, 'summary_note', 'e520 self-test', 'status', 'approved'));
+
+    v_step := 'creating SLH notes and EVV visits';
+    -- SLH: 30 minutes on the 7th and the 20th, each with a 30-minute EVV visit; the two UPI lines share a monthly max of 3
+    PERFORM pg_temp.e520_test_insert('service_notes', jsonb_build_object('org_id', v_org, 'person_id', v_person, 'staff_id', v_staff,
+      'service_code_id', v_slh, 'service_date', d::date, 'start_time', '13:00', 'end_time', '13:30', 'duration_minutes', 30,
+      'billable_units', 2, 'summary_note', 'e520 self-test', 'status', 'approved'))
+      FROM unnest(ARRAY[DATE '2001-01-07', DATE '2001-01-20']) AS d;
+    PERFORM pg_temp.e520_test_insert('evv_sessions', jsonb_build_object('org_id', v_org, 'staff_id', v_staff, 'person_id', v_person,
+      'service_code_id', v_slh,
+      'clock_in_at', ((d::date + TIME '13:00') AT TIME ZONE 'America/Denver'),
+      'clock_out_at', ((d::date + TIME '13:30') AT TIME ZONE 'America/Denver')))
+      FROM unnest(ARRAY[DATE '2001-01-07', DATE '2001-01-20']) AS d;
+
+    v_step := 'creating the RPS note';
+    -- RPS: a documented service with no UPI line
+    PERFORM pg_temp.e520_test_insert('service_notes', jsonb_build_object('org_id', v_org, 'person_id', v_person, 'staff_id', v_staff,
+      'service_code_id', v_rps, 'service_date', '2001-01-08', 'start_time', '09:00', 'end_time', '10:00', 'duration_minutes', 60,
+      'billable_units', 4, 'summary_note', 'e520 self-test', 'status', 'approved'));
+
+    v_step := 'recording the absence';
+    -- a hospital day on the 10th
     INSERT INTO person_absences (org_id, person_id, start_date, end_date, reason)
     VALUES (v_org, v_person, DATE '2001-01-10', DATE '2001-01-10', 'hospital');
 
-    -- T1–T6: the first build
+    -- ── T1–T8: the first build ──
+    v_step := 'T1-T8 first build';
     v_batch := public.e520_build('selftest.csv', v_csv, v_org);
 
     SELECT string_agg(line_number || ':' || to_char(start_date, 'MM/DD') || '-' || to_char(end_date, 'MM/DD') || '=' || units, ', ' ORDER BY ord)
       INTO v_txt FROM e520_lines WHERE batch_id = v_batch AND service_code = 'SLN' AND action <> 'remove';
-    v_res := v_res || jsonb_build_array(jsonb_build_array(1, 'T1 SLN: day totals rounded (D5), EVV lesser (D4), absence closes the span (D7)', v_txt, '1:01/01-01/09=10'));
+    v_res := v_res || jsonb_build_array(jsonb_build_array(1, 'T1 SLN: day total rounded, EVV lesser, authorization gap and absence break the span', v_txt, '1:01/01-01/04=2'));
 
-    SELECT (flags @> '[{"kind":"evv_gap"}]'::jsonb)::text INTO v_txt
-      FROM e520_lines WHERE batch_id = v_batch AND service_code = 'SLN' AND action <> 'remove';
-    v_res := v_res || jsonb_build_array(jsonb_build_array(2, 'T2 SLN: EVV gap flagged', v_txt, 'true'));
+    SELECT (flags @> '[{"kind":"evv_gap"}]'::jsonb)::text || ',' || (flags @> '[{"kind":"outside_coverage"}]'::jsonb)::text
+      INTO v_txt FROM e520_lines WHERE batch_id = v_batch AND service_code = 'SLN' AND action <> 'remove';
+    v_res := v_res || jsonb_build_array(jsonb_build_array(2, 'T2 SLN flags: EVV gap, day outside the authorization', v_txt, 'true,true'));
 
     SELECT string_agg(line_number || ':' || to_char(start_date, 'MM/DD') || '-' || to_char(end_date, 'MM/DD') || '=' || units, ', ' ORDER BY ord)
       INTO v_txt FROM e520_lines WHERE batch_id = v_batch AND service_code = 'HHS' AND action <> 'remove';
-    v_res := v_res || jsonb_build_array(jsonb_build_array(3, 'T3 HHS: split around the absence, new part numbered after the file''s highest', v_txt, '2:01/01-01/09=3, 4:01/11-01/31=1'));
+    v_res := v_res || jsonb_build_array(jsonb_build_array(3, 'T3 HHS: split around the absence, new part numbered after the file''s highest', v_txt, '2:01/01-01/09=3, 8:01/11-01/31=1'));
 
     SELECT action || ': ' || coalesce(remove_reason, '') INTO v_txt
       FROM e520_lines WHERE batch_id = v_batch AND service_code = 'DSI';
     v_res := v_res || jsonb_build_array(jsonb_build_array(4, 'T4 DSI: no documentation, removed', v_txt, 'remove: No approved documentation for these dates'));
 
     v_expect := chr(65279) || v_hdr
-      || E'\r\n' || '1,selftest@example.com,Selftest E520,099999999,SLN,8.27,Q,01/01/2001,01/09/2001,10,520,Test Coordinator,100'
+      || E'\r\n' || '1,selftest@example.com,Selftest E520,099999999,SLN,8.27,Q,01/01/2001,01/04/2001,2,520,Test Coordinator,100'
       || E'\r\n' || '2,selftest@example.com,Selftest E520,099999999,HHS,230.85,D,01/01/2001,01/09/2001,3,365,Test Coordinator,31'
-      || E'\r\n' || '4,selftest@example.com,Selftest E520,099999999,HHS,230.85,D,01/11/2001,01/31/2001,1,365,Test Coordinator,31';
+      || E'\r\n' || '8,selftest@example.com,Selftest E520,099999999,HHS,230.85,D,01/11/2001,01/31/2001,1,365,Test Coordinator,31'
+      || E'\r\n' || '4,selftest@example.com,Selftest E520,099999999,DSG,127,D,01/11/2001,01/31/2001,1,244,Test Coordinator,22'
+      || E'\r\n' || '5,selftest@example.com,Selftest E520,099999999,MTP,20.8,D,01/11/2001,01/31/2001,1,244,Test Coordinator,22'
+      || E'\r\n' || '6,selftest@example.com,Selftest E520,099999999,SLH,9.31,Q,01/01/2001,01/09/2001,2,100,Test Coordinator,3'
+      || E'\r\n' || '7,selftest@example.com,Selftest E520,099999999,SLH,9.31,Q,01/16/2001,01/31/2001,1,100,Test Coordinator,3';
     SELECT (export_csv = v_expect)::text INTO v_txt FROM e520_batches WHERE id = v_batch;
-    v_res := v_res || jsonb_build_array(jsonb_build_array(5, 'T5 export byte-for-byte: BOM, CRLF, UPI values verbatim, only units / dates / new numbers changed', v_txt, 'true'));
+    v_res := v_res || jsonb_build_array(jsonb_build_array(5, 'T5 export byte for byte: BOM, CRLF, UPI values verbatim, only units / dates / new numbers changed', v_txt, 'true'));
 
     SELECT count(*) || ' notes, SLN units ' || coalesce(sum(x.units) FILTER (WHERE x.service_code = 'SLN'), 0)
       INTO v_txt
       FROM e520_line_notes x JOIN e520_lines l ON l.id = x.line_id WHERE l.batch_id = v_batch;
-    v_res := v_res || jsonb_build_array(jsonb_build_array(6, 'T6 reservations: every note behind a unit, shares add up', v_txt, '7 notes, SLN units 10'));
+    v_res := v_res || jsonb_build_array(jsonb_build_array(6, 'T6 reservations: every note behind a unit (the DSG note twice: DSG and MTP)', v_txt, '10 notes, SLN units 2'));
 
-    SELECT (unmatched @> '[{"code":"SLH","notes":1}]'::jsonb)::text INTO v_txt FROM e520_batches WHERE id = v_batch;
-    v_res := v_res || jsonb_build_array(jsonb_build_array(7, 'T7 delivered but not in the budget (SLH note, no SLH line)', v_txt, 'true'));
+    SELECT (unmatched @> '[{"code":"RPS","notes":1}]'::jsonb)::text INTO v_txt FROM e520_batches WHERE id = v_batch;
+    v_res := v_res || jsonb_build_array(jsonb_build_array(7, 'T7 delivered but not in the budget (RPS note, no RPS line)', v_txt, 'true'));
 
-    -- T8: a rebuild replaces the draft
+    SELECT string_agg(line_number || ':' || to_char(start_date, 'MM/DD') || '-' || to_char(end_date, 'MM/DD') || '=' || units, ', ' ORDER BY ord)
+           || '; capped ' || bool_or(flags @> '[{"kind":"capped"}]'::jsonb)::text
+      INTO v_txt FROM e520_lines WHERE batch_id = v_batch AND service_code = 'SLH' AND action <> 'remove';
+    v_res := v_res || jsonb_build_array(jsonb_build_array(8, 'T8 one monthly max shared by two SLH lines', v_txt, '6:01/01-01/09=2, 7:01/16-01/31=1; capped true'));
+
+    -- ── T9: a rebuild replaces the draft ──
+    v_step := 'T9 rebuild';
     v_batch2 := public.e520_build('selftest.csv', v_csv, v_org);
     SELECT count(*) || ' batch, seq ' || max(seq) || CASE WHEN v_batch2 <> v_batch THEN ', new id' ELSE ', SAME id' END
       INTO v_txt FROM e520_batches WHERE org_id = v_org AND service_month = DATE '2001-01-01';
-    v_res := v_res || jsonb_build_array(jsonb_build_array(8, 'T8 rebuild replaces the month''s draft', v_txt, '1 batch, seq 1, new id'));
+    v_res := v_res || jsonb_build_array(jsonb_build_array(9, 'T9 rebuild replaces the month''s draft', v_txt, '1 batch, seq 1, new id'));
 
-    -- T9: mark uploaded — wrong file refused, right file bills the notes
+    v_step := 'T10 mark uploaded';
+    -- ── T10: mark uploaded — the wrong file refused, the right one bills the notes ──
     v_msg := NULL;
     BEGIN
       PERFORM public.e520_mark_uploaded(v_batch2, 'not-the-file', NULL);
@@ -1085,15 +1243,17 @@ BEGIN
     v_n := public.e520_mark_uploaded(v_batch2, v_txt, 12345);
     SELECT CASE WHEN v_msg LIKE 'This isn''t the file Provly built%' THEN 'wrong file refused' ELSE 'WRONG FILE: ' || coalesce(v_msg, 'accepted') END
            || '; ' || v_n || ' billed; ' || status INTO v_txt FROM e520_batches WHERE id = v_batch2;
-    v_res := v_res || jsonb_build_array(jsonb_build_array(9, 'T9 mark uploaded (D8)', v_txt, 'wrong file refused; 7 billed; uploaded'));
+    v_res := v_res || jsonb_build_array(jsonb_build_array(10, 'T10 mark uploaded (D8)', v_txt, 'wrong file refused; 9 billed; uploaded'));
 
     SELECT x.note_id INTO v_billed
       FROM e520_line_notes x JOIN e520_lines l ON l.id = x.line_id
      WHERE l.batch_id = v_batch2 AND x.service_code = 'HHS' LIMIT 1;
-    INSERT INTO service_notes (org_id, person_id, staff_id, service_code_id, service_date, billable_units, summary_note, status)
-    VALUES (v_org, v_person, v_staff, v_hhs, DATE '2001-01-20', 1, 'e520 self-test', 'approved') RETURNING id INTO v_extra;
+    v_extra := pg_temp.e520_test_insert('service_notes', jsonb_build_object('org_id', v_org, 'person_id', v_person, 'staff_id', v_staff,
+      'service_code_id', v_hhs, 'service_date', '2001-01-20', 'start_time', '08:00', 'end_time', '16:00', 'duration_minutes', 480,
+      'billable_units', 1, 'summary_note', 'e520 self-test', 'status', 'approved'));
 
-    -- T10: a signed-in user can't reopen a billed note
+    -- ── T11: a signed-in user can't reopen a billed note ──
+    v_step := 'T11 billed lock';
     v_msg := NULL;
     BEGIN
       PERFORM set_config('request.jwt.claims', json_build_object('sub', gen_random_uuid(), 'role', 'authenticated')::text, true);
@@ -1105,10 +1265,11 @@ BEGIN
     EXCEPTION WHEN raise_exception THEN
       IF SQLERRM <> 'v20024_rollback' THEN RAISE; END IF;
     END;
-    v_res := v_res || jsonb_build_array(jsonb_build_array(10, 'T10 billed note: no Reopen', coalesce('refused: ' || v_msg, 'NOT REFUSED'),
+    v_res := v_res || jsonb_build_array(jsonb_build_array(11, 'T11 billed note: no Reopen', coalesce('refused: ' || v_msg, 'NOT REFUSED'),
                        'refused: This service note is billed and locked. It returns to approved only when its payment line is released.'));
 
-    -- T11: approved → billed only through Mark uploaded
+    -- ── T12: approved → billed only through Mark uploaded ──
+    v_step := 'T12 approved to billed';
     v_msg := NULL;
     BEGIN
       PERFORM set_config('request.jwt.claims', json_build_object('sub', gen_random_uuid(), 'role', 'authenticated')::text, true);
@@ -1130,33 +1291,38 @@ BEGIN
     EXCEPTION WHEN raise_exception THEN
       IF SQLERRM <> 'v20024_rollback' THEN RAISE; END IF;
     END;
-    v_res := v_res || jsonb_build_array(jsonb_build_array(11, 'T11 approved → billed: refused directly, allowed inside Mark uploaded',
+    v_res := v_res || jsonb_build_array(jsonb_build_array(12, 'T12 approved → billed: refused directly, allowed inside Mark uploaded',
                        coalesce('refused: ' || v_msg, 'NOT REFUSED') || CASE WHEN v_ok THEN ' / allowed' ELSE ' / NOT ALLOWED' END,
                        'refused: A note becomes billed only when its payment file is marked uploaded / allowed'));
 
-    -- T12: release — a live status refused, a dead status returns the notes
+    v_step := 'T13 release';
+    -- ── T13: release — a live status refused; SLN notes return; the MTP release keeps the DSG note billed ──
     SELECT id INTO v_sln_line FROM e520_lines WHERE batch_id = v_batch2 AND service_code = 'SLN' AND action <> 'remove';
+    SELECT id INTO v_mtp_line FROM e520_lines WHERE batch_id = v_batch2 AND service_code = 'MTP' AND action <> 'remove';
     v_msg := NULL;
     BEGIN
       PERFORM public.e520_release_line(v_sln_line, 'Paid by CAPS', 'self-test');
     EXCEPTION WHEN raise_exception THEN v_msg := SQLERRM;
     END;
-    v_n := public.e520_release_line(v_sln_line, 'Denied by SC', 'self-test');
-    v_res := v_res || jsonb_build_array(jsonb_build_array(12, 'T12 release: Paid by CAPS refused; Denied by SC returns its notes',
+    v_n  := public.e520_release_line(v_sln_line, 'Denied by SC', 'self-test');
+    v_n2 := public.e520_release_line(v_mtp_line, 'Denied by SC', 'self-test');
+    v_res := v_res || jsonb_build_array(jsonb_build_array(13, 'T13 release: Paid by CAPS refused; SLN notes return; MTP release leaves the DSG note billed',
                        CASE WHEN v_msg LIKE 'Only a line UPI has closed%' THEN 'live status refused' ELSE 'LIVE STATUS: ' || coalesce(v_msg, 'accepted') END
-                       || '; ' || v_n || ' returned to approved',
-                       'live status refused; 3 returned to approved'));
+                       || '; SLN ' || v_n || ' returned; MTP ' || v_n2 || ' returned',
+                       'live status refused; SLN 2 returned; MTP 0 returned'));
 
-    -- T13: a supplemental claims only what no live line holds
+    -- ── T14: a supplemental claims only what no live line holds ──
+    v_step := 'T14 supplemental';
     v_batch3 := public.e520_build('selftest-2.csv', v_csv, v_org);
     SELECT 'seq ' || b.seq || '; ' || string_agg(l.service_code || ' ' || l.line_number || ':' || to_char(l.start_date, 'MM/DD') || '-' || to_char(l.end_date, 'MM/DD') || '=' || l.units, ', ' ORDER BY l.ord)
       INTO v_txt
       FROM e520_batches b JOIN e520_lines l ON l.batch_id = b.id
      WHERE b.id = v_batch3 AND l.action <> 'remove' GROUP BY b.seq;
-    v_res := v_res || jsonb_build_array(jsonb_build_array(13, 'T13 supplemental: released SLN reclaimed, billed HHS days skipped, new HHS note billed', v_txt,
-                       'seq 2; SLN 1:01/01-01/09=10, HHS 2:01/11-01/31=1'));
+    v_res := v_res || jsonb_build_array(jsonb_build_array(14, 'T14 supplemental: SLN reclaimed, billed days skipped, new HHS day billed, MTP reclaimed from the billed DSG note', v_txt,
+                       'seq 2; SLN 1:01/01-01/04=2, HHS 2:01/11-01/31=1, MTP 5:01/11-01/31=1'));
 
-    -- T14: the D3 guards and the tier gate
+    -- ── T15: the D3 guards and the tier gate ──
+    v_step := 'T15 guards';
     v_msg := NULL;
     BEGIN
       PERFORM public.e520_build('bad.csv', v_hdr || E'\r\n' || replace(v_l1, '099999999', '99999999'), v_org);
@@ -1181,23 +1347,35 @@ BEGIN
       IF SQLERRM <> 'v20024_rollback' THEN RAISE; END IF;
     END;
     v_txt := v_txt || '; ' || CASE WHEN v_msg LIKE 'Only an owner, admin or compliance director%' THEN 'non-manage refused' ELSE 'GATE: ' || coalesce(v_msg, 'accepted') END;
-    v_res := v_res || jsonb_build_array(jsonb_build_array(14, 'T14 guards: PID without its zero, quoted fields, a non-manage caller', v_txt,
+    v_res := v_res || jsonb_build_array(jsonb_build_array(15, 'T15 guards: PID without its zero, quoted fields, a non-manage caller', v_txt,
                        'PID refused; quotes refused; non-manage refused'));
 
-    v_res := v_res || jsonb_build_array(jsonb_build_array(15, 'T15 rounding spot checks (127, 40, 7, 8 minutes)',
+    v_res := v_res || jsonb_build_array(jsonb_build_array(16, 'T16 rounding spot checks (127, 40, 7, 8 minutes)',
                        public.e520_round_q(127) || ',' || public.e520_round_q(40) || ',' || public.e520_round_q(7) || ',' || public.e520_round_q(8),
                        '8,3,0,1'));
 
     RAISE EXCEPTION 'v20024_rollback';                          -- undo the whole synthetic month
   EXCEPTION WHEN others THEN
     IF SQLERRM <> 'v20024_rollback' THEN
-      v_res := v_res || jsonb_build_array(jsonb_build_array(99, 'self-test stopped early', SQLERRM, '(this row should not appear)'));
+      v_res := v_res || jsonb_build_array(jsonb_build_array(99, 'self-test stopped early', 'at ' || v_step || ': ' || SQLERRM, '(this row should not appear)'));
     END IF;
   END;
+
+  -- r1: a failing or unfinished self-test rolls the whole file back
+  SELECT string_agg(format('check %s got [%s], want [%s]', e->>0, coalesce(e->>2, 'NULL'), e->>3), ' | ' ORDER BY (e->>0)::integer)
+    INTO v_fail
+    FROM jsonb_array_elements(v_res) AS e
+   WHERE (e->>2) IS DISTINCT FROM (e->>3);
+  IF v_fail IS NOT NULL OR jsonb_array_length(v_res) <> 16 THEN
+    RAISE EXCEPTION 'v20.0.24 self-test failed, so nothing in this file was applied: %',
+      coalesce(v_fail, format('%s of 16 checks ran', jsonb_array_length(v_res)));
+  END IF;
 
   INSERT INTO v20024_selftest (n, item, value, want)
   SELECT (e->>0)::integer, e->>1, e->>2, e->>3 FROM jsonb_array_elements(v_res) AS e;
 END $$;
+
+DROP FUNCTION IF EXISTS pg_temp.e520_test_insert(text, jsonb);
 
 COMMIT;
 
