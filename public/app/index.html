@@ -14,6 +14,10 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.23a r3 (Greptile r3): Approve Submitted always loads for the filter on screen now — the reload after an approval reads the current client and month, not the ones in place when Approve was clicked, so changing filters mid-approval can't strand the list; and if the list ever is out of date with nothing loading, it offers Reload instead of sitting on "Loading…". -->
+  <!-- v20.0.23a r2 (Greptile r2): the database also refuses reassigning a note to yourself, and a submit unless you were the author before and after the update (sql/v20.0.23a-r2.sql). Approve Submitted: selections survive filter changes (only what is on screen is sent; approved or skipped notes leave the selection), and while a new filter's notes load, the old list is inert and Approve is disabled — nothing outside the filter you chose can be approved. -->
+  <!-- v20.0.23a r1 (Greptile r1; decision A — only a note's author submits it): the database refuses a submit by anyone but the note's primary staff member (sql/v20.0.23a-r1.sql); the form offers Submit only when you are the author, the detail view's Submit and Edit's "submitted" status follow the same rule, and office-entered notes for others are approved from the note itself as before. Approve Submitted: only the first load selects everything — a reload after approving keeps your choices and never selects for you; client and month lists come from every submitted note, and the filters run in the database, so a client's or month's notes appear however far back they sit. -->
+  <!-- v20.0.23a (bulk approve; decision C): the new-note form saves as "Save Draft" or "Submit" — Submit is the author's statement the note is complete, and a draft's author can Submit it from its detail view. Office tiers get "Approve Submitted" on Service Notes: submitted notes only, filter by client and month, select, approve in one database call (approve_service_notes — one transaction; the approved-note lock stamps approved_by / approved_at on each). sql/v20.0.23a.sql runs first. -->
   <!-- v20.0.23r1 (Greptile r1): the Billing estimate applies D5 per day — quarter-hour notes for one client, code, day and status are rounded as one total, each note showing its running-total share, so the rows add up to the day's units; the note form's Duration / Units preview uses the same nearest-quarter-hour rounding the save stores; MTP can't be chosen when editing a note either (an existing MTP note keeps its code and stays readable), and a new stand-alone MTP note is refused at save. -->
   <!-- v20.0.23 (e520 arc PR 1 — recording pieces, docs/e520-design.md §3; D5/D6/D7): client profiles gain an Absences tab (from, last day away or ongoing, reason Family / Vacation / Hospital / AWOL / Jail / Other with a required note; office tiers record, front-line logins read; overlaps refused by the database). DSG notes carry "Transported (MTP)", preset to and from — MTP bills from that answer, so MTP leaves the new-note code picker. Quarter-hour units round to the nearest quarter hour (8+ leftover minutes earn a unit) instead of always up — note saves, the notes list and the Billing estimate. sql/v20.0.23.sql runs first. -->
   <!-- v20.0.22r1 (Greptile r1): the draft line says when only the latest notes were used ("the latest 200 of N"). ai-draft r1: audit row written before anything is sent (fail closed), newest notes kept over the cap, provider errors logged as status only. -->
@@ -1794,7 +1798,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.23</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.23a</span>
               </div>
             </div>
             {isMobile && (
@@ -6057,6 +6061,7 @@
       const localToday = () => ymd(); // v20.0.14 — one helper app-wide
       const perms = usePermissions();
       const [saving, setSaving] = useState(false);
+      const savingRef = useRef(false); // v20.0.23a — synchronous guard behind the two save buttons
       const [staffList, setStaffList] = useState([]);
       const [clients, setClients] = useState([]);
       const [serviceCodes, setServiceCodes] = useState([]);
@@ -6246,7 +6251,11 @@
 
       const dynamicFields = SERVICE_NOTE_FIELDS[selectedCode] || [];
 
-      const handleSave = async () => {
+      const handleSave = async (submitAs = "draft") => { // v20.0.23a — "draft" or "submitted" (the author's Submit)
+        if (savingRef.current) return; // v20.0.23a — two buttons now; one save at a time
+        if (submitAs === "submitted" && !(staffProfile?.id && form.staff_id === staffProfile.id)) { // v20.0.23a r1 (A)
+          return addToast("Only the note's author can submit it", "error");
+        }
         if (!form.staff_id || !form.person_id || !form.service_code_id || !form.service_date) {
           return addToast("Primary staff, client, service code, and date are required", "error");
         }
@@ -6268,7 +6277,7 @@
         if (!codeIsCurrent && !codeViaContext && !(showAllCodes && !frontLine)) {
           return addToast("That service code is not authorized for this client on the service date", "error");
         }
-        setSaving(true);
+        savingRef.current = true; setSaving(true);
         // Calculate duration
         let duration_minutes = null;
         if (form.start_time && form.end_time) {
@@ -6307,7 +6316,7 @@
           duration_minutes,
           billable_units: calculateBillableUnits(selectedCode, duration_minutes),
           summary_note: fullNote,
-          status: "draft",
+          status: submitAs === "submitted" ? "submitted" : "draft", // v20.0.23a
           transport: selectedCode === "DSG" ? (form.transport || "to_and_from") : null, // v20.0.23 (e520 D6) — the database presets and enforces the same
         };
         if (form.goal_id) insertPayload.goal_id = form.goal_id;
@@ -6334,9 +6343,9 @@
           }
         }
 
-        setSaving(false);
+        savingRef.current = false; setSaving(false);
         if (error) return addToast(error.message, "error");
-        addToast(form.co_staff_ids.length > 0 ? `Service note saved with ${allStaffIds.length} staff` : "Service note saved", "success");
+        addToast(`${submitAs === "submitted" ? "Service note submitted for review" : "Draft saved"}${form.co_staff_ids.length > 0 ? ` — ${allStaffIds.length} staff` : ""}`, "success"); // v20.0.23a
         onSaved();
         onClose();
       };
@@ -6634,8 +6643,235 @@
 
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 8 }}>
             <SecondaryButton onClick={onClose}>Cancel</SecondaryButton>
-            <PrimaryButton onClick={handleSave} loading={saving}>{icons.save({ size: 16 })} Save Note</PrimaryButton>
+            {/* v20.0.23a (C) — Submit says the note is complete; only submitted notes can be bulk-approved */}
+            {(() => { // v20.0.23a r1 (A) — only the note's author submits it; the database enforces the same
+              const isAuthor = !!staffProfile?.id && form.staff_id === staffProfile.id;
+              return isAuthor ? (
+                <>
+                  <SecondaryButton onClick={() => handleSave("draft")}>Save Draft</SecondaryButton>
+                  <PrimaryButton onClick={() => handleSave("submitted")} loading={saving}>{icons.checkCircle({ size: 16 })} Submit</PrimaryButton>
+                </>
+              ) : (
+                <>
+                  <span style={{ alignSelf: "center", fontSize: 12, color: CB.textLight }}>Only the note's author can submit it</span>
+                  <PrimaryButton onClick={() => handleSave("draft")} loading={saving}>{icons.save({ size: 16 })} Save Draft</PrimaryButton>
+                </>
+              );
+            })()}
           </div>
+        </Modal>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // v20.0.23a (C) — APPROVE SUBMITTED. Office tiers approve the notes their
+    // authors submitted: filter by client and month, select, approve in one
+    // database call (approve_service_notes — one transaction; the approved-note
+    // lock stamps approved_by / approved_at on each note). Drafts never appear:
+    // only the author's Submit says a note is complete (r1: the database refuses
+    // anyone else's submit).
+    // r1 — selection: only the FIRST load in a session starts everything
+    // selected; later loads never select for you. Filters: client and month
+    // lists come from every submitted note, and the filters run in the
+    // database, so nothing hides behind the row cap.
+    // r2 — selections survive filter changes (only on-screen notes are sent;
+    // sent notes leave the selection). Rows are stamped with the filter they
+    // were loaded for: until the current filter's rows arrive, the list is
+    // inert and Approve is disabled, so a stale list can never be approved.
+    // ═══════════════════════════════════════════════════════════════
+    function ApproveSubmittedModal({ open, onClose, onApproved }) {
+      const { addToast } = useToast();
+      const [rows, setRows] = useState([]);
+      const [loadedOnce, setLoadedOnce] = useState(false);
+      const [loadError, setLoadError] = useState(null);   // a failed read is an error, never "nothing waiting"
+      const [facets, setFacets] = useState({ clients: [], months: [] });
+      const [facetError, setFacetError] = useState(null);
+      const [selected, setSelected] = useState(() => new Set());
+      const [filterClient, setFilterClient] = useState("");
+      const [filterMonth, setFilterMonth] = useState("");
+      const [approving, setApproving] = useState(false);
+      const [rowsKey, setRowsKey] = useState(null);         // r2 — the filter the shown rows were loaded for
+      const [loadingRows, setLoadingRows] = useState(false); // r3 — a row load is in flight
+      const filtersRef = useRef({ client: "", month: "" }); // r3 — always the filters on screen, for any caller
+      filtersRef.current = { client: filterClient, month: filterMonth };
+      const loadSeq = useRef(0);
+      const facetSeq = useRef(0);
+      const firstLoadDone = useRef(false);                  // r1 — select-all happens once per session
+      const LIMIT = 1000;
+
+      const monthBounds = (ym) => {
+        const [y, m] = ym.split("-").map(Number);
+        const next = m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, "0")}-01`;
+        return [`${ym}-01`, next];
+      };
+
+      const loadFacets = async () => {
+        const seq = ++facetSeq.current;
+        setFacetError(null);
+        const { data, error } = await supabase.from("service_notes")
+          .select("person_id, service_date, persons(first_name, last_name)")
+          .eq("status", "submitted")
+          .limit(20000);
+        if (seq !== facetSeq.current) return;
+        if (error) { setFacetError(error.message || "request failed"); return; } // keep the last good lists
+        const people = new Map();
+        const months = new Set();
+        (data || []).forEach(r => {
+          if (r.person_id) people.set(r.person_id, `${r.persons?.first_name || ""} ${r.persons?.last_name || ""}`.trim() || "—");
+          if (r.service_date) months.add(r.service_date.slice(0, 7));
+        });
+        setFacets({
+          clients: [...people.entries()].sort((a, b) => a[1].localeCompare(b[1])),
+          months: [...months].sort(),
+        });
+      };
+
+      const load = async () => {
+        const seq = ++loadSeq.current;
+        const { client: fClient, month: fMonth } = filtersRef.current; // r3 — the filters on screen now, not when the caller was created
+        const key = `${fClient}|${fMonth}`;                 // r2
+        setLoadError(null);
+        setLoadingRows(true);
+        let q = supabase.from("service_notes")
+          .select("id, service_date, start_time, end_time, duration_minutes, summary_note, person_id, persons(first_name, last_name), staff!service_notes_staff_id_fkey(first_name, last_name), service_code_definitions(code)")
+          .eq("status", "submitted");
+        if (fClient) q = q.eq("person_id", fClient);
+        if (fMonth) { const [from, to] = monthBounds(fMonth); q = q.gte("service_date", from).lt("service_date", to); }
+        const { data, error } = await q.order("service_date", { ascending: true }).limit(LIMIT);
+        if (seq !== loadSeq.current) return;                // superseded (filters changed, reopened, reloaded)
+        setLoadedOnce(true);
+        setLoadingRows(false);
+        if (error) { setLoadError(error.message || "request failed"); return; } // keep the last good list
+        const list = data || [];
+        setRows(list);
+        setRowsKey(key);                                    // r2 — these rows belong to this filter
+        if (!firstLoadDone.current) {                       // first load of this session: everything shown starts selected
+          firstLoadDone.current = true;
+          setSelected(new Set(list.map(r => r.id)));
+        }                                                   // later loads: the selection is left exactly as you made it
+      };
+
+      useEffect(() => {
+        if (!open) return;
+        firstLoadDone.current = false;
+        setRows([]); setRowsKey(null); setLoadingRows(false); setLoadedOnce(false); setSelected(new Set());
+        setFilterClient(""); setFilterMonth("");
+        setFacets({ clients: [], months: [] });
+        loadFacets();
+      }, [open]);
+      useEffect(() => { if (open) load(); }, [open, filterClient, filterMonth]);
+
+      const clientName = (r) => `${r.persons?.first_name || ""} ${r.persons?.last_name || ""}`.trim() || "—";
+      const monthLabel = (ym) => { const [y, m] = ym.split("-").map(Number); return new Date(y, m - 1, 1).toLocaleString(undefined, { month: "long", year: "numeric" }); };
+      const rowsCurrent = rowsKey === `${filterClient}|${filterMonth}`; // r2 — false while a new filter loads
+      const chosen = rowsCurrent ? rows.filter(r => selected.has(r.id)) : []; // only current, on-screen notes are ever sent
+      const allShownChosen = rowsCurrent && rows.length > 0 && chosen.length === rows.length;
+
+      const toggle = (id) => setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+      const toggleAllShown = () => rowsCurrent && setSelected(prev => {
+        const n = new Set(prev);
+        if (allShownChosen) rows.forEach(r => n.delete(r.id)); else rows.forEach(r => n.add(r.id));
+        return n;
+      });
+
+      const approve = async () => {
+        if (approving) return;
+        if (!rowsCurrent) return addToast("Still loading the notes for this filter", "error"); // r2
+        const ids = chosen.map(r => r.id);
+        if (ids.length === 0) return addToast("Select at least one note", "error");
+        if (ids.length > 500) return addToast("Approve up to 500 notes at a time — filter by client or month", "error");
+        if (!confirm(`Approve ${ids.length} submitted note${ids.length === 1 ? "" : "s"}?\n\nApproved notes are locked. Changing one later needs a Reopen, which is recorded in the audit log.`)) return;
+        setApproving(true);
+        const { data, error } = await supabase.rpc("approve_service_notes", { p_note_ids: ids });
+        setApproving(false);
+        if (error) return addToast(error.message, "error");
+        setSelected(prev => { const next = new Set(prev); ids.forEach(id => next.delete(id)); return next; }); // r2 — sent notes leave the selection
+        const r = Array.isArray(data) ? data[0] : data;
+        const n = r?.approved ?? 0, sk = r?.skipped ?? 0;
+        addToast(`Approved ${n} note${n === 1 ? "" : "s"}${sk ? ` — ${sk} skipped (no longer submitted, or outside what you can approve)` : ""}`, n > 0 ? "success" : "warning");
+        if (onApproved) onApproved();
+        setRowsKey(null);                                   // r2 — the list is inert until the fresh rows arrive
+        load();
+        loadFacets();
+      };
+
+      const fmtD = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString() : "—";
+      const selStyle = { ...fieldStyle, padding: "7px 12px", fontSize: 13, width: "auto", minWidth: 160 };
+      const nothingWaiting = !loadError && !facetError && !filterClient && !filterMonth && rows.length === 0;
+
+      return (
+        <Modal open={open} onClose={onClose} title="Approve Submitted Notes" subtitle="Only notes their authors submitted appear here. Drafts stay with their authors." width={860}>
+          {!loadedOnce ? (
+            <div style={{ display: "flex", justifyContent: "center", padding: 50 }}><Spinner size={24} /></div>
+          ) : (
+            <div>
+              {(loadError || facetError) && (
+                <div role="alert" style={{ padding: "12px 14px", borderRadius: 10, border: `1px solid ${CB.red}`, color: CB.red, fontSize: 13, marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+                  <span>Couldn't load submitted notes ({loadError || facetError}).</span>
+                  <SecondaryButton onClick={() => { load(); loadFacets(); }}>Retry</SecondaryButton>
+                </div>
+              )}
+              {nothingWaiting ? (
+                <div style={{ padding: "18px 16px", borderRadius: 12, border: `1px dashed ${CB.border}`, color: CB.textLight, fontSize: 13, textAlign: "center" }}>
+                  No submitted notes waiting for approval.
+                </div>
+              ) : (
+                <>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
+                    <select value={filterClient} onChange={e => setFilterClient(e.target.value)} style={selStyle}>
+                      <option value="">All clients</option>
+                      {facets.clients.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+                    </select>
+                    <select value={filterMonth} onChange={e => setFilterMonth(e.target.value)} style={selStyle}>
+                      <option value="">All months</option>
+                      {facets.months.map(ym => <option key={ym} value={ym}>{monthLabel(ym)}</option>)}
+                    </select>
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: CB.textMid, cursor: "pointer" }}>
+                      <input type="checkbox" checked={allShownChosen} onChange={toggleAllShown} disabled={!rowsCurrent || rows.length === 0} /> Select all shown
+                    </label>
+                    {rowsCurrent ? (
+                      <span style={{ fontSize: 12, color: CB.textMid }}>{chosen.length} of {rows.length} selected</span>
+                    ) : (loadingRows || loadError) ? (
+                      <span style={{ fontSize: 12, color: CB.textMid }}>{loadingRows ? "Loading…" : "Not loaded"}</span>
+                    ) : (
+                      <SecondaryButton onClick={load}>Reload</SecondaryButton>   /* r3 — out of date with nothing loading: never a dead end */
+                    )}
+                  </div>
+                  {rows.length >= LIMIT && (
+                    <div style={{ fontSize: 12, color: CB.amber, marginBottom: 8 }}>Showing the oldest {LIMIT.toLocaleString()} that match — narrow by client or month to see the rest.</div>
+                  )}
+                  <div aria-busy={!rowsCurrent} style={{ maxHeight: "50vh", overflowY: "auto", display: "grid", gap: 6, paddingRight: 4, opacity: rowsCurrent ? 1 : 0.45, pointerEvents: rowsCurrent ? "auto" : "none" }}>
+                    {rows.map(r => (
+                      <label key={r.id} style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "9px 12px", borderRadius: 8, border: `1px solid ${selected.has(r.id) ? CB.teal : CB.border}`, fontSize: 13, cursor: "pointer" }}>
+                        <input type="checkbox" checked={selected.has(r.id)} onChange={() => toggle(r.id)} disabled={!rowsCurrent} style={{ marginTop: 3 }} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                            <span style={{ fontWeight: 700, color: CB.navy }}>{fmtD(r.service_date)}</span>
+                            <span style={{ fontWeight: 600 }}>{clientName(r)}</span>
+                            <Badge text={r.service_code_definitions?.code || "?"} color={CB.blue} />
+                            <span style={{ color: CB.textMid }}>by {r.staff ? `${r.staff.first_name} ${r.staff.last_name}` : "—"}</span>
+                            {r.start_time && r.end_time && <span style={{ color: CB.textLight }}>{r.start_time.slice(0, 5)}–{r.end_time.slice(0, 5)}</span>}
+                          </div>
+                          {r.summary_note && (
+                            <div style={{ color: CB.textLight, fontSize: 12, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.summary_note.replace(/\s+/g, " ").slice(0, 160)}</div>
+                          )}
+                        </div>
+                      </label>
+                    ))}
+                    {!loadError && rowsCurrent && rows.length === 0 && <div style={{ padding: 14, color: CB.textLight, fontSize: 13 }}>No submitted notes match these filters.</div>}
+                  </div>
+                </>
+              )}
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 14 }}>
+                <SecondaryButton onClick={onClose}>Close</SecondaryButton>
+                {rows.length > 0 && (
+                  <PrimaryButton onClick={approve} loading={approving} disabled={!rowsCurrent || chosen.length === 0}>
+                    {icons.checkCircle({ size: 15 })} Approve {chosen.length} note{chosen.length === 1 ? "" : "s"}
+                  </PrimaryButton>
+                )}
+              </div>
+            </div>
+          )}
         </Modal>
       );
     }
@@ -6654,7 +6890,9 @@
       const [filterCode, setFilterCode] = useState("");
       const { addToast } = useToast();
       const perms = usePermissions();
-      const { accessTier } = useAuth(); // v20.0.20 — delete is manage-tier
+      const { accessTier, staffProfile } = useAuth(); // v20.0.20 — delete is manage-tier; v20.0.23a — a draft's author may Submit
+      const canApprove = accessTier === "manage" || accessTier === "operate"; // v20.0.23a — bulk approve
+      const [approveOpen, setApproveOpen] = useState(false);
 
       useEffect(() => {
         loadNotes();
@@ -6911,8 +7149,14 @@
       return (
         <div>
           <PageHeader title="Service Notes" subtitle="Dynamic documentation forms per service code — click any note to view or edit"
-            action={<PrimaryButton onClick={() => setFormOpen(true)}>{icons.plus({ size: 16 })} New Service Note</PrimaryButton>}
+            action={
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {canApprove && <SecondaryButton onClick={() => setApproveOpen(true)}>{icons.checkCircle({ size: 14 })} Approve Submitted</SecondaryButton>}
+                <PrimaryButton onClick={() => setFormOpen(true)}>{icons.plus({ size: 16 })} New Service Note</PrimaryButton>
+              </div>
+            }
           />
+          {canApprove && <ApproveSubmittedModal open={approveOpen} onClose={() => setApproveOpen(false)} onApproved={loadNotes} />}
 
           {/* Filter + view toggle toolbar */}
           <div style={{
@@ -7056,7 +7300,7 @@
                     </span>
                   </div>
                   <div style={{ display: "flex", gap: 6 }}>
-                    {!editing && statusFlow[viewing.status] && perms.viewCompliance && (
+                    {!editing && statusFlow[viewing.status] && (statusFlow[viewing.status] === "submitted" ? (!!staffProfile?.id && viewing.staff_id === staffProfile.id) : perms.viewCompliance) && ( /* v20.0.23a r1 (A) — Submit is the author's; Approve is compliance's */
                       <button onClick={() => updateStatus(viewing.id, statusFlow[viewing.status])} style={{
                         padding: "6px 12px", borderRadius: 8, border: "none", fontSize: 12, fontWeight: 700,
                         background: CB.green, color: CB.white, cursor: "pointer", fontFamily: "inherit",
@@ -7102,7 +7346,10 @@
                       </FormField>
                       <FormField label="Status" half style={{ marginBottom: 0 }}>
                         <select style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} value={editForm.status} onChange={e => setEditForm(p => ({ ...p, status: e.target.value }))}>
-                          {["draft", "submitted", "approved", "rejected"].filter(s => s !== "approved" || perms.viewCompliance).map(s => <option key={s} value={s}>{s}</option>)}
+                          {["draft", "submitted", "approved", "rejected"]
+                            .filter(s => s !== "approved" || perms.viewCompliance)
+                            .filter(s => s !== "submitted" || viewing.status === "submitted" || (!!staffProfile?.id && viewing.staff_id === staffProfile.id)) /* v20.0.23a r1 (A) */
+                            .map(s => <option key={s} value={s}>{s}</option>)}
                         </select>
                       </FormField>
                     </>
