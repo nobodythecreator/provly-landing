@@ -1,6 +1,8 @@
-# Provly — UPI e520 payment file · design v1.0
+# Provly — UPI e520 payment file · design v1.1
 
-Status: **for approval** · Sep 25 2026 · Tier 3 arc "Billing: UPI e520 payment-file export" · commits as `docs/e520-design.md` with PR 1.
+Status: **approved** (v1.0 Sep 25; v1.1 Sep 26 records what the build settled) · Tier 3 arc "Billing: UPI e520 payment-file export" · `docs/e520-design.md`.
+
+**v1.1 changes:** October is the shadow run (§9); the RPCs are SECURITY DEFINER and the e520 tables are read-only to clients (§6–§7); how caps and reservations behave day by day (§5.4); authorization trims use any Provly authorization on file (§5.3); HAP and unsupported unit types (§8); the author-only Submit and bulk approve from v20.0.23a (§2); known limits (§11).
 
 ## 1. What it does
 
@@ -19,6 +21,7 @@ At month end the office downloads the invoice from UPI, saves it from Excel as C
 | D7 | Absences | Recorded on the client: from, to, reason (Family / Vacation / Hospital / AWOL / Jail / Other with required text). An absence splits every line that person has |
 | D8 | When a note is billed | At "Mark uploaded". A batch is one uploaded file; supplementals allowed; status after upload lives on the line; a dead UPI status releases that line's notes |
 | D9 | Signature | `provider_approver_email` passes through from the download; one email per file; Provly logs who marked the batch uploaded |
+| — | Approval (v20.0.23a) | Only a note's author can Submit it (database-enforced, including no reassigning a note to yourself); office tiers bulk-approve submitted notes only. Office-entered notes for others are approved one at a time from the note |
 
 ## 3. Recording pieces (they must exist during the month they bill)
 
@@ -99,7 +102,7 @@ Every type is 0 on a day inside a recorded absence. Rounding is `floor(m/15) + (
 
 ### 5.3 Date ranges
 
-The downloaded span passes through unless a residential placement starts or ends inside it (trim), the authorization starts or ends inside it (trim), or an absence falls inside it (split). A split keeps the original line number on its first part; later parts take the next numbers after the file's highest. A part with 0 units is dropped. Dates Provly writes use UPI's own form, mm/dd/yyyy.
+The downloaded span passes through unless a residential placement (RHS, HHS, PPS) starts or ends inside it (trim), the authorization starts or ends inside it (trim), or an absence falls inside it (split). The authorization trim uses every Provly authorization on file for that client and code that overlaps the span, whatever its status; with none on file the span is left alone and the line is flagged, because UPI's line is the authority. A split keeps the original line number on its first part; later parts take the next numbers after the file's highest. A part with 0 units is dropped. Dates Provly writes use UPI's own form, mm/dd/yyyy.
 
 ### 5.4 Caps and flags
 
@@ -115,6 +118,8 @@ The downloaded span passes through unless a residential placement starts or ends
 | Residential day with neither note nor absence | day not billed | document the day or record the absence |
 | Approved notes with no UPI line | not in the file | delivered but not in the budget |
 
+Caps are applied day by day in date order. A day that bills anything reserves all of its notes, so a note's minutes can never be counted again; days beyond the cap reserve nothing and stay free for a supplemental once the SC raises the max. A day that bills nothing (for example a missing EVV visit) reserves nothing, so a corrected EVV can bill it later.
+
 ### 5.5 Writing the file
 
 The database writes the export from the stored lines: UTF-8 BOM, CRLF, no newline after the last row (the byte shape of every accepted file), raw values verbatim, and new text only for units, changed dates and new line numbers. The filename is the month (YYYY-MM) plus the org name in letters and digits plus `.csv`, with `-2`, `-3` for supplementals. Export text and its SHA-256 are stored on the batch.
@@ -129,11 +134,11 @@ The database writes the export from the stored lines: UTF-8 BOM, CRLF, no newlin
 | `e520_set_upi_record(batch, id)` | Records UPI's Payment File Record ID later |
 | `e520_release_line(line, upi_status, reason)` | Only for dead statuses: Deleted, Denied by SC, Denied by DSPD, Error by CAPS, Rejected by CAPS. Each note returns to approved unless another live uploaded line still holds it; audit `e520_line_released` |
 
-The billed lock extends the v20.0.13 lock: billed is locked like approved, has no Reopen, and cannot be deleted (v20.0.20 already refuses). Only `e520_mark_uploaded` moves a note into billed and only `e520_release_line` moves it out. Every RPC is one transaction, manage tier, SECURITY INVOKER, and uses audit action names of 20 characters or fewer (`audit_log.action` is VARCHAR(20)).
+The billed lock extends the v20.0.13 lock: billed is locked like approved, has no Reopen, and cannot be deleted (v20.0.20 already refuses). Only `e520_mark_uploaded` moves a note into billed and only `e520_release_line` moves it out. Every RPC is one transaction and manage tier. They are SECURITY DEFINER with explicit tier and organization checks, and every query inside is scoped to the batch's organization; the e520 tables have no client write policies, so the RPCs are the only way in. Audit action names are 20 characters or fewer (`audit_log.action` is VARCHAR(20)): `e520_built`, `e520_uploaded`, `e520_line_released`, `e520_draft_deleted`, `e520_record_set`.
 
 ## 7. Access
 
-Batches, lines and line-notes are manage tier only (owner, admin, compliance director), because they carry rates, PIDs and the state signature. Absences follow §3.1. Transport is set by whoever writes the DSG note.
+Batches, lines and line-notes are readable by the manage tier only (owner, admin, compliance director), because they carry rates, PIDs and the state signature; nobody writes them except through the RPCs. Absences follow §3.1. Transport is set by whoever writes the DSG note.
 
 ## 8. Defaults to confirm
 
@@ -144,17 +149,25 @@ Batches, lines and line-notes are manage tier only (owner, admin, compliance dir
 | A monthly code (HAP) bills 1 unit if any approved note falls in the span | Depends on how HAP is documented |
 | Units above the monthly max are capped and flagged rather than sent for UPI to error | Keeps the file clean; the flag carries the Notify-SC step |
 | D5 rounding, and whether MTP needs a separate trip log | Siamon to confirm against the DSPD contract before the first real upload |
+| HAP is not in Provly's service code table | Until it is added (its name and documentation are needed), a HAP line is removed with "isn't set up in Provly" and filled by hand |
+| Unit types other than Q, D and M | Removed with "fill this line by hand" until a real file shows one |
 
 ## 9. Delivery
 
 | PR | Version | Scope |
 |---|---|---|
-| 1 | v20.0.23 (SQL + app) | `person_absences` + client-profile Absences tab; `service_notes.transport` + DSG field (preset) + backfill; MTP out of the new-note picker; the Billing page estimate moves to D5 (the round-up goes) |
-| 2 | v20.0.24 (SQL only) | e520 tables, engine, RPCs, billed lock; verification table pasted in chat before merge |
+| 1 | v20.0.23 (SQL + app) ✅ | `person_absences` + client-profile Absences tab; `service_notes.transport` + DSG field (preset); MTP out of the note pickers; nearest-quarter-hour rounding, per day in the Billing estimate |
+| 1a | v20.0.23a (SQL + app) ✅ | Save Draft / Submit; author-only Submit; Approve Submitted (bulk) |
+| 2 | v20.0.24 (SQL only) | e520 tables, engine, RPCs, billed lock; a synthetic end-to-end self-test in the verification table |
+| 2a | v20.0.24a (SQL) | Authorization used units follow D5 and recompute on every status change (§11) |
 | 3 | v20.0.25 (app) | Billing → UPI e520: upload, review (flags, removed lines, not in budget), download, Mark uploaded, release a line; compliance deadline D23 text "PRISM" → UPI |
 
-Recording ships first because absences and transport must be captured during the month they bill. Verification: September runs as a shadow — Provly builds a file from the September download, and it is compared line by line with the hand-made September file before that one is uploaded; every difference gets explained (September predates absences and transport, so the comparison also shows what they change). October is the first Provly-built upload, early November.
+Recording ships first because absences and transport must be captured during the month they bill. Verification: **October is the shadow run and the gate** — September's notes are still in Google Drive. Provly builds October's file from the October download, it is compared line by line with the hand-made October file, and Provly's is uploaded (early November) only if every difference is explained. October needs every billable day documented, submitted and approved in Provly.
 
 ## 10. Later: payment reconciliation (Tier 3)
 
 Import the E520 Payment File Report's detail XLSX per status to set `upi_status` on every line, joined on the batch's `upi_file_record_id`; then the payment reports and deposits give expected (rate × units) against received. Needs one masked "Paid by CAPS" detail XLSX. Finance → Import UPI stays until this replaces it.
+
+## 11. Known limits in v1
+
+The authorization used-units counter (`update_authorization_units`, older than this arc) sums each approved or billed note's stored units, so a day split across notes counts more than D5 bills, older notes carry round-up units, and a reopened note is not taken back out until another note on that authorization is approved. It runs with the approver's access, so an approval by a login that can't update authorizations leaves the counter unchanged. It does not affect the payment file. v20.0.24a moves it onto D5 and recomputes it on every status change.
