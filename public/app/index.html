@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.23a r3 (Greptile r3): Approve Submitted always loads for the filter on screen now — the reload after an approval reads the current client and month, not the ones in place when Approve was clicked, so changing filters mid-approval can't strand the list; and if the list ever is out of date with nothing loading, it offers Reload instead of sitting on "Loading…". -->
   <!-- v20.0.23a r2 (Greptile r2): the database also refuses reassigning a note to yourself, and a submit unless you were the author before and after the update (sql/v20.0.23a-r2.sql). Approve Submitted: selections survive filter changes (only what is on screen is sent; approved or skipped notes leave the selection), and while a new filter's notes load, the old list is inert and Approve is disabled — nothing outside the filter you chose can be approved. -->
   <!-- v20.0.23a r1 (Greptile r1; decision A — only a note's author submits it): the database refuses a submit by anyone but the note's primary staff member (sql/v20.0.23a-r1.sql); the form offers Submit only when you are the author, the detail view's Submit and Edit's "submitted" status follow the same rule, and office-entered notes for others are approved from the note itself as before. Approve Submitted: only the first load selects everything — a reload after approving keeps your choices and never selects for you; client and month lists come from every submitted note, and the filters run in the database, so a client's or month's notes appear however far back they sit. -->
   <!-- v20.0.23a (bulk approve; decision C): the new-note form saves as "Save Draft" or "Submit" — Submit is the author's statement the note is complete, and a draft's author can Submit it from its detail view. Office tiers get "Approve Submitted" on Service Notes: submitted notes only, filter by client and month, select, approve in one database call (approve_service_notes — one transaction; the approved-note lock stamps approved_by / approved_at on each). sql/v20.0.23a.sql runs first. -->
@@ -6690,6 +6691,9 @@
       const [filterMonth, setFilterMonth] = useState("");
       const [approving, setApproving] = useState(false);
       const [rowsKey, setRowsKey] = useState(null);         // r2 — the filter the shown rows were loaded for
+      const [loadingRows, setLoadingRows] = useState(false); // r3 — a row load is in flight
+      const filtersRef = useRef({ client: "", month: "" }); // r3 — always the filters on screen, for any caller
+      filtersRef.current = { client: filterClient, month: filterMonth };
       const loadSeq = useRef(0);
       const facetSeq = useRef(0);
       const firstLoadDone = useRef(false);                  // r1 — select-all happens once per session
@@ -6724,16 +6728,19 @@
 
       const load = async () => {
         const seq = ++loadSeq.current;
-        const key = `${filterClient}|${filterMonth}`;       // r2
+        const { client: fClient, month: fMonth } = filtersRef.current; // r3 — the filters on screen now, not when the caller was created
+        const key = `${fClient}|${fMonth}`;                 // r2
         setLoadError(null);
+        setLoadingRows(true);
         let q = supabase.from("service_notes")
           .select("id, service_date, start_time, end_time, duration_minutes, summary_note, person_id, persons(first_name, last_name), staff!service_notes_staff_id_fkey(first_name, last_name), service_code_definitions(code)")
           .eq("status", "submitted");
-        if (filterClient) q = q.eq("person_id", filterClient);
-        if (filterMonth) { const [from, to] = monthBounds(filterMonth); q = q.gte("service_date", from).lt("service_date", to); }
+        if (fClient) q = q.eq("person_id", fClient);
+        if (fMonth) { const [from, to] = monthBounds(fMonth); q = q.gte("service_date", from).lt("service_date", to); }
         const { data, error } = await q.order("service_date", { ascending: true }).limit(LIMIT);
         if (seq !== loadSeq.current) return;                // superseded (filters changed, reopened, reloaded)
         setLoadedOnce(true);
+        setLoadingRows(false);
         if (error) { setLoadError(error.message || "request failed"); return; } // keep the last good list
         const list = data || [];
         setRows(list);
@@ -6747,7 +6754,7 @@
       useEffect(() => {
         if (!open) return;
         firstLoadDone.current = false;
-        setRows([]); setRowsKey(null); setLoadedOnce(false); setSelected(new Set());
+        setRows([]); setRowsKey(null); setLoadingRows(false); setLoadedOnce(false); setSelected(new Set());
         setFilterClient(""); setFilterMonth("");
         setFacets({ clients: [], months: [] });
         loadFacets();
@@ -6822,7 +6829,13 @@
                     <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: CB.textMid, cursor: "pointer" }}>
                       <input type="checkbox" checked={allShownChosen} onChange={toggleAllShown} disabled={!rowsCurrent || rows.length === 0} /> Select all shown
                     </label>
-                    <span style={{ fontSize: 12, color: CB.textMid }}>{rowsCurrent ? `${chosen.length} of ${rows.length} selected` : "Loading…"}</span>
+                    {rowsCurrent ? (
+                      <span style={{ fontSize: 12, color: CB.textMid }}>{chosen.length} of {rows.length} selected</span>
+                    ) : (loadingRows || loadError) ? (
+                      <span style={{ fontSize: 12, color: CB.textMid }}>{loadingRows ? "Loading…" : "Not loaded"}</span>
+                    ) : (
+                      <SecondaryButton onClick={load}>Reload</SecondaryButton>   /* r3 — out of date with nothing loading: never a dead end */
+                    )}
                   </div>
                   {rows.length >= LIMIT && (
                     <div style={{ fontSize: 12, color: CB.amber, marginBottom: 8 }}>Showing the oldest {LIMIT.toLocaleString()} that match — narrow by client or month to see the rest.</div>
