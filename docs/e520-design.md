@@ -1,6 +1,8 @@
-# Provly — UPI e520 payment file · design v1.1
+# Provly — UPI e520 payment file · design v1.2
 
-Status: **approved** (v1.0 Sep 25; v1.1 Sep 26 records what the build settled) · Tier 3 arc "Billing: UPI e520 payment-file export" · `docs/e520-design.md`.
+Status: **approved** (v1.0 Sep 25; v1.1 Sep 26 records what the build settled; v1.2 Sep 26 records the contract answers and HAP) · Tier 3 arc "Billing: UPI e520 payment-file export" · `docs/e520-design.md`.
+
+**v1.2 changes:** the four open contract questions are answered (§8); HAP has its own rule (§5.2); a rejected authorization never covers a day (§5.3); the authorization used-units counter follows D5 (§11).
 
 **v1.1 changes:** October is the shadow run (§9); the RPCs are SECURITY DEFINER and the e520 tables are read-only to clients (§6–§7); how caps and reservations behave day by day (§5.4); authorization trims use any Provly authorization on file (§5.3, day by day, gaps are breaks); caps shared across lines of the same month (§5.4); HAP and unsupported unit types (§8); the author-only Submit and bulk approve from v20.0.23a (§2); known limits (§11).
 
@@ -16,8 +18,8 @@ At month end the office downloads the invoice from UPI, saves it from Excel as C
 | D2 | What Provly may change | Only units, date ranges, removed lines and split lines. Every UPI value passes through as written: the 13-column header (incl. `monthly_max_units`), line numbers, names, PIDs, codes, rates, SCE |
 | D3 | Input | The Excel-saved CSV of the UPI download; refuse any PID that is not 9 digits with a leading 0 |
 | D4 | What proves a unit | Approved notes only. EVV-required codes need the note and an EVV visit; the lesser count is billed |
-| D5 | Quarter hours | Per person + code + day: add the minutes, round to the nearest quarter hour (8+ leftover minutes earn a unit). Default until the contract says otherwise |
-| D6 | MTP | Only on a DSG day, proven by a transport field on the DSG note preset "to and from". Stand-alone MTP notes never bill |
+| D5 | Quarter hours | Per person + code + day: add the minutes, round to the nearest quarter hour (8+ leftover minutes earn a unit). There is no written DSPD rule; this is Hope Haven's long-standing practice of billing to whatever is closest to a 15 (confirmed Sep 26) |
+| D6 | MTP | Only on a DSG day, proven by a transport field on the DSG note preset "to and from". The DSG day is the whole record: no separate trip log, and a one-way ride bills the full day. Nothing else is MTP (groceries, doctor visits). Stand-alone MTP notes never bill, and the database refuses them (confirmed Sep 26) |
 | D7 | Absences | Recorded on the client: from, to, reason (Family / Vacation / Hospital / AWOL / Jail / Other with required text). An absence splits every line that person has |
 | D8 | When a note is billed | At "Mark uploaded". A batch is one uploaded file; supplementals allowed; status after upload lives on the line; a dead UPI status releases that line's notes |
 | D9 | Signature | `provider_approver_email` passes through from the download; one email per file; Provly logs who marked the batch uploaded |
@@ -97,12 +99,13 @@ People are matched by PID against `persons.identification_number` (falling back 
 | D (daily) | 1 if an approved note for the code is dated that day (EVV-required codes: and an EVV visit that day) |
 | D, MTP | 1 if an approved DSG note that day has transport other than `none` |
 | M (monthly) | 1 per line if at least one approved note for the code is dated inside the line's span |
+| HAP (rent) | 1 per month the client is in the provider's care: any day on the line with a placement on file and not after the discharge date. Absences never split or reduce it (a whole month in hospital or jail still bills); nothing once they are out of care or after discharge; a partial month is flagged to check proration. No notes: the placement is the documentation, and the database refuses a HAP service note (decision A, Sep 26) |
 
 Every type is 0 on a day inside a recorded absence. Rounding is `floor(m/15) + (1 if m mod 15 >= 8)`. Note minutes are `duration_minutes` as saved. EVV minutes are clock-out minus clock-in for sessions with both set, dated by the clock-in day in America/Denver (the v20.0.14 anchoring).
 
 ### 5.3 Date ranges
 
-The downloaded span passes through, and coverage is checked day by day. A day is a break (never billed) when it falls inside a recorded absence, outside every residential placement on file (RHS, HHS, PPS), or outside every Provly authorization on file for that client and code, whatever the authorization's status. A gap between two placements or two authorizations is therefore a break too. With no placement or no authorization on file, that check is skipped and the line is flagged, because UPI's line is the authority. Each run of billable days between breaks becomes the line or one of its split parts. A split keeps the original line number on its first part; later parts take the next numbers after the file's highest. A part with 0 units is dropped. Dates Provly writes use UPI's own form, mm/dd/yyyy.
+The downloaded span passes through, and coverage is checked day by day. A day is a break (never billed) when it falls inside a recorded absence, outside every residential placement on file (RHS, HHS, PPS), or outside every Provly authorization on file for that client and code that isn't rejected (pending, approved and expired authorizations cover their dates; a rejected one never does). If the only authorization on file is rejected, no day is covered; only when there is no authorization on file at all does UPI's line stand as the authority. A gap between two placements or two authorizations is therefore a break too. With no placement or no authorization on file, that check is skipped and the line is flagged, because UPI's line is the authority. Each run of billable days between breaks becomes the line or one of its split parts. A split keeps the original line number on its first part; later parts take the next numbers after the file's highest. A part with 0 units is dropped. Dates Provly writes use UPI's own form, mm/dd/yyyy.
 
 ### 5.4 Caps and flags
 
@@ -145,11 +148,10 @@ Batches, lines and line-notes are readable by the manage tier only (owner, admin
 | Default | Why it is a default, not a decision yet |
 |---|---|
 | Absences are recorded by office tiers; host home operators see them but cannot record them | Operators often know first; opening it to them is a one-policy change |
-| A one-way ride (to or from only) bills one MTP day | Needs the contract's MTP wording |
-| A monthly code (HAP) bills 1 unit if any approved note falls in the span | Depends on how HAP is documented |
+| A one-way ride (to or from only) bills one MTP day | Confirmed Sep 26: the DSG day is enough |
 | Units above the monthly max are capped and flagged rather than sent for UPI to error | Keeps the file clean; the flag carries the Notify-SC step |
-| D5 rounding, and whether MTP needs a separate trip log | Siamon to confirm against the DSPD contract before the first real upload |
-| HAP is not in Provly's service code table | Until it is added (its name and documentation are needed), a HAP line is removed with "isn't set up in Provly" and filled by hand |
+| D5 rounding, and whether MTP needs a separate trip log | Answered Sep 26: nearest quarter hour (no written rule; long-standing practice); no trip log |
+| HAP is in the code table as a monthly code (v20.0.24a) | Its name there is "Housing Assistance (rent)"; correct it if DSPD's official name differs |
 | Unit types other than Q, D and M | Removed with "fill this line by hand" until a real file shows one |
 
 ## 9. Delivery
@@ -159,7 +161,7 @@ Batches, lines and line-notes are readable by the manage tier only (owner, admin
 | 1 | v20.0.23 (SQL + app) ✅ | `person_absences` + client-profile Absences tab; `service_notes.transport` + DSG field (preset); MTP out of the note pickers; nearest-quarter-hour rounding, per day in the Billing estimate |
 | 1a | v20.0.23a (SQL + app) ✅ | Save Draft / Submit; author-only Submit; Approve Submitted (bulk) |
 | 2 | v20.0.24 (SQL only) | e520 tables, engine, RPCs, billed lock; a synthetic end-to-end self-test in the verification table |
-| 2a | v20.0.24a (SQL) | Authorization used units follow D5 and recompute on every status change (§11) |
+| 2a | v20.0.24a (SQL) | HAP rule and code; rejected authorizations never cover; authorization used units follow D5 (§11) |
 | 3 | v20.0.25 (app) | Billing → UPI e520: upload, review (flags, removed lines, not in budget), download, Mark uploaded, release a line; compliance deadline D23 text "PRISM" → UPI |
 
 Recording ships first because absences and transport must be captured during the month they bill. Verification: **October is the shadow run and the gate** — September's notes are still in Google Drive. Provly builds October's file from the October download, it is compared line by line with the hand-made October file, and Provly's is uploaded (early November) only if every difference is explained. October needs every billable day documented, submitted and approved in Provly.
@@ -168,6 +170,8 @@ Recording ships first because absences and transport must be captured during the
 
 Import the E520 Payment File Report's detail XLSX per status to set `upi_status` on every line, joined on the batch's `upi_file_record_id`; then the payment reports and deposits give expected (rate × units) against received. Needs one masked "Paid by CAPS" detail XLSX. Finance → Import UPI stays until this replaces it.
 
-## 11. Known limits in v1
+## 11. Authorization used units (v20.0.24a)
 
-The authorization used-units counter (`update_authorization_units`, older than this arc) sums each approved or billed note's stored units, so a day split across notes counts more than D5 bills, older notes carry round-up units, and a reopened note is not taken back out until another note on that authorization is approved. It runs with the approver's access, so an approval by a login that can't update authorizations leaves the counter unchanged. It does not affect the payment file. v20.0.24a moves it onto D5 and recomputes it on every status change.
+The counter on each authorization counts the way the payment file does: each day's minutes rounded to the nearest quarter hour for quarter-hour codes, one per day for daily codes, one per DSG ride day for MTP, one per month billed for HAP (live HAP lines in files marked uploaded; HAP has no notes, so billing is when a month is used), one per note for per-session codes. A billed HAP month counts toward the authorization it was billed under: when the engine fills a HAP line it records the authorization covering the line's first day that is both in care (a placement on file, not after discharge) and authorized. Later corrections to care, the discharge date or authorizations don't move or clear a billed month; releasing the line does. A HAP month billed while no authorization was on file attaches to the authorization entered for it later. An authorization with billed HAP months can't be deleted, rejected, or moved to another client or code until those lines are released. A rejected authorization uses 0. Notes are matched to an authorization by client, code and date, because the app has never linked a note to an authorization. It recounts on every note insert, update and delete (a Reopen takes a note back out), when an authorization's dates, client or code change, and, for HAP, when a file is marked uploaded or a line released; it runs regardless of who approves. It counts documentation (approved and billed notes), so EVV's lesser count applies to the payment file, not to this counter.
+
+Known limit: the code table lists DSI as a quarter-hour code while UPI bills it daily, so a DSI authorization's counter would count quarter hours. Hope Haven doesn't bill DSI today; correct the code table before anyone does.
