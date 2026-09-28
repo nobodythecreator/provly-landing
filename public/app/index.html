@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.25r1 (Greptile r1): Payment Files loads every line of a file (paged, 1,000 at a time) before showing it; the review sends the item count it showed and the database refuses a different one; an action that finishes after you move to another file no longer reloads it over the one you're looking at. -->
   <!-- v20.0.25 (e520 PR 3, part 1; P1 = B, P2 = B): Finance gains a Payment Files tab for owners, admins and compliance directors — upload UPI's CSV, review the built file (kept lines with their flags, removed lines with reasons, delivered-but-not-in-the-budget notes), download it byte for byte, Mark uploaded (UPI's record ID optional; a recorded review of the flagged items when there are any — enforced by the database), release a line UPI closed, set the record ID later, delete a draft. Every rule lives in the database (e520_* RPCs); the tab only shows it. sql/v20.0.25.sql runs first. -->
   <!-- v20.0.23a r3 (Greptile r3): Approve Submitted always loads for the filter on screen now — the reload after an approval reads the current client and month, not the ones in place when Approve was clicked, so changing filters mid-approval can't strand the list; and if the list ever is out of date with nothing loading, it offers Reload instead of sitting on "Loading…". -->
   <!-- v20.0.23a r2 (Greptile r2): the database also refuses reassigning a note to yourself, and a submit unless you were the author before and after the update (sql/v20.0.23a-r2.sql). Approve Submitted: selections survive filter changes (only what is on screen is sent; approved or skipped notes leave the selection), and while a new filter's notes load, the old list is inert and Approve is disabled — nothing outside the filter you chose can be approved. -->
@@ -12877,6 +12878,8 @@
       const fileRef = useRef(null);
       const listSeq = useRef(0);
       const detailSeq = useRef(0);
+      const selectedRef = useRef(null);                     // r1 — the file on screen, for anything that finishes later
+      selectedRef.current = selectedId;
 
       const loadList = async () => {
         const seq = ++listSeq.current;
@@ -12890,16 +12893,30 @@
         setBatches(data || []);
       };
 
+      // r1 — every line of the file, a page at a time, so counts, flags and the review cover all of it
+      const fetchAllLines = async (id) => {
+        const PAGE = 1000;
+        const all = [];
+        for (let from = 0; ; from += PAGE) {
+          const { data, error } = await supabase.from("e520_lines")
+            .select("id, ord, line_number, source_line_number, service_code, unit_type, start_date, end_date, units, action, remove_reason, flags, upi_status, released_at, release_reason, person_id, persons(first_name, last_name)")
+            .eq("batch_id", id).order("ord", { ascending: true }).order("id", { ascending: true })
+            .range(from, from + PAGE - 1);
+          if (error) return { error };
+          all.push(...(data || []));
+          if (!data || data.length < PAGE) return { data: all };
+        }
+      };
+
       const loadDetail = async (id) => {
+        if (id !== selectedRef.current) return;                // r1 — that file is no longer on screen
         const seq = ++detailSeq.current;
         setDetailError(null);
         const [bRes, lRes] = await Promise.all([
           supabase.from("e520_batches").select("*").eq("id", id).maybeSingle(),
-          supabase.from("e520_lines")
-            .select("id, ord, line_number, source_line_number, service_code, unit_type, start_date, end_date, units, action, remove_reason, flags, upi_status, released_at, release_reason, person_id, persons(first_name, last_name)")
-            .eq("batch_id", id).order("ord", { ascending: true }),
+          fetchAllLines(id),
         ]);
-        if (seq !== detailSeq.current) return;
+        if (seq !== detailSeq.current || id !== selectedRef.current) return;
         const err = bRes.error || lRes.error;
         if (err) { setDetailError(err.message || "request failed"); return; }        // keep the last good detail
         if (!bRes.data) { setDetail(null); setDetailError("This payment file no longer exists. Uploading again for a month replaces its draft."); return; }
@@ -12908,7 +12925,7 @@
         let names = {};
         if (ids.length) {
           const { data: ps, error: pErr } = await supabase.from("persons").select("id, first_name, last_name").in("id", ids);
-          if (seq !== detailSeq.current) return;
+          if (seq !== detailSeq.current || id !== selectedRef.current) return;
           if (pErr) { setDetailError(pErr.message || "request failed"); return; }
           (ps || []).forEach(p => { names[p.id] = `${p.first_name || ""} ${p.last_name || ""}`.trim(); });
         }
@@ -12965,7 +12982,7 @@
         if (rec && !/^\d+$/.test(rec)) return addToast("UPI's Payment File Record ID is a number", "error");
         setMarking(true);
         if (reviewItems > 0) {
-          const { error: rErr } = await supabase.rpc("e520_confirm_review", { p_batch: b.id });
+          const { error: rErr } = await supabase.rpc("e520_confirm_review", { p_batch: b.id, p_items: reviewItems }); // r1 — the count shown; the database refuses a different one
           if (rErr) { setMarking(false); return addToast(rErr.message, "error"); }
         }
         const sha = await e520Sha256(b.export_csv);
