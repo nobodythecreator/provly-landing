@@ -37,6 +37,7 @@ Updated: Sep 26 2026.
 - ✅ v20.0.24a — HAP (rent) bills one unit per month in care per the placement, absences never reduce it; rejected authorizations never cover a day; the authorization used-units counter follows the payment file's rules and recounts on every note change; a billed HAP month stays with the authorization it was billed under (Sep 26)
 - ✅ v20.0.25 — Finance → Payment Files (owners, admins, compliance directors): upload UPI's CSV, review lines / flags / removed lines / not-in-budget notes, download the file byte for byte, Mark uploaded with a recorded review of the flagged items (database-enforced) and UPI's record ID, release a line UPI closed (Sep 26)
 - ✅ v20.0.25a — Payment Files: Compare with my file (client by client and code by code, with Provly's reasons beside each difference; in the browser, nothing stored); HAP and MTP out of the note pickers; compliance deadlines D23 / D24 say UPI payment files, not PRISM claims (Sep 26)
+- ✅ v20.0.25b — the DSPD PID shows: Clients list column and profile; edits from the Clients list no longer erase the PID (the list didn't load it, so every edit saved it back blank); an edit now writes only the fields it loaded or changed; the form warns when a PID isn't 9 digits starting with 0 (Sep 28)
 
 ## Tier 1 — finish Item 4 (security)
 - 🔄 **Go live with identities.** Operator invites sent Sep 22 (Elena, Kujang, Ethan); Asunta once her email is on file; Siale and Asia held until they have someone to support (no assignment = empty login); assignments kept current as a security control.
