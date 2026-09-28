@@ -14,6 +14,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.25b r1 (Greptile r1): a client edit sends only the fields the user changed; unchanged fields stay out of the update, so a row loaded before someone else's edit can't write its old values back over theirs. Nothing changed on the client (e.g. only an authorization added) → the client row isn't written at all. -->
+  <!-- v20.0.25b: the DSPD PID shows. The Clients list loads it (it didn't, so Edit from the list saved the PID back as blank — every client edit from the list erased it); an edit now writes only the fields it loaded or changed, so a field missing from a list can never be wiped again. Clients list gains a DSPD PID column (Missing in amber for active clients); the profile shows the PID; the form explains where the PID comes from and warns when it isn't 9 digits starting with 0. -->
   <!-- v20.0.25a r1 (Greptile r1): Compare with my file — only the latest file you chose can fill the comparison; a units value that isn't a number stops the comparison and names the rows (plain numbers and 1,000-style thousands read; blank = nothing billed); 0-unit lines are skipped before grouping, so they can't count as matches. -->
   <!-- v20.0.25a (e520 PR 3, part 2; P3 = A): Payment Files gains Compare with my file — choose your hand-made UPI CSV and Provly shows, client by client and code by code, where the two files agree, where they differ (with Provly's flags and removal reasons beside each difference), and what's only in one of them; the comparison runs in the browser and nothing is stored. HAP and MTP leave the note pickers (new and edit) and a HAP note is refused at save (HAP is documented by the placement; the database refuses it too). Compliance deadlines D23/D24 speak UPI payment files, not PRISM claims. -->
   <!-- v20.0.25r1 (Greptile r1): Payment Files loads every line of a file (paged, 1,000 at a time) before showing it; the review sends the item count it showed and the database refuses a different one; an action that finishes after you move to another file no longer reloads it over the one you're looking at. -->
@@ -1802,7 +1804,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.25a</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.25b</span>
               </div>
             </div>
             {isMobile && (
@@ -2847,6 +2849,7 @@
         address: "", city: "", state: "UT", zip: "", phone: "",
       });
       const [auths, setAuths] = useState([]);
+      const seededRef = useRef(null);   // v20.0.25b — the values the edit form opened with
       const [newAuth, setNewAuth] = useState({ service_code_id: "", authorized_units: "", start_date: ymd(), end_date: "", rate_per_unit: "", rate_pending: false }); // v20.0.10 — rate_pending: deliberate null-rate attestation (UI-only, never stored)
 
       useEffect(() => {
@@ -2855,7 +2858,7 @@
 
       useEffect(() => {
         if (editing) {
-          setForm({
+          const seed = {
             first_name: editing.first_name || "", last_name: editing.last_name || "",
             date_of_birth: editing.date_of_birth || "", medicaid_number: editing.medicaid_number || "",
             identification_number: editing.identification_number || editing.dspd_pid || "",
@@ -2876,7 +2879,9 @@
             state: editing.state || "UT",
             zip: editing.zip || "",
             phone: editing.phone || "",
-          });
+          };
+          seededRef.current = seed;
+          setForm(seed);
           setAuths(editing.person_service_authorizations || []);
           // v20.0.10 (Greptile r4) — the prop is a snapshot taken when the list
           // loaded; an insert whose response was lost is NOT in it. Reopening the
@@ -3384,10 +3389,22 @@
           "address", "city", "zip", "phone",
         ];
         optionalKeys.forEach(k => { if (!payload[k]) payload[k] = null; });
+        // v20.0.25b r1 — an edit sends only the fields the user changed. The Clients
+        // list didn't load the PID, so every edit saved it back as NULL; and a row
+        // loaded before someone else's edit would write its old values over theirs.
+        // Unchanged fields now stay out of the update entirely (a cleared field is a
+        // change, and still saves as NULL).
+        if (editing && seededRef.current) {
+          Object.keys(payload).forEach(k => {
+            if (form[k] === seededRef.current[k]) delete payload[k];
+          });
+        }
 
         let result;
         if (editing) {
-          result = await supabase.from("persons").update(payload).eq("id", editing.id);
+          result = Object.keys(payload).length > 0                 // v20.0.25b r1 — nothing changed on the client: nothing to write
+            ? await supabase.from("persons").update(payload).eq("id", editing.id)
+            : { error: null };
         } else {
           payload.org_id = orgId;
           result = await supabase.from("persons").insert(payload);
@@ -3459,7 +3476,13 @@
           </FormRow>
           <FormRow>
             <FormField label="DSPD PID" half>
-              <input style={fieldStyle} value={form.identification_number} onChange={e => set("identification_number", e.target.value)} placeholder="DSPD Person ID" />
+              <input style={fieldStyle} value={form.identification_number} onChange={e => set("identification_number", e.target.value)} placeholder="9 digits, e.g. 012345678" inputMode="numeric" />
+              {(() => { // v20.0.25b
+                const v = String(form.identification_number || "").trim();
+                if (!v) return <div style={{ fontSize: 11, color: CB.textMid, marginTop: 4 }}>Needed for UPI payment files. It's the consumer_pid in UPI's download.</div>;
+                if (!/^0\d{8}$/.test(v)) return <div style={{ fontSize: 11, color: CB.amber, fontWeight: 600, marginTop: 4 }}>A DSPD PID is 9 digits starting with 0, as in UPI's file. Excel often drops the leading 0; add it back.</div>;
+                return null;
+              })()}
             </FormField>
           </FormRow>
           {editing && (
@@ -3722,6 +3745,7 @@
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 4 }}>
                 <Badge text={client.is_active ? "Active" : "Inactive"} color={client.is_active ? CB.green : CB.textLight} />
+                {client.identification_number && <Badge text={`PID: ${client.identification_number}`} color={CB.navy} />}
                 {client.medicaid_number && <Badge text={`MA: ${client.medicaid_number}`} color={CB.navy} />}
                 {age !== null && <Badge text={`${age} yrs`} color={CB.blue} />}
               </div>
@@ -3732,6 +3756,7 @@
           <ProfileSection title="Identity">
             <ProfileField label="Full Name" value={`${client.first_name} ${client.last_name}`} />
             <ProfileField label="Date of Birth" value={fmtDate(client.date_of_birth)} />
+            <ProfileField label="DSPD PID" value={client.identification_number} />
             <ProfileField label="Medicaid #" value={client.medicaid_number} />
             <ProfileField label="Status" value={client.is_active ? "Active" : "Inactive"} />
           </ProfileSection>
@@ -3797,7 +3822,7 @@
         setLoading(true);
         const [clientRes, scRes, placeRes] = await Promise.all([
           supabase.from("persons")
-            .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, support_coordinator, support_coordinator_phone, support_coordinator_email, support_coordinator_agency, guardian_name, guardian_phone, guardian_relation, emergency_contact_name, emergency_contact_phone, physician_name, physician_phone, address, city, state, zip, phone, person_service_authorizations:person_service_authorizations_v(id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code))")
+            .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, identification_number, support_coordinator, support_coordinator_phone, support_coordinator_email, support_coordinator_agency, guardian_name, guardian_phone, guardian_relation, emergency_contact_name, emergency_contact_phone, physician_name, physician_phone, address, city, state, zip, phone, person_service_authorizations:person_service_authorizations_v(id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code))")
             .order("last_name"),
           supabase.from("service_code_definitions").select("id, code").order("code"),
           supabase.from("person_placements").select("person_id, org_sites(site_type)").is("end_date", null), // v20.0.4
@@ -3835,6 +3860,7 @@
           >{r.first_name} {r.last_name}</button>
         )},
         { label: "", render: (r) => hhsSet.has(r.id) ? <Badge text="Host home" color={CB.teal} /> : null }, // v20.0.4 (D6)
+        { label: "DSPD PID", sortKey: "identification_number", render: (r) => r.identification_number || (r.is_active ? <span style={{ color: CB.amber, fontWeight: 600 }}>Missing</span> : "—") }, // v20.0.25b
         { label: "Medicaid #", sortKey: "medicaid_number", render: (r) => r.medicaid_number || "—" },
         { label: "DOB", sortKey: "date_of_birth", render: (r) => r.date_of_birth ? new Date(r.date_of_birth + "T00:00:00").toLocaleDateString() : "—" },
         { label: "Status", sortValue: (r) => !!r.is_active, render: (r) => <Badge text={r.is_active ? "Active" : "Inactive"} color={r.is_active ? CB.green : CB.textLight} /> },
