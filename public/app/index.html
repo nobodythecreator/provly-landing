@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.25 (e520 PR 3, part 1; P1 = B, P2 = B): Finance gains a Payment Files tab for owners, admins and compliance directors — upload UPI's CSV, review the built file (kept lines with their flags, removed lines with reasons, delivered-but-not-in-the-budget notes), download it byte for byte, Mark uploaded (UPI's record ID optional; a recorded review of the flagged items when there are any — enforced by the database), release a line UPI closed, set the record ID later, delete a draft. Every rule lives in the database (e520_* RPCs); the tab only shows it. sql/v20.0.25.sql runs first. -->
   <!-- v20.0.23a r3 (Greptile r3): Approve Submitted always loads for the filter on screen now — the reload after an approval reads the current client and month, not the ones in place when Approve was clicked, so changing filters mid-approval can't strand the list; and if the list ever is out of date with nothing loading, it offers Reload instead of sitting on "Loading…". -->
   <!-- v20.0.23a r2 (Greptile r2): the database also refuses reassigning a note to yourself, and a submit unless you were the author before and after the update (sql/v20.0.23a-r2.sql). Approve Submitted: selections survive filter changes (only what is on screen is sent; approved or skipped notes leave the selection), and while a new filter's notes load, the old list is inert and Approve is disabled — nothing outside the filter you chose can be approved. -->
   <!-- v20.0.23a r1 (Greptile r1; decision A — only a note's author submits it): the database refuses a submit by anyone but the note's primary staff member (sql/v20.0.23a-r1.sql); the form offers Submit only when you are the author, the detail view's Submit and Edit's "submitted" status follow the same rule, and office-entered notes for others are approved from the note itself as before. Approve Submitted: only the first load selects everything — a reload after approving keeps your choices and never selects for you; client and month lists come from every submitted note, and the filters run in the database, so a client's or month's notes appear however far back they sit. -->
@@ -1798,7 +1799,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.23a</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.25</span>
               </div>
             </div>
             {isMobile && (
@@ -12827,6 +12828,441 @@
     // ═══════════════════════════════════════════════════════════════
     const UPI_UNIT_MAP = { Q: "Quarter-Hour", D: "Daily", M: "Monthly", S: "Session", H: "Hourly" };
 
+    // ═══════════════════════════════════════════════════════════════
+    // v20.0.25 (e520 PR 3, P1 = B, P2 = B) — PAYMENT FILES. A Finance tab for owners,
+    // admins and compliance directors: build the month's UPI payment file from UPI's
+    // download, review it, download it, mark it uploaded, release lines UPI closes.
+    // Every rule is in the database (e520_* RPCs); this tab only shows it. Mark
+    // uploaded needs a recorded review whenever anything is flagged (P2).
+    // ═══════════════════════════════════════════════════════════════
+    const E520_FLAG_LABELS = {
+      evv_gap: "EVV gap", outside_coverage: "Outside placement or authorization", undocumented_days: "Undocumented days",
+      note_in_absence: "Note inside an absence", note_without_minutes: "Note without times", capped: "Capped",
+      no_placement: "No placement on file", no_authorization: "No authorization on file",
+      rejected_authorization: "Only a rejected authorization", rate_mismatch: "Rate differs",
+      partial_month: "Partial month", trimmed: "Dates trimmed",
+    };
+    const E520_DEAD_STATUSES = ["Deleted", "Denied by SC", "Denied by DSPD", "Error by CAPS", "Rejected by CAPS"];
+    const e520MonthLabel = (d) => {
+      if (!d) return "—";
+      const [y, m] = String(d).split("-").map(Number);
+      return new Date(y, m - 1, 1).toLocaleString(undefined, { month: "long", year: "numeric" });
+    };
+    const e520Day = (d) => (d ? `${String(d).slice(5, 7)}/${String(d).slice(8, 10)}` : "—");
+    const e520Sha256 = async (text) => {
+      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text || ""));
+      return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+    };
+
+    function PaymentFilesTab() {
+      const { addToast } = useToast();
+      const [batches, setBatches] = useState([]);
+      const [listLoaded, setListLoaded] = useState(false);
+      const [listError, setListError] = useState(null);
+      const [selectedId, setSelectedId] = useState(null);
+      const [detail, setDetail] = useState(null);            // { batch, lines, names }
+      const [detailError, setDetailError] = useState(null);
+      const [building, setBuilding] = useState(false);
+      const [buildError, setBuildError] = useState(null);
+      const [markOpen, setMarkOpen] = useState(false);
+      const [markRecordId, setMarkRecordId] = useState("");
+      const [markConfirmed, setMarkConfirmed] = useState(false);
+      const [marking, setMarking] = useState(false);
+      const [releaseLine, setReleaseLine] = useState(null);
+      const [releaseStatus, setReleaseStatus] = useState("");
+      const [releaseReason, setReleaseReason] = useState("");
+      const [releasing, setReleasing] = useState(false);
+      const [recordDraft, setRecordDraft] = useState("");
+      const [busy, setBusy] = useState(false);
+      const fileRef = useRef(null);
+      const listSeq = useRef(0);
+      const detailSeq = useRef(0);
+
+      const loadList = async () => {
+        const seq = ++listSeq.current;
+        setListError(null);
+        const { data, error } = await supabase.from("e520_batches")
+          .select("id, service_month, seq, status, export_filename, built_at, uploaded_at, upi_file_record_id")
+          .order("service_month", { ascending: false }).order("seq", { ascending: false }).limit(60);
+        if (seq !== listSeq.current) return;
+        setListLoaded(true);
+        if (error) { setListError(error.message || "request failed"); return; }   // keep the last good list
+        setBatches(data || []);
+      };
+
+      const loadDetail = async (id) => {
+        const seq = ++detailSeq.current;
+        setDetailError(null);
+        const [bRes, lRes] = await Promise.all([
+          supabase.from("e520_batches").select("*").eq("id", id).maybeSingle(),
+          supabase.from("e520_lines")
+            .select("id, ord, line_number, source_line_number, service_code, unit_type, start_date, end_date, units, action, remove_reason, flags, upi_status, released_at, release_reason, person_id, persons(first_name, last_name)")
+            .eq("batch_id", id).order("ord", { ascending: true }),
+        ]);
+        if (seq !== detailSeq.current) return;
+        const err = bRes.error || lRes.error;
+        if (err) { setDetailError(err.message || "request failed"); return; }        // keep the last good detail
+        if (!bRes.data) { setDetail(null); setDetailError("This payment file no longer exists. Uploading again for a month replaces its draft."); return; }
+        const um = Array.isArray(bRes.data.unmatched) ? bRes.data.unmatched : [];
+        const ids = [...new Set(um.map(u => u.person_id).filter(Boolean))];
+        let names = {};
+        if (ids.length) {
+          const { data: ps, error: pErr } = await supabase.from("persons").select("id, first_name, last_name").in("id", ids);
+          if (seq !== detailSeq.current) return;
+          if (pErr) { setDetailError(pErr.message || "request failed"); return; }
+          (ps || []).forEach(p => { names[p.id] = `${p.first_name || ""} ${p.last_name || ""}`.trim(); });
+        }
+        setDetail({ batch: bRes.data, lines: lRes.data || [], names });
+        setRecordDraft(bRes.data.upi_file_record_id ? String(bRes.data.upi_file_record_id) : "");
+      };
+
+      useEffect(() => { loadList(); }, []);
+      useEffect(() => {
+        if (selectedId) { setDetail(null); loadDetail(selectedId); }
+        else { detailSeq.current++; setDetail(null); setDetailError(null); }
+      }, [selectedId]);
+
+      const onFile = async (e) => {
+        const file = e.target.files && e.target.files[0];
+        e.target.value = "";
+        if (!file || building) return;
+        setBuildError(null);
+        setBuilding(true);
+        let text;
+        try { text = await file.text(); }
+        catch (_) { setBuilding(false); setBuildError("Couldn't read that file."); return; }
+        const { data, error } = await supabase.rpc("e520_build", { p_filename: file.name, p_csv: text });
+        setBuilding(false);
+        if (error) { setBuildError(error.message || "The payment file couldn't be built."); return; }
+        addToast("Payment file built — review it below", "success");
+        loadList();
+        setSelectedId(data);
+      };
+
+      const download = () => {
+        const b = detail?.batch;
+        if (!b?.export_csv) return;
+        const blob = new Blob([b.export_csv], { type: "text/csv;charset=utf-8" });   // UPI's bytes: BOM + CRLF, as built
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = b.export_filename || "payment-file.csv";
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      };
+
+      const kept = detail ? detail.lines.filter(l => l.action !== "remove") : [];
+      const removed = detail ? detail.lines.filter(l => l.action === "remove") : [];
+      const unmatched = detail && Array.isArray(detail.batch.unmatched) ? detail.batch.unmatched : [];
+      const flaggedKept = kept.filter(l => Array.isArray(l.flags) && l.flags.length > 0);
+      const reviewItems = flaggedKept.length + removed.length + unmatched.length;   // the same count the database checks
+      const totalUnits = kept.reduce((s, l) => s + (Number(l.units) || 0), 0);
+
+      const markUploaded = async () => {
+        if (marking || !detail) return;
+        const b = detail.batch;
+        if (reviewItems > 0 && !markConfirmed) return addToast("Confirm you've reviewed the flagged items first", "error");
+        const rec = markRecordId.trim();
+        if (rec && !/^\d+$/.test(rec)) return addToast("UPI's Payment File Record ID is a number", "error");
+        setMarking(true);
+        if (reviewItems > 0) {
+          const { error: rErr } = await supabase.rpc("e520_confirm_review", { p_batch: b.id });
+          if (rErr) { setMarking(false); return addToast(rErr.message, "error"); }
+        }
+        const sha = await e520Sha256(b.export_csv);
+        const { data, error } = await supabase.rpc("e520_mark_uploaded", { p_batch: b.id, p_export_sha256: sha, p_upi_record_id: rec ? Number(rec) : null });
+        setMarking(false);
+        if (error) return addToast(error.message, "error");
+        addToast(`Marked uploaded — ${data ?? 0} note${data === 1 ? "" : "s"} now billed`, "success");
+        setMarkOpen(false); setMarkRecordId(""); setMarkConfirmed(false);
+        loadList(); loadDetail(b.id);
+      };
+
+      const release = async () => {
+        if (releasing || !releaseLine || !detail) return;
+        if (!releaseStatus) return addToast("Choose UPI's status for this line", "error");
+        if (!releaseReason.trim()) return addToast("Say why the line is being released", "error");
+        setReleasing(true);
+        const { data, error } = await supabase.rpc("e520_release_line", { p_line: releaseLine.id, p_upi_status: releaseStatus, p_reason: releaseReason.trim() });
+        setReleasing(false);
+        if (error) return addToast(error.message, "error");
+        addToast(`Line released — ${data ?? 0} note${data === 1 ? "" : "s"} back to approved`, "success");
+        setReleaseLine(null); setReleaseStatus(""); setReleaseReason("");
+        loadDetail(detail.batch.id);
+      };
+
+      const saveRecord = async () => {
+        if (busy || !detail) return;
+        const rec = recordDraft.trim();
+        if (!/^\d+$/.test(rec)) return addToast("UPI's Payment File Record ID is a number", "error");
+        setBusy(true);
+        const { error } = await supabase.rpc("e520_set_upi_record", { p_batch: detail.batch.id, p_record_id: Number(rec) });
+        setBusy(false);
+        if (error) return addToast(error.message, "error");
+        addToast("UPI record ID saved", "success");
+        loadList(); loadDetail(detail.batch.id);
+      };
+
+      const deleteDraft = async () => {
+        if (busy || !detail) return;
+        if (!confirm("Delete this draft payment file?\n\nThe notes it reserved are freed for the next build.")) return;
+        setBusy(true);
+        const { error } = await supabase.rpc("e520_delete_draft", { p_batch: detail.batch.id });
+        setBusy(false);
+        if (error) return addToast(error.message, "error");
+        addToast("Draft deleted", "success");
+        setSelectedId(null); loadList();
+      };
+
+      const card = { background: CB.white, borderRadius: 16, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, padding: 20, marginBottom: 16 };
+      const th = { textAlign: "left", fontSize: 11, fontWeight: 700, color: CB.textMid, textTransform: "uppercase", letterSpacing: 0.4, padding: "8px 10px", borderBottom: `1px solid ${CB.border}`, whiteSpace: "nowrap" };
+      const td = { fontSize: 13, padding: "9px 10px", borderBottom: `1px solid ${CB.border}`, verticalAlign: "top" };
+      const errorPanel = (msg, retry) => (
+        <div role="alert" style={{ padding: "12px 14px", borderRadius: 10, border: `1px solid ${CB.red}`, color: CB.red, fontSize: 13, marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+          <span>{msg}</span>{retry && <SecondaryButton onClick={retry}>Retry</SecondaryButton>}
+        </div>
+      );
+      const personName = (l) => l.persons ? `${l.persons.first_name || ""} ${l.persons.last_name || ""}`.trim() : "—";
+      const flagList = (flags) => (Array.isArray(flags) && flags.length > 0) ? (
+        <div style={{ display: "grid", gap: 4 }}>
+          {flags.map((f, i) => (
+            <div key={i}>
+              <Badge text={E520_FLAG_LABELS[f.kind] || f.kind} color={f.kind === "no_authorization" || f.kind === "no_placement" ? CB.textMid : CB.amber} />
+              <div style={{ fontSize: 11, color: CB.textMid, marginTop: 2 }}>{f.detail}</div>
+            </div>
+          ))}
+        </div>
+      ) : <span style={{ color: CB.textLight }}>—</span>;
+
+      // ── the list ──
+      if (!selectedId) {
+        return (
+          <div>
+            <div style={card}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, flexWrap: "wrap" }}>
+                <div style={{ maxWidth: 620 }}>
+                  <h3 style={{ fontSize: 16, fontWeight: 700, color: CB.navy, marginBottom: 6 }}>UPI payment files</h3>
+                  <div style={{ fontSize: 13, color: CB.textMid, lineHeight: 1.5 }}>
+                    Download the month's invoice from UPI, save it from Excel as CSV, and upload it here. Provly fills the units from approved notes and EVV,
+                    splits lines around absences, removes lines with no documentation, and hands back the file to upload to UPI.
+                    Uploading again for the same month replaces its draft.
+                  </div>
+                </div>
+                <div>
+                  <input ref={fileRef} type="file" accept=".csv,text/csv" style={{ display: "none" }} onChange={onFile} />
+                  <PrimaryButton onClick={() => fileRef.current && fileRef.current.click()} loading={building}>{icons.upload({ size: 15 })} Upload UPI CSV</PrimaryButton>
+                </div>
+              </div>
+              {buildError && <div style={{ marginTop: 14 }}>{errorPanel(buildError)}</div>}
+            </div>
+
+            <div style={card}>
+              {!listLoaded ? (
+                <div style={{ display: "flex", justifyContent: "center", padding: 40 }}><Spinner size={24} /></div>
+              ) : (
+                <>
+                  {listError && errorPanel(`Couldn't load payment files (${listError}).`, loadList)}
+                  {!listError && batches.length === 0 && (
+                    <div style={{ padding: "18px 16px", borderRadius: 12, border: `1px dashed ${CB.border}`, color: CB.textLight, fontSize: 13, textAlign: "center" }}>
+                      No payment files yet. Upload the month's UPI download to build the first one.
+                    </div>
+                  )}
+                  {batches.length > 0 && (
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                        <thead><tr>
+                          <th style={th}>Month</th><th style={th}>File</th><th style={th}>Status</th><th style={th}>Built</th><th style={th}>Uploaded</th><th style={th}>UPI record</th>
+                        </tr></thead>
+                        <tbody>
+                          {batches.map(b => (
+                            <tr key={b.id} onClick={() => setSelectedId(b.id)} style={{ cursor: "pointer" }}>
+                              <td style={{ ...td, fontWeight: 700, color: CB.navy }}>{e520MonthLabel(b.service_month)}</td>
+                              <td style={td}>{b.seq === 1 ? "Main file" : `Supplemental ${b.seq - 1}`}<div style={{ fontSize: 11, color: CB.textLight }}>{b.export_filename || "—"}</div></td>
+                              <td style={td}><Badge text={b.status === "uploaded" ? "Uploaded" : "Draft"} color={b.status === "uploaded" ? CB.green : CB.amber} /></td>
+                              <td style={td}>{b.built_at ? new Date(b.built_at).toLocaleDateString() : "—"}</td>
+                              <td style={td}>{b.uploaded_at ? new Date(b.uploaded_at).toLocaleDateString() : "—"}</td>
+                              <td style={td}>{b.upi_file_record_id || "—"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        );
+      }
+
+      // ── one payment file ──
+      const b = detail?.batch;
+      const isDraft = b?.status === "draft";
+      return (
+        <div>
+          <div style={{ marginBottom: 12 }}>
+            <SecondaryButton onClick={() => setSelectedId(null)}>← All payment files</SecondaryButton>
+          </div>
+          {detailError && errorPanel(detailError, () => loadDetail(selectedId))}
+          {!detail && !detailError && <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>}
+          {detail && (
+            <>
+              <div style={card}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, flexWrap: "wrap" }}>
+                  <div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                      <h3 style={{ fontSize: 17, fontWeight: 800, color: CB.navy }}>{e520MonthLabel(b.service_month)} · {b.seq === 1 ? "Main file" : `Supplemental ${b.seq - 1}`}</h3>
+                      <Badge text={isDraft ? "Draft" : "Uploaded"} color={isDraft ? CB.amber : CB.green} />
+                    </div>
+                    <div style={{ fontSize: 12, color: CB.textMid, marginTop: 4 }}>
+                      {b.export_filename} · built {b.built_at ? new Date(b.built_at).toLocaleString() : "—"}
+                      {b.uploaded_at && <> · uploaded {new Date(b.uploaded_at).toLocaleString()}</>}
+                      {b.flags_reviewed_at && <> · flags reviewed {new Date(b.flags_reviewed_at).toLocaleString()}</>}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <PrimaryButton onClick={download}>{icons.fileText({ size: 15 })} Download file</PrimaryButton>
+                    {isDraft && <SecondaryButton onClick={() => { setMarkConfirmed(false); setMarkRecordId(""); setMarkOpen(true); }}>{icons.checkCircle({ size: 14 })} Mark uploaded</SecondaryButton>}
+                    {isDraft && <SecondaryButton onClick={deleteDraft} color={CB.red}>{icons.trash({ size: 14 })} Delete draft</SecondaryButton>}
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 16 }}>
+                  {[
+                    { label: "Lines in the file", value: kept.length, color: CB.navy },
+                    { label: "Units", value: totalUnits, color: CB.navy },
+                    { label: "Flagged", value: flaggedKept.length, color: flaggedKept.length ? CB.amber : CB.textLight },
+                    { label: "Removed", value: removed.length, color: removed.length ? CB.amber : CB.textLight },
+                    { label: "Not in the budget", value: unmatched.length, color: unmatched.length ? CB.red : CB.textLight },
+                  ].map((c, i) => (
+                    <div key={i} style={{ padding: "10px 14px", borderRadius: 12, border: `1px solid ${CB.border}`, minWidth: 120 }}>
+                      <div style={{ fontSize: 20, fontWeight: 800, color: c.color }}>{c.value}</div>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: CB.textMid, textTransform: "uppercase", letterSpacing: 0.4 }}>{c.label}</div>
+                    </div>
+                  ))}
+                </div>
+                {!isDraft && (
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 16, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 13, color: CB.textMid }}>UPI Payment File Record ID</span>
+                    <input style={{ ...fieldStyle, width: 160, padding: "7px 10px" }} value={recordDraft} onChange={e => setRecordDraft(e.target.value)} placeholder="e.g. 36707" inputMode="numeric" />
+                    <SecondaryButton onClick={saveRecord}>Save</SecondaryButton>
+                  </div>
+                )}
+              </div>
+
+              <div style={card}>
+                <h4 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 10 }}>Lines in the file</h4>
+                {kept.length === 0 ? (
+                  <div style={{ fontSize: 13, color: CB.textLight }}>No lines will be sent in this file.</div>
+                ) : (
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                      <thead><tr>
+                        <th style={th}>Line</th><th style={th}>Client</th><th style={th}>Code</th><th style={th}>Dates</th><th style={th}>Units</th><th style={th}>Flags</th>
+                        {!isDraft && <th style={th}>UPI status</th>}
+                      </tr></thead>
+                      <tbody>
+                        {kept.map(l => (
+                          <tr key={l.id}>
+                            <td style={td}>{l.line_number}{l.action === "split" && <div style={{ fontSize: 11, color: CB.textLight }}>split from {l.source_line_number}</div>}</td>
+                            <td style={{ ...td, fontWeight: 600 }}>{personName(l)}</td>
+                            <td style={td}><Badge text={l.service_code || "?"} color={CB.blue} /></td>
+                            <td style={{ ...td, whiteSpace: "nowrap" }}>{e520Day(l.start_date)} – {e520Day(l.end_date)}</td>
+                            <td style={{ ...td, fontWeight: 700 }}>{l.units}</td>
+                            <td style={td}>{flagList(l.flags)}</td>
+                            {!isDraft && (
+                              <td style={td}>
+                                {l.released_at ? (
+                                  <div><Badge text={`Released · ${l.upi_status}`} color={CB.textMid} /><div style={{ fontSize: 11, color: CB.textMid, marginTop: 2 }}>{l.release_reason}</div></div>
+                                ) : (
+                                  <SecondaryButton onClick={() => { setReleaseStatus(""); setReleaseReason(""); setReleaseLine(l); }}>Release…</SecondaryButton>
+                                )}
+                              </td>
+                            )}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {removed.length > 0 && (
+                <div style={card}>
+                  <h4 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Removed from the file</h4>
+                  <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 10 }}>These UPI lines aren't sent. Fix the reason and upload the download again, or bill them by hand.</div>
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                      <thead><tr><th style={th}>Line</th><th style={th}>Client</th><th style={th}>Code</th><th style={th}>Dates</th><th style={th}>Why</th></tr></thead>
+                      <tbody>
+                        {removed.map(l => (
+                          <tr key={l.id}>
+                            <td style={td}>{l.line_number}</td>
+                            <td style={{ ...td, fontWeight: 600 }}>{personName(l)}</td>
+                            <td style={td}><Badge text={l.service_code || "?"} color={CB.textMid} /></td>
+                            <td style={{ ...td, whiteSpace: "nowrap" }}>{e520Day(l.start_date)} – {e520Day(l.end_date)}</td>
+                            <td style={td}>{l.remove_reason}{Array.isArray(l.flags) && l.flags.length > 0 && <div style={{ marginTop: 6 }}>{flagList(l.flags)}</div>}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {unmatched.length > 0 && (
+                <div style={card}>
+                  <h4 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Delivered but not in the budget</h4>
+                  <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 10 }}>Approved notes this month with no UPI line for that client and code — usually a service missing from the PCSP budget.</div>
+                  <div style={{ display: "grid", gap: 6 }}>
+                    {unmatched.map((u, i) => (
+                      <div key={i} style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", padding: "8px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, fontSize: 13 }}>
+                        <span style={{ fontWeight: 600 }}>{detail.names[u.person_id] || "—"}</span>
+                        <Badge text={u.code} color={CB.red} />
+                        <span style={{ color: CB.textMid }}>{u.notes} note{u.notes === 1 ? "" : "s"}, {e520Day(u.first)} – {e520Day(u.last)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <Modal open={markOpen} onClose={() => setMarkOpen(false)} title="Mark uploaded"
+                subtitle="Do this after UPI accepts the file. The notes behind it become billed and lock.">
+                <FormField label="UPI Payment File Record ID (optional — you can add it later)">
+                  <input style={fieldStyle} value={markRecordId} onChange={e => setMarkRecordId(e.target.value)} placeholder="e.g. 36707" inputMode="numeric" />
+                </FormField>
+                {reviewItems > 0 && (
+                  <label style={{ display: "flex", gap: 10, alignItems: "flex-start", fontSize: 13, color: CB.navy, padding: "10px 12px", borderRadius: 10, border: `1px solid ${CB.amber}`, marginTop: 4, cursor: "pointer" }}>
+                    <input type="checkbox" checked={markConfirmed} onChange={e => setMarkConfirmed(e.target.checked)} style={{ marginTop: 2 }} />
+                    <span>I've reviewed the {reviewItems} flagged item{reviewItems === 1 ? "" : "s"} on this file ({flaggedKept.length} flagged line{flaggedKept.length === 1 ? "" : "s"}, {removed.length} removed, {unmatched.length} not in the budget).</span>
+                  </label>
+                )}
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 14 }}>
+                  <SecondaryButton onClick={() => setMarkOpen(false)}>Cancel</SecondaryButton>
+                  <PrimaryButton onClick={markUploaded} loading={marking} disabled={reviewItems > 0 && !markConfirmed}>{icons.checkCircle({ size: 15 })} Mark uploaded</PrimaryButton>
+                </div>
+              </Modal>
+
+              <Modal open={!!releaseLine} onClose={() => setReleaseLine(null)} title="Release a line"
+                subtitle={releaseLine ? `Line ${releaseLine.line_number} · ${personName(releaseLine)} · ${releaseLine.service_code}. Only for a line UPI has closed; its notes go back to approved.` : ""}>
+                <FormField label="UPI's status for this line" required>
+                  <select style={fieldStyle} value={releaseStatus} onChange={e => setReleaseStatus(e.target.value)}>
+                    <option value="">Select…</option>
+                    {E520_DEAD_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </FormField>
+                <FormField label="Why" required>
+                  <textarea style={{ ...fieldStyle, minHeight: 64, resize: "vertical" }} value={releaseReason} onChange={e => setReleaseReason(e.target.value)} placeholder="e.g. SC denied: wrong code for this client" />
+                </FormField>
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 8 }}>
+                  <SecondaryButton onClick={() => setReleaseLine(null)}>Cancel</SecondaryButton>
+                  <PrimaryButton onClick={release} loading={releasing}>Release line</PrimaryButton>
+                </div>
+              </Modal>
+            </>
+          )}
+        </div>
+      );
+    }
+
     function FinancePage() {
       const [tab, setTab] = useState("overview");
       const [contracts, setContracts] = useState([]);
@@ -12842,7 +13278,8 @@
       const [importing, setImporting] = useState(false);
       const { isMobile } = useMobile();
       const { addToast } = useToast();
-      const { orgId, brand } = useAuth();
+      const { orgId, brand, accessTier } = useAuth();
+      const canPayFiles = accessTier === "manage"; // v20.0.25 — Payment Files: owners, admins, compliance directors
 
       useEffect(() => { loadFinanceData(); }, []);
 
@@ -13023,15 +13460,15 @@
       };
 
       const statusColors = { pending: CB.amber, submitted: CB.blue, paid: CB.green, partial: "#7B1FA2", denied: CB.red, appealed: "#E65100", void: CB.textLight };
-      const tabs = [{ key:"overview",label:"Overview" },{ key:"billing",label:"Billing" },{ key:"claims",label:`Claims (${claims.length})` },{ key:"payments",label:`Payments (${payments.length})` },{ key:"aging",label:"Aging Report" },{ key:"contracts",label:`Contracts (${contracts.length})` }];
+      const tabs = [{ key:"overview",label:"Overview" },{ key:"billing",label:"Billing" },{ key:"claims",label:`Claims (${claims.length})` },{ key:"payments",label:`Payments (${payments.length})` },{ key:"aging",label:"Aging Report" },{ key:"contracts",label:`Contracts (${contracts.length})` }, ...(canPayFiles ? [{ key:"payfiles",label:"Payment Files" }] : [])];
 
       return (
         <div>
           <PageHeader title="Finance" subtitle="Billing, claims, payments, aging, and contracts — unified financial operations"
             action={<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               {tab === "aging" && <button onClick={exportAgingCSV} style={{ display:"flex",alignItems:"center",gap:6,padding:"10px 16px",borderRadius:10,border:`1px solid ${CB.border}`,background:CB.white,color:CB.textMid,fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit" }}>{icons.barChart({size:14})} Export CSV</button>}
-              {tab !== "billing" && <button onClick={() => setShowImport(true)} style={{ display:"flex",alignItems:"center",gap:6,padding:"10px 16px",borderRadius:10,border:`1px solid ${CB.navy}`,background:`${CB.navy}08`,color:CB.navy,fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit" }}>{icons.upload({size:14})} Import UPI</button>}
-              {tab !== "billing" && <button onClick={() => setShowPaymentForm(true)} style={{ display:"flex",alignItems:"center",gap:6,padding:"10px 16px",borderRadius:10,border:"none",background:CB.green,color:CB.white,fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit" }}>{icons.dollar({size:14})} Record Payment</button>}
+              {tab !== "billing" && tab !== "payfiles" && <button onClick={() => setShowImport(true)} style={{ display:"flex",alignItems:"center",gap:6,padding:"10px 16px",borderRadius:10,border:`1px solid ${CB.navy}`,background:`${CB.navy}08`,color:CB.navy,fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit" }}>{icons.upload({size:14})} Import UPI</button>}
+              {tab !== "billing" && tab !== "payfiles" && <button onClick={() => setShowPaymentForm(true)} style={{ display:"flex",alignItems:"center",gap:6,padding:"10px 16px",borderRadius:10,border:"none",background:CB.green,color:CB.white,fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"inherit" }}>{icons.dollar({size:14})} Record Payment</button>}
             </div>}
           />
           <div style={{ display:"flex",gap:4,marginBottom:20,background:CB.white,borderRadius:12,padding:4,border:`1px solid ${CB.border}`,width:"fit-content",flexWrap:"wrap" }}>
@@ -13070,6 +13507,9 @@
 
             {/* ═══ BILLING (merged from standalone Billing page) ═══ */}
             {tab === "billing" && <BillingPage embedded={true} />}
+
+            {/* ═══ PAYMENT FILES (v20.0.25) ═══ */}
+            {tab === "payfiles" && canPayFiles && <PaymentFilesTab />}
 
             {/* ═══ CLAIMS ═══ */}
             {tab === "claims" && (
