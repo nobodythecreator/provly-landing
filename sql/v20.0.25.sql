@@ -11,6 +11,9 @@
 -- r1 (Greptile r1): the review must match what the reviewer saw — the page sends the item
 --     count it showed and e520_confirm_review refuses a different one; the self-test's
 --     positive case runs as a real signed-in owner / admin / compliance director.
+-- r2 (Greptile r2): the self-test's reviewer search covers every linked login (owners, admins
+--     and compliance directors first) instead of stopping after 50. Test-only; no change to what
+--     the database does.
 -- 🟢 Run in the Supabase SQL editor. Idempotent. Rolls back completely if any
 -- self-test check fails.
 -- ═══════════════════════════════════════════════════════════════════════
@@ -112,7 +115,9 @@ BEGIN
   PERFORM set_config('request.jwt.claims', '{}', true);           -- "nobody signed in"
 
   -- a real owner / admin / compliance director login, as the page uses
-  FOR c IN SELECT s.id, s.user_id, s.org_id FROM staff s WHERE s.user_id IS NOT NULL ORDER BY s.id LIMIT 50 LOOP
+  -- r2: every linked login, owners / admins / compliance directors first (the loop stops at the first match)
+  FOR c IN SELECT s.id, s.user_id, s.org_id FROM staff s WHERE s.user_id IS NOT NULL
+            ORDER BY CASE WHEN s.role::text IN ('owner', 'admin', 'compliance_director') THEN 0 ELSE 1 END, s.id LOOP
     PERFORM set_config('request.jwt.claims', json_build_object('sub', c.user_id, 'role', 'authenticated', 'org_id', c.org_id,
                                                                'app_metadata', json_build_object('org_id', c.org_id))::text, true);
     IF public.access_tier() IS NOT DISTINCT FROM 'manage' AND public.org_id() IS NOT DISTINCT FROM c.org_id
