@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.25a (e520 PR 3, part 2; P3 = A): Payment Files gains Compare with my file — choose your hand-made UPI CSV and Provly shows, client by client and code by code, where the two files agree, where they differ (with Provly's flags and removal reasons beside each difference), and what's only in one of them; the comparison runs in the browser and nothing is stored. HAP and MTP leave the note pickers (new and edit) and a HAP note is refused at save (HAP is documented by the placement; the database refuses it too). Compliance deadlines D23/D24 speak UPI payment files, not PRISM claims. -->
   <!-- v20.0.25r1 (Greptile r1): Payment Files loads every line of a file (paged, 1,000 at a time) before showing it; the review sends the item count it showed and the database refuses a different one; an action that finishes after you move to another file no longer reloads it over the one you're looking at. -->
   <!-- v20.0.25 (e520 PR 3, part 1; P1 = B, P2 = B): Finance gains a Payment Files tab for owners, admins and compliance directors — upload UPI's CSV, review the built file (kept lines with their flags, removed lines with reasons, delivered-but-not-in-the-budget notes), download it byte for byte, Mark uploaded (UPI's record ID optional; a recorded review of the flagged items when there are any — enforced by the database), release a line UPI closed, set the record ID later, delete a draft. Every rule lives in the database (e520_* RPCs); the tab only shows it. sql/v20.0.25.sql runs first. -->
   <!-- v20.0.23a r3 (Greptile r3): Approve Submitted always loads for the filter on screen now — the reload after an approval reads the current client and month, not the ones in place when Approve was clicked, so changing filters mid-approval can't strand the list; and if the list ever is out of date with nothing loading, it offers Reload instead of sitting on "Loading…". -->
@@ -1800,7 +1801,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.25</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.25a</span>
               </div>
             </div>
             {isMobile && (
@@ -6004,8 +6005,8 @@
       // ── EVV & Billing ──
       { id: "D21", category: "EVV", title: "EVV Clock-In/Out", description: "Record GPS-verified clock-in and clock-out for every EVV-required service", frequency: "Per service", daysToComplete: 0, recurring: true, severity: "critical" },
       { id: "D22", category: "EVV", title: "EVV Exception Resolution", description: "Resolve any EVV exceptions within 48 hours of occurrence", frequency: "As needed", daysToComplete: 2, recurring: false, severity: "high" },
-      { id: "D23", category: "Billing", title: "Claims Submission — Monthly", description: "Submit all claims through PRISM within 90 days of service date", frequency: "Monthly", daysToComplete: 90, recurring: true, severity: "high" },
-      { id: "D24", category: "Billing", title: "Claims Resubmission — Denied", description: "Resubmit corrected denied claims within 30 days of denial notice", frequency: "As needed", daysToComplete: 30, recurring: false, severity: "high" },
+      { id: "D23", category: "Billing", title: "UPI Payment File — Monthly", description: "Submit each month's payment file through UPI within 90 days of service date", frequency: "Monthly", daysToComplete: 90, recurring: true, severity: "high" },
+      { id: "D24", category: "Billing", title: "Resubmission — Denied Payments", description: "Resubmit corrected denied payment lines in a supplemental file within 30 days of the denial", frequency: "As needed", daysToComplete: 30, recurring: false, severity: "high" },
       // ── Authorization & Eligibility ──
       { id: "D25", category: "Authorizations", title: "Authorization Renewal Request", description: "Submit renewal requests at least 30 days before authorization expiry", frequency: "Per auth period", daysToComplete: null, recurring: true, severity: "critical" },
       { id: "D26", category: "Authorizations", title: "Medicaid Eligibility Verification", description: "Verify Medicaid eligibility monthly before billing", frequency: "Monthly", daysToComplete: null, recurring: true, severity: "high" },
@@ -6272,6 +6273,9 @@
         if (serviceCodes.find(sc => sc.id === form.service_code_id)?.code === "MTP") {
           return addToast("MTP is recorded on the DSG note (Transported), not as its own note", "error");
         }
+        if (serviceCodes.find(sc => sc.id === form.service_code_id)?.code === "HAP") { // v20.0.25a
+          return addToast("HAP is documented by the client's placement, not a service note", "error");
+        }
         const codeIsCurrent = currentAuths.some(a => a.service_code_id === form.service_code_id);
         const ctx = form.context_id ? contexts.find(c => c.id === form.context_id) : null;
         const codeViaContext = !!ctx && ctx.service_code_id === form.service_code_id
@@ -6479,7 +6483,7 @@
                 const hasAuth = currentAuths.some(a => a.service_code_id === sc.id); // v20.0.13br1 — current on the service date
                 if (form.person_id && !hasAuth && !(showAllCodes && !frontLine)) return null;
                 if (!form.person_id && frontLine) return null;
-                if (sc.code === "MTP" && form.service_code_id !== sc.id) return null; // v20.0.23 (e520 D6) — MTP is answered on the DSG note
+                if ((sc.code === "MTP" || sc.code === "HAP") && form.service_code_id !== sc.id) return null; // v20.0.23 (e520 D6) — MTP is answered on the DSG note; v20.0.25a — HAP is documented by the placement
                 return <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}{hasAuth ? " ✓" : ""}</option>;
               })}
             </select>
@@ -6967,6 +6971,9 @@
         if (toCode?.code === "MTP" && editForm.service_code_id !== viewing.service_code_id) {
           return addToast("MTP is recorded on the DSG note (Transported), not as its own note", "error");
         }
+        if (toCode?.code === "HAP" && editForm.service_code_id !== viewing.service_code_id) { // v20.0.25a
+          return addToast("HAP is documented by the client's placement, not a service note", "error");
+        }
         setSaving(true);
         let duration_minutes = null;
         if (editForm.start_time && editForm.end_time) {
@@ -7275,7 +7282,7 @@
                     {editing ? (
                       <select style={{ ...fieldStyle, padding: "6px 10px", fontSize: 12, fontWeight: 700, width: "auto", minWidth: 180, background: CB.white }}
                         value={editForm.service_code_id} onChange={e => setEditForm(p => ({ ...p, service_code_id: e.target.value }))}>
-                        {serviceCodes.filter(sc => sc.code !== "MTP" || sc.id === viewing.service_code_id).map(sc => <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}</option>)}{/* v20.0.23r1 (e520 D6) — MTP is answered on the DSG note; an MTP note keeps its code */}
+                        {serviceCodes.filter(sc => (sc.code !== "MTP" && sc.code !== "HAP") || sc.id === viewing.service_code_id).map(sc => <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}</option>)}{/* v20.0.23r1 (e520 D6) — MTP is answered on the DSG note; an MTP note keeps its code */}
                       </select>
                     ) : (
                       <Badge text={viewing.service_code_definitions?.code || "?"} color={CB.blue} />
@@ -9667,10 +9674,10 @@
       // value formats replicate Hope Haven's May 2026 submission accepted by
       // the state: M/D/YYYY dates and h:mm:ss AM/PM times in Mountain Time,
       // blank address columns with 6-decimal GPS carrying location, Batch_id
-      // = YYYYMM, sequential Record_id, Provider ID from PRISM, vendor
+      // = YYYYMM, sequential Record_id, the Medicaid provider ID, vendor
       // "Provly". Member ID written verbatim to preserve leading zeros.
       const UTAH_EVV_HEADER = "Member ID (req),First name (req),Middle initial,Last name (req),Service code (req),Service description,Provider ID (req),Employee Performing Service (req),Begin date (req),Begin time (req),Begin address (req),Begin Apt/Suite/Floor,Begin City (req),Begin State,Begin Zip,Begin Geo Latitude,Begin Geo Longitude,End date (req),End time (req),End Address1,End Address2,End City,End State,End Zip,End Geo Latitude,End Geo Longitude,Orig_receipt_id (req if CORRECTION),Batch_id (req),Record_id (req),EVV Vendor (req)";
-      const UTAH_PROVIDER_ID = "4356953"; // PRISM provider ID
+      const UTAH_PROVIDER_ID = "4356953"; // Medicaid provider ID
       const EVV_VENDOR_NAME = "Provly";
       const SERVICE_DESC_FALLBACK = { SLN: "Supported Living Natural", SLH: "Supported Living Hourly" };
       const exportUtahCsv = async () => {
@@ -12850,6 +12857,31 @@
       return new Date(y, m - 1, 1).toLocaleString(undefined, { month: "long", year: "numeric" });
     };
     const e520Day = (d) => (d ? `${String(d).slice(5, 7)}/${String(d).slice(8, 10)}` : "—");
+    // v20.0.25a (P3 = A) — Compare with my file: both files read the same way, grouped by client (PID) + code
+    const e520CsvHeader = (h) => String(h || "").replace(/^\ufeff/, "").trim().toLowerCase();
+    const e520Pid = (v) => { const d = String(v || "").trim(); return /^\d+$/.test(d) ? d.padStart(9, "0") : d; };
+    const e520IsoDate = (v) => {
+      const t = String(v || "").trim();
+      const m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
+      if (!m) return t;
+      return `${m[3].length === 2 ? "20" + m[3] : m[3]}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}`;
+    };
+    const e520Group = (rows) => {
+      const g = {};
+      rows.forEach(r => {
+        const pid = e520Pid(r.consumer_pid), code = String(r.service_code || "").trim().toUpperCase();
+        if (!pid || !code) return;
+        const k = `${pid}|${code}`;
+        if (!g[k]) g[k] = { pid, code, name: String(r.consumer_name || "").trim(), spans: [], total: 0 };
+        const u = Number(r.units) || 0;
+        if (u === 0) return;                                       // a 0-unit line isn't billed
+        g[k].spans.push({ s: e520IsoDate(r.service_start_date), e: e520IsoDate(r.service_end_date), u });
+        g[k].total += u;
+      });
+      Object.values(g).forEach(x => x.spans.sort((a, b) => (a.s + a.e).localeCompare(b.s + b.e)));
+      return g;
+    };
+    const e520SpanText = (x) => (x && x.spans.length) ? x.spans.map(sp => `${e520Day(sp.s)}–${e520Day(sp.e)} = ${sp.u}`).join(", ") : "—";
     const e520Sha256 = async (text) => {
       const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text || ""));
       return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
@@ -12875,6 +12907,10 @@
       const [releasing, setReleasing] = useState(false);
       const [recordDraft, setRecordDraft] = useState("");
       const [busy, setBusy] = useState(false);
+      const [cmp, setCmp] = useState(null);                     // v20.0.25a — { fileName, rows } for the file on screen
+      const [cmpError, setCmpError] = useState(null);
+      const [cmpShowMatches, setCmpShowMatches] = useState(false);
+      const cmpFileRef = useRef(null);
       const fileRef = useRef(null);
       const listSeq = useRef(0);
       const detailSeq = useRef(0);
@@ -12899,7 +12935,7 @@
         const all = [];
         for (let from = 0; ; from += PAGE) {
           const { data, error } = await supabase.from("e520_lines")
-            .select("id, ord, line_number, source_line_number, service_code, unit_type, start_date, end_date, units, action, remove_reason, flags, upi_status, released_at, release_reason, person_id, persons(first_name, last_name)")
+            .select("id, ord, line_number, source_line_number, service_code, unit_type, start_date, end_date, units, action, remove_reason, flags, upi_status, released_at, release_reason, person_id, raw, persons(first_name, last_name)")
             .eq("batch_id", id).order("ord", { ascending: true }).order("id", { ascending: true })
             .range(from, from + PAGE - 1);
           if (error) return { error };
@@ -12935,9 +12971,31 @@
 
       useEffect(() => { loadList(); }, []);
       useEffect(() => {
+        setCmp(null); setCmpError(null); setCmpShowMatches(false);   // v20.0.25a — a comparison belongs to one file
         if (selectedId) { setDetail(null); loadDetail(selectedId); }
         else { detailSeq.current++; setDetail(null); setDetailError(null); }
       }, [selectedId]);
+
+      // v20.0.25a — read your hand-made file in the browser; nothing is uploaded or stored
+      const onCompareFile = (e) => {
+        const file = e.target.files && e.target.files[0];
+        e.target.value = "";
+        if (!file) return;
+        const forId = selectedRef.current;
+        setCmpError(null);
+        Papa.parse(file, {
+          header: true, skipEmptyLines: "greedy", transformHeader: e520CsvHeader,
+          complete: (res) => {
+            if (forId !== selectedRef.current) return;              // moved to another file meanwhile
+            const cols = (res.meta && res.meta.fields) || [];
+            const need = ["consumer_pid", "service_code", "service_start_date", "service_end_date", "units"];
+            const missing = need.filter(c => !cols.includes(c));
+            if (missing.length) { setCmp(null); setCmpError(`That file has no ${missing.join(", ")} column. Use the CSV you would upload to UPI.`); return; }
+            setCmp({ fileName: file.name, rows: res.data || [] });
+          },
+          error: () => { if (forId === selectedRef.current) { setCmp(null); setCmpError("Couldn't read that file."); } },
+        });
+      };
 
       const onFile = async (e) => {
         const file = e.target.files && e.target.files[0];
@@ -12973,6 +13031,37 @@
       const flaggedKept = kept.filter(l => Array.isArray(l.flags) && l.flags.length > 0);
       const reviewItems = flaggedKept.length + removed.length + unmatched.length;   // the same count the database checks
       const totalUnits = kept.reduce((s, l) => s + (Number(l.units) || 0), 0);
+
+      // v20.0.25a — the comparison, client (PID) + code at a time
+      let cmpRows = null;
+      if (cmp && detail) {
+        const provRows = (Papa.parse(detail.batch.export_csv || "", { header: true, skipEmptyLines: "greedy", transformHeader: e520CsvHeader }).data) || [];
+        const mine = e520Group(cmp.rows), prov = e520Group(provRows);
+        const hdr = String(detail.batch.header || "").split(",").map(e520CsvHeader);
+        const iPid = hdr.indexOf("consumer_pid");
+        const why = {};                                              // Provly's reasons for each client + code
+        const whyName = {};
+        detail.lines.forEach(l => {
+          const pid = e520Pid(Array.isArray(l.raw) && iPid >= 0 ? l.raw[iPid] : "");
+          const k = `${pid}|${String(l.service_code || "").toUpperCase()}`;
+          if (!why[k]) why[k] = [];
+          if (l.action === "remove" && l.remove_reason) why[k].push(`Line ${l.line_number} removed: ${l.remove_reason}`);
+          (Array.isArray(l.flags) ? l.flags : []).forEach(f => why[k].push(f.detail));
+          if (!whyName[k] && l.persons) whyName[k] = `${l.persons.first_name || ""} ${l.persons.last_name || ""}`.trim();
+        });
+        const sig = (x) => x ? x.spans.map(sp => `${sp.s}|${sp.e}|${sp.u}`).join(";") : "";
+        const keys = [...new Set([...Object.keys(mine), ...Object.keys(prov)])];
+        cmpRows = keys.map(k => {
+          const a = mine[k], b = prov[k];
+          const status = a && b ? (a.total === b.total && sig(a) === sig(b) ? "match" : "differs")
+                       : a ? (a.total > 0 ? "only_yours" : "match") : (b.total > 0 ? "only_provly" : "match");
+          return { k, code: (a || b).code, name: whyName[k] || (a && a.name) || (b && b.name) || "—",
+                   a, b, status, reasons: [...new Set(why[k] || [])], diff: (b ? b.total : 0) - (a ? a.total : 0) };
+        }).sort((x, y) => x.name.localeCompare(y.name) || x.code.localeCompare(y.code));
+      }
+      const cmpCount = (st) => cmpRows ? cmpRows.filter(r => r.status === st).length : 0;
+      const CMP_LABEL = { differs: "Differs", only_yours: "Only in yours", only_provly: "Only in Provly's", match: "Match" };
+      const CMP_COLOR = { differs: CB.amber, only_yours: CB.red, only_provly: CB.blue, match: CB.green };
 
       const markUploaded = async () => {
         if (marking || !detail) return;
@@ -13198,6 +13287,79 @@
                         ))}
                       </tbody>
                     </table>
+                  </div>
+                )}
+              </div>
+
+              {/* v20.0.25a (P3 = A) — Compare with my file */}
+              <div style={card}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, flexWrap: "wrap" }}>
+                  <div style={{ maxWidth: 620 }}>
+                    <h4 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Compare with my file</h4>
+                    <div style={{ fontSize: 12, color: CB.textMid }}>
+                      Choose the file you made by hand for this month. Provly lines the two up client by client and code by code, with its reasons beside every difference.
+                      The comparison happens in your browser; nothing is uploaded or saved.
+                    </div>
+                  </div>
+                  <div>
+                    <input ref={cmpFileRef} type="file" accept=".csv,text/csv" style={{ display: "none" }} onChange={onCompareFile} />
+                    <SecondaryButton onClick={() => cmpFileRef.current && cmpFileRef.current.click()}>{icons.upload({ size: 14 })} {cmp ? "Compare another file" : "Choose my file"}</SecondaryButton>
+                  </div>
+                </div>
+                {cmpError && <div style={{ marginTop: 12 }}>{errorPanel(cmpError)}</div>}
+                {cmpRows && (
+                  <div style={{ marginTop: 14 }}>
+                    <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 10 }}>Compared with <strong>{cmp.fileName}</strong></div>
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+                      {["match", "differs", "only_yours", "only_provly"].map(st => (
+                        <div key={st} style={{ padding: "8px 12px", borderRadius: 10, border: `1px solid ${CB.border}`, minWidth: 110 }}>
+                          <div style={{ fontSize: 18, fontWeight: 800, color: cmpCount(st) ? CMP_COLOR[st] : CB.textLight }}>{cmpCount(st)}</div>
+                          <div style={{ fontSize: 11, fontWeight: 600, color: CB.textMid, textTransform: "uppercase", letterSpacing: 0.4 }}>{CMP_LABEL[st]}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {cmpRows.filter(r => r.status !== "match").length === 0 ? (
+                      <div style={{ padding: "12px 14px", borderRadius: 10, border: `1px solid ${CB.green}`, color: CB.green, fontSize: 13, fontWeight: 600 }}>
+                        Every client and code matches: same units, same dates.
+                      </div>
+                    ) : (
+                      <div style={{ overflowX: "auto" }}>
+                        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                          <thead><tr>
+                            <th style={th}>Client</th><th style={th}>Code</th><th style={th}>Result</th><th style={th}>Your file</th><th style={th}>Provly's file</th><th style={th}>Provly's reasons</th>
+                          </tr></thead>
+                          <tbody>
+                            {cmpRows.filter(r => r.status !== "match").map(r => (
+                              <tr key={r.k}>
+                                <td style={{ ...td, fontWeight: 600 }}>{r.name}</td>
+                                <td style={td}><Badge text={r.code} color={CB.blue} /></td>
+                                <td style={td}>
+                                  <Badge text={CMP_LABEL[r.status]} color={CMP_COLOR[r.status]} />
+                                  {r.status === "differs" && <div style={{ fontSize: 11, color: CB.textMid, marginTop: 3 }}>{r.diff > 0 ? `Provly ${r.diff} more` : r.diff < 0 ? `Provly ${-r.diff} fewer` : "same units, different dates"}</div>}
+                                </td>
+                                <td style={td}>{e520SpanText(r.a)}{r.a && <div style={{ fontSize: 11, color: CB.textLight }}>total {r.a.total}</div>}</td>
+                                <td style={td}>{e520SpanText(r.b)}{r.b && <div style={{ fontSize: 11, color: CB.textLight }}>total {r.b.total}</div>}</td>
+                                <td style={{ ...td, fontSize: 12, color: CB.textMid }}>{r.reasons.length ? r.reasons.map((x, i) => <div key={i}>{x}</div>) : <span style={{ color: CB.textLight }}>—</span>}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                    {cmpCount("match") > 0 && (
+                      <div style={{ marginTop: 10 }}>
+                        <SecondaryButton onClick={() => setCmpShowMatches(v => !v)}>{cmpShowMatches ? "Hide" : "Show"} the {cmpCount("match")} match{cmpCount("match") === 1 ? "" : "es"}</SecondaryButton>
+                        {cmpShowMatches && (
+                          <div style={{ display: "grid", gap: 4, marginTop: 8 }}>
+                            {cmpRows.filter(r => r.status === "match").map(r => (
+                              <div key={r.k} style={{ fontSize: 12, color: CB.textMid }}>
+                                <span style={{ fontWeight: 600, color: CB.navy }}>{r.name}</span> · {r.code} · {e520SpanText(r.b || r.a)}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
