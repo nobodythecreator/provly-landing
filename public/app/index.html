@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.26 r1 (Greptile r1): an unconfirmed Add 1056 Row keeps its request identity (per client, on disk) until its outcome is known — the next add for that client reuses it, so a late commit can't become a second row; an earlier save found with different values opens for correction. Finance claims never price a note from a row that starts after it (no covering row → the latest earlier row, else no rate). The face sheet prints Approval ID and Rate. Database side: sql/v20.0.26r1_reservations.sql (an S note is reserved on a payment line only when it billed). -->
   <!-- v20.0.26 (authorizations become 1056 rows — docs/authorizations-design.md v1.0, Decisions A and D1): an authorization is one row of the client's DSPD 1056 budget — service, Approval ID, start, end, Kind (D daily · Q quarter hour · S per session · M monthly), rate, max billable units per month, and units for the period (the 1056's Annual Units). The client profile's new Authorizations tab is the one place rows are added, edited and deleted (manage tier; every change audited in the database); Edit Client shows them read-only, and the intake wizard's rows carry the same fields. Every row shows two counters in its own Kind: this month against the monthly max, and the period against the units for the period. D1: a note dated during a budget lapse (the client has had the code, no row covers the date) saves — the note form offers the lapsed code with a warning — and managers see it flagged NO CURRENT AUTHORIZATION on the notes list, the client's notes, and the Authorizations tab until the covering row is entered. PBA is per session. Database side: sql/v20.0.26.sql (1056 columns, Kind-aware counters, the relaxed front-line rule, notes_without_authorization, audit trigger, S lines in the payment file). -->
   <!-- v20.0.25b r1 (Greptile r1): a client edit sends only the fields the user changed; unchanged fields stay out of the update, so a row loaded before someone else's edit can't write its old values back over theirs. Nothing changed on the client (e.g. only an authorization added) → the client row isn't written at all. -->
   <!-- v20.0.25b: the DSPD PID shows. The Clients list loads it (it didn't, so Edit from the list saved the PID back as blank — every client edit from the list erased it); an edit now writes only the fields it loaded or changed, so a field missing from a list can never be wiped again. Clients list gains a DSPD PID column (Missing in amber for active clients); the profile shows the PID; the form explains where the PID comes from and warns when it isn't 9 digits starting with 0. -->
@@ -12360,10 +12361,13 @@
             const key = `${a.person_id}_${a.service_code_id}`;
             (authMap[key] = authMap[key] || []).push(a);
           });
+          // r1 — no covering row (a lapse): the latest row that started before the note, never a
+          // row that starts after it; none → no rate
           const authFor = (key, day) => {
             const list = (authMap[key] || []).filter(a => a.status !== "rejected");
             return list.find(a => (!a.start_date || a.start_date <= day) && (!a.end_date || a.end_date >= day))
-              || list.sort((x, y) => String(y.start_date || "").localeCompare(String(x.start_date || "")))[0] || null;
+              || list.filter(a => !a.start_date || a.start_date <= day)
+                     .sort((x, y) => String(y.start_date || "").localeCompare(String(x.start_date || "")))[0] || null;
           };
 
           // Build claims from notes
@@ -18477,6 +18481,12 @@
         setLoadedOnce(true);
         if (error) { setLoadError(error.message || "request failed"); return; } // keep the last good rows
         setRows(data || []);
+        // r1 — proof by presence: an earlier unconfirmed add that is now on file is released
+        const pendingId = readPendingAdd(clientId);
+        if (pendingId && (data || []).some(a => a.id === pendingId)) {
+          setPendingAdd(clientId, null);
+          addToast("Your earlier 1056 row did save — it's in the list", "info");
+        }
         if (!canEdit) return;
         const { data: notes } = await supabase.from("service_notes")
           .select("id, service_date, service_code_definitions(code)")
@@ -18514,9 +18524,23 @@
         authorized_units: a.authorized_units == null ? "" : String(a.authorized_units),
         status: a.status || "approved",
       });
-      // an add owns one client-generated id for the whole time its form is open: pressing Save again
-      // after a lost response hits the primary key instead of adding a twin
-      const openAdd = () => setEditor({ mode: "add", id: crypto.randomUUID(), row: { ...blank1056Row(), start_date: today } });
+      // v20.0.26 r1 — an add's request identity lives until its OUTCOME is known, not just
+      // while the form is open. It is written to disk BEFORE the request goes out (verified
+      // by reading it back) and released only on proof: the insert answered, the database
+      // rejected it, or the row is found on file. Until then every new add for this client
+      // reuses it, so a request that commits late can never become a second row.
+      const PENDING_ADD_KEY = "provly_auth1056_pending_add";        // { [clientId]: id }
+      const readPendingAll = () => { try { return JSON.parse(localStorage.getItem(PENDING_ADD_KEY) || "{}") || {}; } catch (_) { return {}; } };
+      const readPendingAdd = (cid) => { const v = readPendingAll()[cid]; return typeof v === "string" ? v : null; };
+      const setPendingAdd = (cid, id) => {
+        try {
+          const m = readPendingAll();
+          if (id) m[cid] = id; else delete m[cid];
+          localStorage.setItem(PENDING_ADD_KEY, JSON.stringify(m));
+          return readPendingAdd(cid) === (id || null);
+        } catch (_) { return false; }
+      };
+      const openAdd = () => setEditor({ mode: "add", id: readPendingAdd(clientId) || crypto.randomUUID(), row: { ...blank1056Row(), start_date: today } });
       const openEdit = (a) => setEditor({ mode: "edit", id: a.id, row: rowOf(a), stored: storedOf(a) });
       const setEditorRow = (fn) => setEditor(cur => cur ? { ...cur, row: typeof fn === "function" ? fn(cur.row) : fn } : cur);
       const closeEditorFor = (target) => setEditor(cur => (cur && cur.id === target.id && cur.mode === target.mode) ? null : cur);
@@ -18539,6 +18563,11 @@
           if (Object.keys(changes).length === 0) { closeEditorFor(target); return addToast("No changes to save", "info"); }
           request = () => supabase.from("person_service_authorizations").update(changes).eq("id", target.id).select("id");
         }
+        const isAdd = target.mode === "add";
+        // r1 — write-ahead: no durable identity, no request
+        if (isAdd && !setPendingAdd(clientId, target.id)) {
+          return addToast("This browser can't store the save-safety key (site storage is blocked or full), so the row was NOT sent — it could otherwise be added twice. Allow site storage, then press Save again.", "error");
+        }
         setSaving(true);
         let res;
         try { res = await request(); } catch (e) { res = { error: { message: e?.message || "network error", code: "NETWORK" } }; }
@@ -18546,19 +18575,32 @@
         const { data, error } = res;
         if (error) {
           const msg = error.message || "";
-          if (error.code === "23505" && /uq_psa_identical/i.test(msg)) {
-            if (target.mode === "add") { closeEditorFor(target); load(); return addToast(`An identical ${code || ""} row is already on file for this client — nothing was added`, "info"); }
-            return addToast("Another row on file is identical to this one. Change a field, or delete the other row.", "error");
+          if (!error.code || error.code === "NETWORK") {
+            // no answer: it may still commit — the identity stays on disk (r1)
+            return addToast("The save couldn't be confirmed (connection problem). Press Save again — it won't be added twice.", "error");
           }
-          if (target.mode === "add" && error.code === "23505" && /_pkey/i.test(msg)) {
-            closeEditorFor(target); load(); onChanged?.();
+          if (isAdd && error.code === "23505" && /_pkey/i.test(msg)) {
+            // the earlier request with this identity is on file — proof; compare it with what's on screen
+            setPendingAdd(clientId, null);
+            const { data: got } = await supabase.from(AUTH_VIEW).select(AUTH_SELECT).eq("id", target.id).limit(1);
+            const storedRow = got && got[0];
+            load(); onChanged?.();
+            const same = storedRow && Object.keys(payload).every(k => (payload[k] ?? null) === (storedOf(storedRow)[k] ?? null));
+            if (storedRow && !same) {
+              setEditor(cur => (cur && cur.id === target.id && cur.mode === "add") ? { mode: "edit", id: storedRow.id, row: rowOf(storedRow), stored: storedOf(storedRow) } : cur);
+              return addToast("Your earlier save went through with different values. It's open here as saved — correct it and press Save. If you meant a separate row, close this and add it again.", "warning");
+            }
+            closeEditorFor(target);
             return addToast("1056 row added — your earlier attempt had already gone through", "success");
           }
-          if (!error.code || error.code === "NETWORK") {
-            return addToast("The save couldn't be confirmed (connection problem). Press Save again — it won't be added twice.", "error");
+          if (isAdd) setPendingAdd(clientId, null);                  // the database answered with an error: nothing committed
+          if (error.code === "23505" && /uq_psa_identical/i.test(msg)) {
+            if (isAdd) { closeEditorFor(target); load(); return addToast(`An identical ${code || ""} row is already on file for this client — nothing was added`, "info"); }
+            return addToast("Another row on file is identical to this one. Change a field, or delete the other row.", "error");
           }
           return addToast(msg, "error");
         }
+        if (isAdd) setPendingAdd(clientId, null);                    // answered: on file, or refused by the policy
         if (!data || data.length === 0) return addToast(noWriteMsg, "error");
         closeEditorFor(target);
         addToast(target.mode === "add" ? `${code} row added` : `${code} row saved`, "success");
@@ -20504,17 +20546,21 @@
         doc.paragraph("No active authorizations on file.", { muted: true });
       } else {
         doc.tableSimple(
-          ["Code", "Service", "Period", "Kind", "Max/Mo", "Units (period)", "Used", "Remaining"],
+          // v20.0.26 r1 — the 1056 row as printed: Approval ID and Rate included (the rate is
+          // blank below the manage tier — the view masks it); the code stands for the service name
+          ["Code", "Approval ID", "Period", "Kind", "Rate", "Max/Mo", "Units", "Used", "Left"],
           auths.map(a => [
             a.service_code_definitions?.code || "—",
-            a.service_code_definitions?.name || "—",
+            a.approval_id || "—",
             `${formatDate(a.start_date)} – ${formatDate(a.end_date)}`,
             authKindOf(a) || "—",
+            a.rate_per_unit != null ? `$${Number(a.rate_per_unit).toFixed(2)}` : "—",
             a.max_units_per_month ?? "—",
-            a.authorized_units || "—",
+            a.authorized_units ?? "—",
             a.used_units || 0,
             (a.authorized_units || 0) - (a.used_units || 0),
-          ])
+          ]),
+          { colWidths: [0.8, 1.5, 2.3, 0.6, 0.9, 0.9, 0.8, 0.7, 0.7] }
         );
       }
 
