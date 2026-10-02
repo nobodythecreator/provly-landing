@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.26 (authorizations become 1056 rows — docs/authorizations-design.md v1.0, Decisions A and D1): an authorization is one row of the client's DSPD 1056 budget — service, Approval ID, start, end, Kind (D daily · Q quarter hour · S per session · M monthly), rate, max billable units per month, and units for the period (the 1056's Annual Units). The client profile's new Authorizations tab is the one place rows are added, edited and deleted (manage tier; every change audited in the database); Edit Client shows them read-only, and the intake wizard's rows carry the same fields. Every row shows two counters in its own Kind: this month against the monthly max, and the period against the units for the period. D1: a note dated during a budget lapse (the client has had the code, no row covers the date) saves — the note form offers the lapsed code with a warning — and managers see it flagged NO CURRENT AUTHORIZATION on the notes list, the client's notes, and the Authorizations tab until the covering row is entered. PBA is per session. Database side: sql/v20.0.26.sql (1056 columns, Kind-aware counters, the relaxed front-line rule, notes_without_authorization, audit trigger, S lines in the payment file). -->
   <!-- v20.0.25b r1 (Greptile r1): a client edit sends only the fields the user changed; unchanged fields stay out of the update, so a row loaded before someone else's edit can't write its old values back over theirs. Nothing changed on the client (e.g. only an authorization added) → the client row isn't written at all. -->
   <!-- v20.0.25b: the DSPD PID shows. The Clients list loads it (it didn't, so Edit from the list saved the PID back as blank — every client edit from the list erased it); an edit now writes only the fields it loaded or changed, so a field missing from a list can never be wiped again. Clients list gains a DSPD PID column (Missing in amber for active clients); the profile shows the PID; the form explains where the PID comes from and warns when it isn't 9 digits starting with 0. -->
   <!-- v20.0.25a r1 (Greptile r1): Compare with my file — only the latest file you chose can fill the comparison; a units value that isn't a number stops the comparison and names the rows (plain numbers and 1,000-style thousands read; blank = nothing billed); 0-unit lines are skipped before grouping, so they can't count as matches. -->
@@ -1804,7 +1805,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.25b</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.26</span>
               </div>
             </div>
             {isMobile && (
@@ -2834,7 +2835,7 @@
     // ═══════════════════════════════════════════════════════════════
     // MODULE 2: CLIENT CRUD + AUTHORIZATION MANAGEMENT
     // ═══════════════════════════════════════════════════════════════
-    function ClientForm({ open, onClose, onSaved, editing }) {
+    function ClientForm({ open, onClose, onSaved, editing, onOpenAuthorizations }) { // v20.0.26 — onOpenAuthorizations: switch to the profile's Authorizations tab
       const { addToast } = useToast();
       const { orgId } = useAuth();
       const perms = usePermissions();
@@ -2850,7 +2851,6 @@
       });
       const [auths, setAuths] = useState([]);
       const seededRef = useRef(null);   // v20.0.25b — the values the edit form opened with
-      const [newAuth, setNewAuth] = useState({ service_code_id: "", authorized_units: "", start_date: ymd(), end_date: "", rate_per_unit: "", rate_pending: false }); // v20.0.10 — rate_pending: deliberate null-rate attestation (UI-only, never stored)
 
       useEffect(() => {
         supabase.from("service_code_definitions").select("id, code, name").order("code").then(({ data }) => setServiceCodes(data || []));
@@ -2899,451 +2899,29 @@
           });
           setAuths([]);
         }
-        setNewAuth({ service_code_id: "", authorized_units: "", start_date: ymd(), end_date: "", rate_per_unit: "", rate_pending: false });
-        // v20.0.10 (Greptile r1 → r5) — a new client/modal is a new attempt UNLESS
-        // this client has an unconfirmed attempt: then its key is restored so an
-        // unchanged resubmission replays instead of duplicating, and it is
-        // re-checked now.
-        if (open && editing) { refreshUnconfirmed(editing.id); checkUnconfirmed(editing.id); } else setUnconfirmed([]);
       }, [editing, open]);
 
       const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
 
-      // Get the code string for the selected new auth
-      const newAuthCode = serviceCodes.find(sc => sc.id === newAuth.service_code_id)?.code;
-      const newAuthRule = BILLING_RULES[newAuthCode];
-      const isWorksheet = newAuthRule?.worksheet;
-
-      // v20.0.10 (Items 1/2/3) — ONE persistence path for the Add Auth row,
-      // shared by the dashed button and Update. Validates (code + units,
-      // worksheet-rate rules, DSPD ceiling), defaults dates, writes
-      // rate_per_unit and the approval status, reloads, resets. Returns true
-      // on success so callers can sequence (Update saves the person first,
-      // then absorbs the row through this).
-      // v20.0.10 (Greptile r1) — retry-safe creation. The row attempt owns a
-      // client-generated primary key for its whole life (first click through
-      // any retries); if the first request committed but its response was
-      // lost, the retry hits the PK and is recognized as "already on file"
-      // instead of inserting a twin.
-      // v20.0.10 (Greptile r2) — ONLY that replay is "already on file". Any
-      // other unique violation is an error that keeps the operator's row
-      // intact; the r1 unique index on (person, code, start) was dropped —
-      // it rejected legitimately distinct authorizations (same code and
-      // start date, different units / end date / negotiated rate).
-      // v20.0.10 (Greptile r13) — WRITE-AHEAD request identity. The rounds
-      // before this one all patched the same flaw from different angles: the
-      // client decided WHEN it was safe to forget a request identity (after a
-      // "not on file" check, after a reopen, after a client switch...). No
-      // client-side check can ever decide that — a request can commit AFTER
-      // any check. So the client no longer decides. Rule:
-      //   the key for a submission is written to disk BEFORE the request is
-      //   sent, and is removed only on PROOF of outcome: the row is confirmed
-      //   on file (success response, replay, or the on-open check), or the
-      //   server answered with a definitive rejection (a DB error is returned
-      //   only after the statement failed — it cannot have committed).
-      //   A request with NO answer (network / timeout) keeps its key, full
-      //   stop — across retries, reopen, refresh — until one of the above.
-      // Keys are per (client, SERVICE CODE) (r8): a second unconfirmed save for
-      // the same person never overwrites the first's key. 24h expiry.
-      // Invariant: at most one live identity per (client, code) — a same-code
-      // resubmission always reuses it, so two identities for one code cannot
-      // exist. A different code never touches another code's key.
-      // v20.0.10 (Greptile r9) — an identity whose request turns out to have
-      // committed DIFFERENT values than the current row is RELEASED and the
-      // operator decides (correct the committed row, or add a separate one);
-      // it is never reconciled — a same-code row may be a distinct authorization.
-      const isDuplicateKey = (err) => err && (err.code === "23505" || /duplicate key/i.test(err.message || ""));
-      const PENDING_AUTH_KEY = "provly_pending_auth_attempts";
-      const readPendingAll = () => { try { return JSON.parse(localStorage.getItem(PENDING_AUTH_KEY) || "{}"); } catch (_) { return {}; } };
-      // → { [code]: { id, at } } for one client, expired entries dropped
-      const getPendingMap = (personId) => {
-        const m = readPendingAll(); const raw = personId && m[personId]; if (!raw || typeof raw !== "object") return {};
-        // r16 — no age-based expiry: elapsed time is not proof of outcome. A key
-        // is released by proof (on file / definitive rejection) or by the
-        // operator's explicit Dismiss — never by the clock.
-        const out = {}; Object.entries(raw).forEach(([code, e]) => { if (e && e.id) out[code] = e; });
-        return out;
-      };
-      // v20.0.10 (Greptile r15) — the write-ahead key is only worth anything if
-      // it actually persisted. Storage can refuse (quota, private mode, site
-      // storage blocked); a swallowed failure would let the request go out
-      // with no durable identity — the exact state r13 exists to prevent.
-      // So the write is VERIFIED by reading it back, and reports success; the
-      // caller refuses to dispatch when it is false.
-      const setPendingCode = (personId, code, entry) => {
-        try {
-          const m = readPendingAll(); const cur = (m[personId] && typeof m[personId] === "object") ? m[personId] : {};
-          if (entry) cur[code] = entry; else delete cur[code];
-          if (Object.keys(cur).length) m[personId] = cur; else delete m[personId];
-          localStorage.setItem(PENDING_AUTH_KEY, JSON.stringify(m));
-          const back = readPendingAll()[personId]?.[code];
-          return entry ? (!!back && back.id === entry.id) : !back;
-        } catch (_) { return false; }
-      };
-      const [unconfirmed, setUnconfirmed] = useState([]); // [{ id, code }] for the open client
-
-      // v20.0.10 (Greptile r6) — the request identity is never read from a
-      // shared mutable place mid-flight: a submission captures its attempt id
-      // ONCE, in a local, and uses that local for the insert, the confirmation
-      // and the reconcile. Submissions and confirmation checks are SERIALIZED
-      // through one in-flight promise.
-      const authBusy = useRef(null);
-      // v20.0.10 (Greptile r7) — a queued task acts on the row AS IT IS when it
-      // gets its turn (live mirror), and a submission that finds another
-      // submission in flight is a double-click: dropped, never queued.
-      const newAuthRef = useRef(newAuth); newAuthRef.current = newAuth;
-      // v20.0.10 (Greptile r10) — a queued task is bound to the CLIENT and the
-      // ROW that were on screen when the operator acted. r7 made queued work
-      // read the live row so a saved-and-blanked row is not re-sent; r10 closes
-      // the other half: the live row must belong to the SAME client the click
-      // was for, and must still equal what the click saw. A submission whose
-      // context changed while it waited (client switched, row edited/cleared)
-      // is dropped without a write — never a live row under a captured person,
-      // never a captured row under a live person.
+      // v20.0.26 — the authorization list here is read-only (AUTH_VIEW, every tier). Each
+      // reload is bound to the client it was fetched for, and an older reload never
+      // paints over a newer one.
       const editingRef = useRef(editing); editingRef.current = editing;
-      const submitInFlight = useRef(false);
-      const [authSubmitting, setAuthSubmitting] = useState(false);
-      const runExclusive = async (fn) => {
-        while (authBusy.current) { try { await authBusy.current; } catch (_) { /* the other task reports its own errors */ } }
-        const p = (async () => fn())();
-        authBusy.current = p;
-        try { return await p; } finally { if (authBusy.current === p) authBusy.current = null; }
-      };
-      const authValuesFromRow = (row) => {
-        const start_date = row.start_date || ymd();
-        let end_date = row.end_date;
-        if (!end_date) end_date = ymdAddMonths(start_date, 12); // v20.0.14r1 — calendar math on the string
-        return {
-          service_code_id: row.service_code_id,
-          authorized_units: parseInt(row.authorized_units),
-          start_date, end_date,
-          rate_per_unit: row.rate_per_unit ? parseFloat(row.rate_per_unit) : null,
-        };
-      };
-      const numOrNull = (v) => (v === null || v === undefined || v === "") ? null : Number(v);
-      const storedMatches = (stored, vals) => stored.service_code_id === vals.service_code_id
-        && Number(stored.authorized_units) === vals.authorized_units
-        && String(stored.start_date) === vals.start_date
-        && String(stored.end_date) === vals.end_date
-        && numOrNull(stored.rate_per_unit) === numOrNull(vals.rate_per_unit);
-      const rowIsEmpty = (row) => !(row.service_code_id || row.authorized_units || row.rate_per_unit || row.end_date);
-      const codeOf = (row) => serviceCodes.find(sc => sc.id === row.service_code_id)?.code;
-      const blankRow = () => setNewAuth({ service_code_id: "", authorized_units: "", start_date: ymd(), end_date: "", rate_per_unit: "", rate_pending: false });
-      const refreshUnconfirmed = (personId) => {
-        if (editingRef.current?.id !== personId) return; // r11 — never paint another client's notice
-        const map = getPendingMap(personId);
-        setUnconfirmed(Object.entries(map).map(([code, e]) => ({ id: e.id, code })));
-      };
-
-      // Did the unconfirmed attempts for this client land? Checked ALL AT ONCE.
-      //   landed → that key released, list reloads, operator told; an identical
-      //     same-code row on screen is cleared, a differing one stays with the
-      //     two-option guidance (r9: never reconciled over)
-      //   not landed → key kept so a resubmission is idempotent. Unknown → kept.
-      const checkUnconfirmed = (personId) => runExclusive(async () => {
-        if (editingRef.current?.id !== personId) return; // r10 — client changed while queued; that client's own open-check handles its keys
-        const map = getPendingMap(personId);
-        const entries = Object.entries(map);
-        if (entries.length === 0) { setUnconfirmed([]); return; }
-        const { data, error } = await supabase.from("person_service_authorizations")
-          .select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, status")
-          .in("id", entries.map(([, e]) => e.id));
-        if (error) { refreshUnconfirmed(personId); return; }
-        const landed = new Map((data || []).map(r => [r.id, r]));
-        // r18 — the client may have changed DURING the await above. Keys are
-        // per-person data and may be released on proof for that person, but no
-        // screen effect (blank row, toast, list) may touch a different client.
-        const screenIsThisClient = editingRef.current?.id === personId;
-        const row = screenIsThisClient ? newAuthRef.current : { service_code_id: "", authorized_units: "", start_date: "", end_date: "", rate_per_unit: "", rate_pending: false };
-        const rowCode = codeOf(row);
-        let anyLanded = false;
-        for (const [code, e] of entries) {
-          const stored = landed.get(e.id);
-          if (!stored) continue; // not on file; key stays
-          anyLanded = true;
-          if (!screenIsThisClient) { setPendingCode(personId, code, null); continue; } // proof → release; nothing on screen is ours
-          // v20.0.10 (Greptile r9) — a landed attempt is RESOLVED: its identity is
-          // released whatever the screen shows. An identical same-code row on
-          // screen is the replay and is cleared; a differing same-code row stays
-          // with the two-option guidance (correct the committed row, or add a
-          // separate one) — never reconciled over it.
-          mergeAuthRow(personId, stored); // r14 — shown from the check's own result
-          setPendingCode(personId, code, null);
-          const sameCodeOnScreen = !rowIsEmpty(row) && rowCode === code;
-          if (sameCodeOnScreen && row.service_code_id && row.authorized_units && storedMatches(stored, authValuesFromRow(row))) blankRow();
-          if (sameCodeOnScreen && !(row.service_code_id && row.authorized_units && storedMatches(stored, authValuesFromRow(row)))) {
-            addToast(`The earlier ${code} authorization is on file (below) and differs from your row. To correct it: remove that row, then press Add Auth. To add a separate ${code} authorization: press Add Auth.`, "warning");
-          } else {
-            addToast(`The earlier ${code} authorization save did go through — it is in the list below`, "info");
-          }
-        }
-        if (anyLanded) await reloadAuths(personId);
-        refreshUnconfirmed(personId);
-      });
-
-      const persistNewAuth = () => {
-        if (submitInFlight.current) return Promise.resolve(false); // v20.0.10 (Greptile r7) — double-click, not a second authorization
-        // r10 — capture what the operator acted on, at the moment they acted
-        const snapshot = { personId: editingRef.current?.id || null, row: { ...newAuthRef.current } };
-        submitInFlight.current = true; setAuthSubmitting(true);
-        return runExclusive(() => persistNewAuthInner(snapshot)).finally(() => { submitInFlight.current = false; setAuthSubmitting(false); });
-      };
-      const rowFields = ["service_code_id", "authorized_units", "start_date", "end_date", "rate_per_unit", "rate_pending"];
-      const sameRow = (a, b) => rowFields.every(k => String(a?.[k] ?? "") === String(b?.[k] ?? ""));
-      // v20.0.10 (Greptile r16) — two TABS can race the same (client, code):
-      // both read an empty key, mint different ids, both pass their own
-      // read-back, both insert. authBusy/submitInFlight are per component
-      // instance and cannot see another tab. The Web Locks API can: identity
-      // allocation + dispatch run under a lock named for (client, code), so a
-      // second tab re-reads storage under the lock, finds the first tab's key,
-      // and replays it (PK conflict → the established resolve path). Where the
-      // API is absent the code runs unlocked; the identical-row guard index in
-      // sql/v20.0.10.sql is the authoritative backstop either way.
-      const withCrossTabLock = (key, fn) => (typeof navigator !== "undefined" && navigator.locks && navigator.locks.request)
-        ? navigator.locks.request(key, fn)
-        : fn();
-      const persistNewAuthInner = async (snapshot) => {
-        // r10 — the context this click was made in must still be the context on
-        // screen when its turn comes. Client switched → drop, say so. Row no
-        // longer what the click saw → drop (silently if it is now blank, i.e.
-        // a prior task already saved it; with a toast if it was edited).
-        const liveClient = editingRef.current;
-        const live = newAuthRef.current;
-        if (!snapshot.personId || liveClient?.id !== snapshot.personId) { addToast("The client changed since you pressed Add Auth — nothing was saved. Press Add Auth again for this client.", "warning"); return false; }
-        if (!sameRow(live, snapshot.row)) { if (!rowIsEmpty(live)) addToast("The authorization row changed since you pressed Add Auth — nothing was saved. Press Add Auth again.", "warning"); return false; }
-        const row = snapshot.row; // == live, and known to belong to snapshot.personId
-        if (!row.service_code_id || !row.authorized_units) { if (!rowIsEmpty(row)) addToast("Select a service code and enter units", "error"); return false; }
-        const rowCode = codeOf(row) || "";
-        const rateErr = validateNewAuthRate(row, rowCode, perms);
-        if (rateErr) { addToast(rateErr, "error"); return false; }
-
-        const vals = authValuesFromRow(row);
-        const personId = snapshot.personId;
-        return withCrossTabLock(`provly-auth:${personId}:${rowCode}`, async () => {
-        // Identity for THIS code: the key already on disk for (client, code) if
-        // one exists (an earlier attempt without proof of outcome), else brand
-        // new. Captured ONCE for this submission (r6), WRITTEN TO DISK BEFORE
-        // the request goes out (r13), and — under the cross-tab lock (r16) —
-        // re-read here so a key another tab just wrote is reused, not raced.
-        const attemptId = getPendingMap(personId)[rowCode]?.id || crypto.randomUUID();
-        if (!setPendingCode(personId, rowCode, { id: attemptId, at: Date.now() })) {
-          // r15 — no durable identity → no request. Sending anyway would make a
-          // lost-response retry unrecognizable, i.e. a duplicate.
-          addToast("This browser cannot store the save-safety key (site storage is blocked or full), so the authorization was NOT sent — it could otherwise be duplicated on a retry. Enable site storage or free some space, then press Add Auth again.", "error");
-          return false;
-        }
-        const finish = async (provenRow) => {
-          mergeAuthRow(personId, provenRow); // r14 — visible from the proof itself; a failed refresh cannot hide it
-          setPendingCode(personId, rowCode, null); // proof: on file
-          // r11 — never blank another client's row. r20 — and never blank a row
-          // the operator has EDITED while this request was in flight: the row is
-          // cleared only if it still says exactly what this submission sent;
-          // otherwise the newer values stay on screen and the operator is told.
-          if (editingRef.current?.id === personId) {
-            if (sameRow(newAuthRef.current, snapshot.row)) blankRow();
-            else addToast(`The ${rowCode} authorization you submitted is saved (below). The changes you made to the row since then were kept — press Add Auth when that row is ready.`, "info");
-          }
-          refreshUnconfirmed(personId);
-          await reloadAuths(personId); // converge (may fail harmlessly — the row is already shown)
-        };
-
-        const payload = {
-          id: attemptId,
-          org_id: orgId,
-          person_id: personId,
-          ...vals,
-          used_units: 0,
-          // v20.0.10 (Item 2) — the rate was captured in the row but never
-          // sent; a worksheet auth without it bills amount = null forever.
-          // v20.0.10 (Item 3) — authorization_status is an APPROVAL enum
-          // (pending/approved/rejected/expired), not a date-window state. An
-          // auth entered from a DSPD worksheet is approved by definition; a
-          // fully-past window is expired. Nothing lands 'pending' by default.
-          status: deriveAuthStatus(vals.end_date),
-        };
-
-        // v20.0.10 (Greptile r3/r4) — resolve an ambiguous outcome against the
-        // DB at the moment it arises instead of carrying it into a later retry
-        // or a modal reopen: did THIS attempt id land?
-        //   false   → not on file (a real failure; row stays, in-memory key kept)
-        //   null    → could not check (network) — row stays, key persisted to disk
-        //   "kept"  → on file with DIFFERENT values; identity released, row kept
-        //             on screen, operator told the two options (never reconciled)
-        //   "exists"→ on file and identical; row cleared, toasted
-        const resolveAttempt = async () => {
-          const { data: mine, error: chkErr } = await supabase.from("person_service_authorizations")
-            .select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, status")
-            .eq("id", attemptId).limit(1);
-          if (chkErr) { refreshUnconfirmed(personId); return null; } // key already on disk (write-ahead)
-          if (!mine || mine.length === 0) return false; // not on file NOW — not proof it never will be; key stays
-          const stored = mine[0];
-          const same = storedMatches(stored, vals);
-          if (!same) {
-            // v20.0.10 (Greptile r9) — the earlier request (same identity) committed
-            // DIFFERENT values than the row on screen. That is one of two things
-            // and the app cannot tell which: a correction of that row, or a
-            // DISTINCT authorization with the same code (legitimate — r2). The
-            // r3 reconcile guessed "correction" and could silently REPLACE a
-            // committed authorization. Never guess: release this identity, show
-            // the committed row, keep the operator's row on screen, and say
-            // exactly what the two options are. A following Add Auth gets a
-            // fresh identity and inserts a separate record.
-            mergeAuthRow(personId, stored); // r14 — shown from the lookup itself
-            setPendingCode(personId, rowCode, null); // proof: on file (as different values)
-            refreshUnconfirmed(personId);
-            await reloadAuths(personId);
-            addToast(`Your earlier ${rowCode} authorization is on file (shown below) and differs from this row. To CORRECT it: remove that row, then press Add Auth. To add this as a SEPARATE ${rowCode} authorization: press Add Auth again.`, "warning");
-            return "kept";
-          }
-          await finish(stored);
-          addToast("Authorization saved — your earlier attempt had already gone through", "success");
-          return "exists";
-        };
-
-        let insertRes;
-        try {
-          insertRes = await supabase.from("person_service_authorizations").insert(payload).select();
-        } catch (netErr) {
-          insertRes = { error: { message: netErr?.message || "network error", code: "NETWORK" } };
-        }
-        const { error, data: insertData } = insertRes;
-        if (error) {
-          if (isDuplicateKey(error) && /uq_psa_identical/i.test(error.message || "")) {
-            // r16 — the server's identical-row guard: an authorization identical in
-            // every material field is already on file for this client (a lost-
-            // response retry after the key was dismissed, another tab, another
-            // operator). That IS the row the operator meant; nothing to add.
-            // r18 — the lookup must match the FULL material tuple, rate included:
-            // a same-tuple row with a DIFFERENT rate is a legitimately distinct
-            // authorization (r2) and must never be presented as "the match".
-            let twinQ = supabase.from("person_service_authorizations")
-              .select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code)")
-              .eq("person_id", personId).eq("service_code_id", vals.service_code_id).eq("start_date", vals.start_date).eq("end_date", vals.end_date).eq("authorized_units", vals.authorized_units);
-            twinQ = vals.rate_per_unit === null ? twinQ.is("rate_per_unit", null) : twinQ.eq("rate_per_unit", vals.rate_per_unit);
-            const { data: twin } = await twinQ.limit(1);
-            // The rejection is a DEFINITIVE server answer (nothing committed under
-            // this id) — the key is released (r13). But the on-screen row is only
-            // cleared when the identical row was actually RETRIEVED and shown;
-            // an empty lookup (RLS, transient error) clears nothing.
-            setPendingCode(personId, rowCode, null);
-            if (twin && twin.length > 0) {
-              await finish(twin[0]);
-              addToast(`An identical ${rowCode} authorization is already on file for this client — nothing was duplicated`, "info");
-              return "exists";
-            }
-            refreshUnconfirmed(personId);
-            await reloadAuths(personId);
-            addToast(`An identical ${rowCode} authorization is already on file for this client (nothing was duplicated), but it could not be retrieved just now — your row was left as typed. Check the list below.`, "warning");
-            return false;
-          }
-          if (isDuplicateKey(error)) {
-            // Replay of OUR key (or another unique constraint) — resolve against the DB.
-            const r = await resolveAttempt();
-            if (r === "exists") return "exists";
-            if (r === "kept") return false;
-            if (r === false) { setPendingCode(personId, rowCode, null); addToast("Failed: " + error.message, "error"); return false; } // some other unique constraint: definitive, nothing committed
-            addToast("Failed: " + error.message + " — and it could not be confirmed whether the authorization saved. Leave the row as is and press Add Auth again; it will not be duplicated.", "error");
-            return false;
-          }
-          if (error.code && error.code !== "NETWORK") {
-            // The server ANSWERED with an error: the statement failed, nothing
-            // committed. That is proof of outcome — release the key.
-            setPendingCode(personId, rowCode, null);
-            addToast("Failed: " + error.message, "error");
-            return false;
-          }
-          // NO ANSWER (network / timeout). It may have committed. Try to find out
-          // now; but whatever the answer, the key stays until proof (r13).
-          const r = await resolveAttempt();
-          if (r === "exists") return "exists";
-          if (r === "kept") return false;
-          refreshUnconfirmed(personId);
-          addToast("Failed: " + error.message + " — it could not be confirmed whether the authorization saved. Leave the row as is and press Add Auth again when the connection is back; it will not be duplicated.", "error");
-          return false;
-        }
-        if (!insertData || insertData.length === 0) { addToast("Insert blocked — check RLS policies on person_service_authorizations", "error"); return false; }
-
-        await finish(insertData[0]);
-        return true;
-        }); // withCrossTabLock
-      };
-
-      // v20.0.10 (Greptile r11) — every write to the on-screen authorization
-      // list is bound to the client it was fetched for. A reload that resolves
-      // after the operator switched clients must not replace (or clear) the
-      // list of the client now open. The person id is captured at call time
-      // and checked against the live open client at write time.
-      // v20.0.10 (Greptile r12) — reloads for the SAME client can resolve out
-      // of order (the on-open fetch is slow; the post-save reload is fast). An
-      // older result must never paint over a newer one, or a just-saved
-      // authorization vanishes from the list and gets re-entered. Every reload
-      // takes a sequence number when it STARTS; a result is applied only if no
-      // newer reload has started since. Any local list edit bumps the sequence
-      // so an in-flight older reload cannot resurrect what was removed.
-      // r22 — list generations are PER CLIENT. A single shared counter let a
-      // stale reload for client A (invoked late, after B was opened) bump the
-      // generation and thereby supersede B's own in-flight reload: A's result
-      // was rejected as stale, B's valid result was rejected as superseded, and
-      // B kept an outdated list. Now a reload for a client that is no longer
-      // open is rejected BEFORE it spends a generation, and generations never
-      // cross clients.
-      const authListSeq = useRef({}); // { [personId]: generation }
-      const nextListGen = (personId) => { authListSeq.current[personId] = (authListSeq.current[personId] || 0) + 1; return authListSeq.current[personId]; };
-      // v20.0.10 (Greptile r14) — a row the client has PROOF of (the insert
-      // response, a replay lookup, or the on-open check) goes into the list
-      // from that proof, immediately and locally — never via a refresh that
-      // can fail. A failed post-save refresh used to leave the list stale, so
-      // the just-saved authorization was invisible and got re-entered. The
-      // merge also bumps the list sequence so an older in-flight reload cannot
-      // paint the row back out; a fresh reload then converges on the server.
-      const mergeAuthRow = (personId, row) => {
-        if (!row || editingRef.current?.id !== personId) return;
-        nextListGen(personId);
-        setAuths(prev => prev.some(a => a.id === row.id) ? prev.map(a => a.id === row.id ? { ...a, ...row } : a) : [...prev, row]);
-      };
+      const authListSeq = useRef(0);
       const reloadAuths = async (personId = editingRef.current?.id) => {
-        if (!personId) return;
-        if (editingRef.current?.id !== personId) return; // r22 — stale before it starts: spend no generation, touch nothing
-        const seq = nextListGen(personId);
-        // v20.0.12 (R3) — this list is the Add Auth / Set rate working set and
-        // reads the BASE table on purpose: it must show the true stored rate
-        // and the exact rows the v20.0.10 identity guard compares against.
-        // Only the manage tier can read it; everyone else reads AUTH_VIEW.
-        const { data: authData, error } = await supabase.from("person_service_authorizations").select("id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code)").eq("person_id", personId);
-        if (error) return; // keep what is shown rather than blank the list on a failed refresh
-        if (seq !== authListSeq.current[personId]) return; // superseded — a newer reload for THIS client started; its result wins
-        if (editingRef.current?.id !== personId) return; // stale — a different client is open now
-        setAuths(authData || []);
+        if (!personId || editingRef.current?.id !== personId) return;
+        const seq = ++authListSeq.current;
+        const { data, error } = await supabase.from(AUTH_VIEW).select(AUTH_SELECT).eq("person_id", personId);
+        if (error) return;                                          // keep what is shown rather than blank it
+        if (seq !== authListSeq.current || editingRef.current?.id !== personId) return;
+        setAuths(data || []);
       };
-
-      const addAuth = async () => {
-        if ((await persistNewAuth()) === true) addToast("Authorization added", "success");
-      };
-
-      // v20.0.10 (Item 2, 2b) — set the rate on an existing null-rate worksheet
-      // auth IN PLACE. The only repair path before was delete + re-add, which
-      // reset used_units to 0 on an auth actively being billed against.
-      const [rateDraft, setRateDraft] = useState({}); // auth id -> typed rate
-      const saveAuthRate = async (a) => {
-        const code = a.service_code_definitions?.code || serviceCodes.find(sc => sc.id === a.service_code_id)?.code;
-        const typed = String(rateDraft[a.id] || "").trim();
-        const rateErr = validateNewAuthRate({ rate_per_unit: typed, rate_pending: false }, code, perms);
-        if (rateErr) return addToast(rateErr, "error");
-        const { error } = await supabase.from("person_service_authorizations").update({ rate_per_unit: parseFloat(typed) }).eq("id", a.id);
-        if (error) return addToast(error.message, "error");
-        setRateDraft(prev => { const n = { ...prev }; delete n[a.id]; return n; });
-        await reloadAuths(a.person_id || editingRef.current?.id);
-        addToast(`Rate set for ${code}`, "success");
-      };
-
-      const removeAuth = async (authId) => {
-        const personId = editingRef.current?.id; // r11 — the client this row was removed from
-        const { error } = await supabase.from("person_service_authorizations").delete().eq("id", authId);
-        if (error) return addToast(error.message, "error");
-        if (personId) nextListGen(personId); // r12/r22 — invalidate any in-flight reload for THIS client that could resurrect the removed row
-        if (editingRef.current?.id === personId) setAuths(prev => prev.filter(a => a.id !== authId));
-        addToast("Authorization removed", "success");
-        reloadAuths(personId); // converge on the server's list
+      // leaving for the Authorizations tab closes this form; unsaved client edits are confirmed first
+      const openAuthorizationsTab = () => {
+        const seed = seededRef.current;
+        const dirty = !!seed && Object.keys(form).some(k => form[k] !== seed[k]);
+        if (dirty && !confirm("Leave without saving your changes to this client?")) return;
+        onOpenAuthorizations();
       };
 
       const handleSave = async () => {
@@ -3356,15 +2934,6 @@
         // need it), which is the mirror's job, not the form's.
         const ma = (form.medicaid_number || "").trim();
         if (ma && !/^\d{9,10}$/.test(ma)) return addToast("Medicaid number must be 9–10 digits (numbers only, no spaces or dashes)", "error");
-        // v20.0.10 (Item 1, decision A) — the Add Auth row is part of what the
-        // operator typed. Update used to close over it and the reset effect
-        // wiped it: a filled-in auth vanished with no signal. Now a COMPLETE
-        // row is absorbed after the person saves, and a PARTIAL row refuses
-        // the whole save — ambiguous intent is never dropped and never guessed.
-        const rowTouched = !!(newAuth.service_code_id || newAuth.authorized_units || newAuth.rate_per_unit || newAuth.end_date);
-        const rowComplete = !!(newAuth.service_code_id && newAuth.authorized_units);
-        if (editing && rowTouched && !rowComplete) return addToast("Finish or clear the Add Auth row before updating — service code and units are both required", "error");
-        if (editing && rowComplete) { const rateErr = validateNewAuthRate(newAuth, newAuthCode, perms); if (rateErr) return addToast(rateErr, "error"); }
         setSaving(true);
         const payload = { ...form };
         // v19.4.5 — trim leading/trailing whitespace on every string field before save
@@ -3437,19 +3006,7 @@
         if (result.error) {
           addToast(result.error.message, "error");
         } else {
-          if (editing && rowComplete) {
-            // v20.0.10 (Item 1) — person is saved; absorb the row. If the auth
-            // insert fails, stay open with the row intact (no onSaved here: on
-            // the profile page it reloads `editing`, whose effect would reset
-            // the row) so nothing is lost and the person save is reported.
-            setSaving(true);
-            const ok = await persistNewAuth();
-            setSaving(false);
-            if (!ok) return addToast("Client updated, but the authorization was not added — fix the Add Auth row, then press Add Auth or Update again", "warning");
-            addToast(ok === true ? "Client updated · authorization added" : "Client updated", "success");
-          } else {
-            addToast(editing ? "Client updated" : "Client added", "success");
-          }
+          addToast(editing ? "Client updated" : "Client added", "success");
           if (!editing) checkTierSoftLimit(orgId, addToast); // v19.8 soft cap nudge
           onSaved();
           onClose();
@@ -3597,122 +3154,42 @@
             </FormRow>
           </div>
 
-          {/* Authorizations Section */}
+          {/* v20.0.26 — read-only here. The 1056 rows are added and edited on the client
+              profile's Authorizations tab (one editor, one set of rules); the database's
+              identical-row guard now carries the duplicate safety this form used to. */}
           {editing && (
             <div style={{ marginTop: 8, padding: "20px 0 0", borderTop: `1px solid ${CB.border}` }}>
-              <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 12 }}>Service Authorizations</h3>
-              {/* v20.0.10 (Greptile r5) — an unconfirmed attempt is visible state, not a hidden key */}
-              {unconfirmed.length > 0 && (
-                <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", marginBottom: 12, borderRadius: 8, background: `${CB.amber}12`, border: `1px solid ${CB.amber}50`, fontSize: 12, color: CB.text }}>
-                  <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4 }}>
-                    {unconfirmed.map(u => <span key={u.id}><strong style={{ color: CB.amber }}>Unconfirmed save:</strong> an earlier {u.code} authorization could not be confirmed. If it is not in the list, submit it again exactly as before — it will not be duplicated.</span>)}
-                  </div>
-                  <button onClick={() => checkUnconfirmed(editing.id)} style={{ padding: "4px 10px", borderRadius: 6, border: `1px solid ${CB.amber}`, background: "transparent", color: CB.amber, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>Check now</button>
-                  {/* r16 — keys never expire by age; an operator may discard one deliberately. The identical-row guard still stops a duplicate if the save had in fact gone through. */}
-                  <button onClick={() => { if (window.confirm("Discard the unconfirmed save key(s) for this client? If that save had actually gone through, the identical-row guard will still stop a duplicate when you re-enter it.")) { unconfirmed.forEach(u => setPendingCode(editing.id, u.code, null)); refreshUnconfirmed(editing.id); } }} style={{ padding: "4px 10px", borderRadius: 6, border: `1px solid ${CB.border}`, background: "transparent", color: CB.textLight, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>Dismiss</button>
-                </div>
-              )}
-              {auths.length > 0 && (
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 6, flexWrap: "wrap" }}>
+                <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy }}>Service Authorizations</h3>
+                {onOpenAuthorizations && <SecondaryButton onClick={openAuthorizationsTab}>Open Authorizations tab</SecondaryButton>}
+              </div>
+              <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 12 }}>
+                These are the rows of the client's 1056 budget. Add and edit them on the client's profile, Authorizations tab.
+              </div>
+              {auths.length === 0 ? (
+                <div style={{ fontSize: 13, color: CB.textLight, marginBottom: 12 }}>None on file.</div>
+              ) : (
                 <div style={{ marginBottom: 16 }}>
                   {auths.map(a => {
                     const aCode = a.service_code_definitions?.code || serviceCodes.find(sc => sc.id === a.service_code_id)?.code || "?";
-                    const aRule = BILLING_RULES[aCode];
                     return (
-                    <div key={a.id} style={{
-                      display: "flex", alignItems: "center", justifyContent: "space-between",
-                      padding: "10px 14px", borderRadius: 10, background: CB.cream, marginBottom: 6,
-                      border: `1px solid ${CB.border}`,
-                    }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                        <Badge text={aCode} color={CB.blue} />
-                        {aRule && <span style={{ fontSize: 11, color: CB.textLight, fontWeight: 600 }}>{aRule.label}</span>}
-                        {aRule?.worksheet && <span style={{ fontSize: 10, color: CB.amber, fontWeight: 700, background: `${CB.amber}12`, padding: "1px 6px", borderRadius: 4 }}>WORKSHEET</span>}
-                        <RateNeededChip code={aCode} rate={a.rate_per_unit} />
-                        <span style={{ fontSize: 13, color: CB.text, fontWeight: 600 }}>{a.used_units || 0} / {a.authorized_units} units</span>
-                        {perms.viewRates && a.rate_per_unit && <span style={{ fontSize: 12, color: CB.teal, fontWeight: 700 }}>@ ${Number(a.rate_per_unit).toFixed(2)}</span>}
-                        {/* v20.0.10 (Item 2, 2b) — repair in place; used_units untouched */}
-                        {perms.viewRates && aRule?.worksheet && !a.rate_per_unit && (
-                          <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                            <input type="number" step="0.01" min="0" placeholder={aRule.max_rate != null ? `≤${aRule.max_rate}` : "rate"}
-                              value={rateDraft[a.id] || ""} onChange={e => setRateDraft(prev => ({ ...prev, [a.id]: e.target.value }))}
-                              style={{ ...fieldStyle, width: 96, padding: "4px 8px", fontSize: 12, borderColor: `${CB.amber}60` }} />
-                            <button onClick={() => saveAuthRate(a)} title="Set the worksheet rate on this authorization" style={{
-                              padding: "4px 8px", borderRadius: 6, border: `1px solid ${CB.amber}`, background: `${CB.amber}12`,
-                              color: CB.amber, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap",
-                            }}>Set rate</button>
+                      <div key={a.id} style={{
+                        display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap",
+                        padding: "10px 14px", borderRadius: 10, background: CB.cream, marginBottom: 6, border: `1px solid ${CB.border}`,
+                      }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <Badge text={aCode} color={CB.blue} />
+                          <RateNeededChip code={aCode} rate={a.rate_per_unit} />
+                          {a.approval_id && <span style={{ fontSize: 12, color: CB.textMid }}>Approval {a.approval_id}</span>}
+                          {perms.viewRates && a.rate_per_unit != null && <span style={{ fontSize: 12, color: CB.teal, fontWeight: 700 }}>@ ${Number(a.rate_per_unit).toFixed(2)}</span>}
+                          <span style={{ fontSize: 12, color: CB.textLight }}>
+                            {a.start_date ? new Date(a.start_date + "T00:00:00").toLocaleDateString() : "—"} → {a.end_date ? new Date(a.end_date + "T00:00:00").toLocaleDateString() : "—"}
                           </span>
-                        )}
-                        {a.end_date && <span style={{ fontSize: 12, color: CB.textLight }}>exp {new Date(a.end_date + "T00:00:00").toLocaleDateString()}</span>}
+                        </div>
+                        <AuthUsage a={a} />
                       </div>
-                      <button onClick={() => removeAuth(a.id)} style={{
-                        padding: "4px 8px", borderRadius: 6, border: "none", background: "rgba(200,16,46,0.08)",
-                        color: CB.red, cursor: "pointer", fontSize: 12, fontWeight: 600, fontFamily: "inherit",
-                      }}>{icons.trash({ size: 13, color: CB.red })}</button>
-                    </div>
                     );
                   })}
-                </div>
-              )}
-              <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
-                <div style={{ flex: "1 1 140px" }}>
-                  <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>Service Code</label>
-                  <select style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} value={newAuth.service_code_id} onChange={e => setNewAuth(p => ({ ...p, service_code_id: e.target.value }))}>
-                    <option value="">Select...</option>
-                    {serviceCodes.map(sc => <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}</option>)}
-                  </select>
-                </div>
-                <div style={{ flex: "0 0 80px" }}>
-                  <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>Units</label>
-                  <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} type="number" value={newAuth.authorized_units} onChange={e => setNewAuth(p => ({ ...p, authorized_units: e.target.value }))} placeholder="0" />
-                </div>
-                {perms.viewRates && (
-                <div style={{ flex: "0 0 100px" }}>
-                  <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: isWorksheet ? CB.amber : CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>
-                    {isWorksheet ? "Rate *" : "Rate"}
-                  </label>
-                  <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13, borderColor: isWorksheet ? `${CB.amber}40` : CB.border }}
-                    type="number" step="0.01" value={newAuth.rate_per_unit}
-                    onChange={e => setNewAuth(p => ({ ...p, rate_per_unit: e.target.value, rate_pending: false }))}
-                    placeholder={newAuthRule ? (isWorksheet ? `≤${newAuthRule.max_rate || "?"}` : `$${newAuthRule.rate || "?"}`) : "$0.00"} />
-                </div>
-                )}
-                {/* v20.0.10 (Item 2, 2b) — deliberate deferral. The SC sometimes sends the
-                    rate after the auth itself; the auth must still exist for services to
-                    document against. Ticked = a chosen null, and the row wears RATE NEEDED
-                    until Set rate fills it. Unticked + blank = the save is refused. */}
-                {perms.viewRates && isWorksheet && !newAuth.rate_per_unit && (
-                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: CB.amber, marginBottom: 16, whiteSpace: "nowrap", cursor: "pointer" }}>
-                    <input type="checkbox" checked={!!newAuth.rate_pending} onChange={e => setNewAuth(p => ({ ...p, rate_pending: e.target.checked }))} />
-                    Rate pending from SC
-                  </label>
-                )}
-                <div style={{ flex: "0 0 130px" }}>
-                  <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>Start Date</label>
-                  <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} type="date" value={newAuth.start_date} onChange={e => setNewAuth(p => ({ ...p, start_date: e.target.value }))} />
-                </div>
-                <div style={{ flex: "0 0 130px" }}>
-                  <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>End Date</label>
-                  <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} type="date" value={newAuth.end_date} onChange={e => setNewAuth(p => ({ ...p, end_date: e.target.value }))} />
-                </div>
-                <button onClick={addAuth} disabled={authSubmitting} style={{ opacity: authSubmitting ? 0.6 : 1,
-                  padding: "9px 16px", borderRadius: 10, border: `2px dashed ${CB.blue}`,
-                  background: `${CB.blue}08`, color: CB.blue, fontSize: 13, fontWeight: 700,
-                  cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap", marginBottom: 16,
-                  display: "flex", alignItems: "center", gap: 6, transition: "all 0.15s",
-                }}
-                  onMouseEnter={e => { e.currentTarget.style.background = `${CB.blue}15`; e.currentTarget.style.borderStyle = "solid"; }}
-                  onMouseLeave={e => { e.currentTarget.style.background = `${CB.blue}08`; e.currentTarget.style.borderStyle = "dashed"; }}
-                >{icons.plus({ size: 14, color: CB.blue })} Add Auth</button>
-              </div>
-              {perms.viewRates && isWorksheet && (
-                <div style={{ fontSize: 12, color: CB.amber, fontWeight: 500, marginTop: -8, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
-                  {icons.alertTriangle({ size: 13, color: CB.amber })}
-                  Worksheet service — rate is person-specific (max ${newAuthRule?.max_rate?.toFixed(2) || "N/A"}/unit). Enter the rate from the support coordinator's worksheet.
-                </div>
-              )}
-              {perms.viewRates && newAuthRule && !isWorksheet && newAuthRule.rate && (
-                <div style={{ fontSize: 12, color: CB.textLight, marginTop: -8, marginBottom: 8 }}>
-                  Fixed rate: ${newAuthRule.rate.toFixed(2)} / {newAuthRule.label?.toLowerCase()}
                 </div>
               )}
             </div>
@@ -3774,23 +3251,19 @@
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {auths.map(a => {
                   const code = a.service_code_definitions?.code || (scLookup && scLookup[a.service_code_id]) || "?";
-                  const pct = a.authorized_units > 0 ? Math.min(100, (a.used_units / a.authorized_units) * 100) : 0;
-                  const barColor = pct >= 90 ? CB.red : pct >= 75 ? CB.amber : CB.teal;
                   return (
                     <div key={a.id} style={{ padding: "12px 14px", borderRadius: 10, background: CB.cream, border: `1px solid ${CB.border}` }}>
                       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 8, flexWrap: "wrap" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                           <Badge text={code} color={CB.blue} />
                           <RateNeededChip code={code} rate={a.rate_per_unit} />
-                          <span style={{ fontSize: 13, fontWeight: 600, color: CB.text }}>{a.used_units || 0} / {a.authorized_units} units</span>
+                          {a.approval_id && <span style={{ fontSize: 12, color: CB.textMid }}>Approval {a.approval_id}</span>}
                         </div>
                         <span style={{ fontSize: 11, color: CB.textLight }}>
                           {a.start_date ? fmtDate(a.start_date) : "—"} → {a.end_date ? fmtDate(a.end_date) : "—"}
                         </span>
                       </div>
-                      <div style={{ height: 6, borderRadius: 3, background: CB.border, overflow: "hidden" }}>
-                        <div style={{ width: `${pct}%`, height: "100%", background: barColor, transition: "width 0.4s ease" }} />
-                      </div>
+                      <AuthUsage a={a} /> {/* v20.0.26 — this month and the period, in the row's Kind */}
                     </div>
                   );
                 })}
@@ -3822,7 +3295,7 @@
         setLoading(true);
         const [clientRes, scRes, placeRes] = await Promise.all([
           supabase.from("persons")
-            .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, identification_number, support_coordinator, support_coordinator_phone, support_coordinator_email, support_coordinator_agency, guardian_name, guardian_phone, guardian_relation, emergency_contact_name, emergency_contact_phone, physician_name, physician_phone, address, city, state, zip, phone, person_service_authorizations:person_service_authorizations_v(id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code))")
+            .select("id, first_name, last_name, date_of_birth, is_active, medicaid_number, identification_number, support_coordinator, support_coordinator_phone, support_coordinator_email, support_coordinator_agency, guardian_name, guardian_phone, guardian_relation, emergency_contact_name, emergency_contact_phone, physician_name, physician_phone, address, city, state, zip, phone, person_service_authorizations:person_service_authorizations_v(" + AUTH_SELECT + ")")
             .order("last_name"),
           supabase.from("service_code_definitions").select("id, code").order("code"),
           supabase.from("person_placements").select("person_id, org_sites(site_type)").is("end_date", null), // v20.0.4
@@ -5227,8 +4700,8 @@
       ELS:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 6.35 },
       // Personal Assistance — quarter hour, fixed (also has daily $186.05)
       PAC:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 5.82, alt_daily: 186.05 },
-      // Personal Budget Assistant — quarter hour, fixed (also has session $18.59)
-      PBA:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 9.31, alt_session: 18.59 },
+      // Personal Budget Assistant — PER SESSION on the 1056 (v20.0.26; the table's quarter-hour rate $9.31 is kept as the alternate)
+      PBA:  { unit_type: "session", label: "Per Session", rate: 18.59, alt_quarter_hour: 9.31 },
       // Professional Medication Monitoring (LPN / RN) — QUARTER HOUR per DHHS91172, fixed
       PM1:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 8.45 },
       PM2:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 12.22 },
@@ -5309,6 +4782,180 @@
     const RateNeededChip = ({ code, rate }) => {
       if (!BILLING_RULES[code]?.worksheet || rate) return null;
       return <span title="Worksheet service with no person-specific rate on file — billing amount is unknown until it is set" style={{ fontSize: 10, color: CB.amber, fontWeight: 700, background: `${CB.amber}12`, padding: "1px 6px", borderRadius: 4 }}>RATE NEEDED</span>;
+    };
+
+    // ═══════════════════════════════════════════════════════════════
+    // v20.0.26 — AUTHORIZATIONS ARE DSPD 1056 ROWS (docs/authorizations-design.md, Decision A)
+    // One authorization = one row of the client's Person Centered Plan and
+    // 1056 Budget Approval: service, Approval ID, start, end, Kind, rate, max
+    // billable units per month, and units for the period (the 1056's "Annual
+    // Units" — the total for the row's own dates, not a calendar or plan year).
+    // Both counters are in the row's Kind; the database computes them
+    // (used_units = the period, used_this_month = the current month).
+    // Entered and edited in ONE place: the client profile's Authorizations tab
+    // (plus the intake wizard for a brand-new client).
+    // ═══════════════════════════════════════════════════════════════
+    const AUTH_KINDS = [
+      { value: "D", label: "D (daily)" },
+      { value: "Q", label: "Q (quarter hour)" },
+      { value: "S", label: "S (per session)" },
+      { value: "M", label: "M (monthly)" },
+    ];
+    const KIND_UNIT_WORDS = { D: ["day", "days"], Q: ["quarter hour", "quarter hours"], S: ["session", "sessions"], M: ["month", "months"], H: ["hour", "hours"] };
+    const kindFromBillingUnit = (bu) => ({ quarter_hour: "Q", daily: "D", per_session: "S", per_trip: "S", monthly: "M", hourly: "H" })[bu] || "";
+    // the row's own Kind, else the code table's (the view computes the same as unit_kind_effective)
+    const authKindOf = (a) => a?.unit_kind_effective || a?.unit_kind || kindFromBillingUnit(a?.service_code_definitions?.billing_unit) || "";
+    const kindWord = (kind, n) => { const w = KIND_UNIT_WORDS[kind]; return w ? (n === 1 ? w[0] : w[1]) : (n === 1 ? "unit" : "units"); };
+    // every read of an authorization that shows the 1056 fields or the counters uses these columns
+    const AUTH_SELECT = "id, person_id, service_code_id, approval_id, start_date, end_date, unit_kind, unit_kind_effective, rate_per_unit, max_units_per_month, authorized_units, used_units, used_this_month, status, notes, service_code_definitions(code, name, billing_unit)";
+    const blank1056Row = () => ({ service_code_id: "", approval_id: "", start_date: "", end_date: "", unit_kind: "", rate_per_unit: "", rate_pending: false, max_units_per_month: "", authorized_units: "", status: "" });
+    const WHOLE_NUMBER = /^\d+$/;
+    // one rule set for every door that writes a 1056 row (profile tab, intake)
+    const validate1056Row = (row, code, perms) => {
+      if (!row.service_code_id) return "Choose the service code";
+      if (!row.start_date || !row.end_date) return "Enter the row's start and end dates from the 1056";
+      if (row.end_date < row.start_date) return "The end date can't be before the start date";
+      if (!AUTH_KINDS.some(k => k.value === row.unit_kind)) return "Choose the Kind from the 1056: D, Q, S or M";
+      if (!WHOLE_NUMBER.test(String(row.max_units_per_month ?? "").trim())) return "Max billable units per month must be a whole number";
+      if (!WHOLE_NUMBER.test(String(row.authorized_units ?? "").trim())) return "Units for the period must be a whole number (the 1056's Annual Units)";
+      return validateNewAuthRate(row, code, perms);
+    };
+    const payloadFrom1056Row = (row) => ({
+      service_code_id: row.service_code_id,
+      approval_id: String(row.approval_id || "").trim() || null,
+      start_date: row.start_date,
+      end_date: row.end_date,
+      unit_kind: row.unit_kind,
+      rate_per_unit: String(row.rate_per_unit ?? "").trim() ? parseFloat(row.rate_per_unit) : null,
+      max_units_per_month: parseInt(String(row.max_units_per_month).trim(), 10),
+      authorized_units: parseInt(String(row.authorized_units).trim(), 10),
+    });
+
+    // the 1056 fields, in the 1056's column order
+    function Auth1056Fields({ row, setRow, serviceCodes, perms }) {
+      const sc = serviceCodes.find(s => s.id === row.service_code_id);
+      const rule = BILLING_RULES[sc?.code];
+      const worksheet = !!rule?.worksheet;
+      const upd = (k, v) => setRow(p => ({ ...p, [k]: v }));
+      // choosing the service presets the Kind from the code table; the operator matches it to the 1056
+      const pickCode = (id) => {
+        const next = serviceCodes.find(s => s.id === id);
+        setRow(p => ({ ...p, service_code_id: id, unit_kind: kindFromBillingUnit(next?.billing_unit) || p.unit_kind }));
+      };
+      return (
+        <>
+          <FormRow>
+            <FormField label="Service" required half>
+              <select style={fieldStyle} value={row.service_code_id} onChange={e => pickCode(e.target.value)}>
+                <option value="">Select...</option>
+                {serviceCodes.map(c => <option key={c.id} value={c.id}>{c.code} — {c.name}</option>)}
+              </select>
+            </FormField>
+            <FormField label="Approval ID" half>
+              <input style={fieldStyle} value={row.approval_id} onChange={e => upd("approval_id", e.target.value)} placeholder="As printed on the 1056" />
+            </FormField>
+          </FormRow>
+          <FormRow>
+            <FormField label="Start Date" required half>
+              <input style={fieldStyle} type="date" value={row.start_date} onChange={e => upd("start_date", e.target.value)} />
+            </FormField>
+            <FormField label="End Date" required half>
+              <input style={fieldStyle} type="date" value={row.end_date} onChange={e => upd("end_date", e.target.value)} />
+            </FormField>
+          </FormRow>
+          <FormRow>
+            <FormField label="Kind" required half>
+              <select style={fieldStyle} value={row.unit_kind} onChange={e => upd("unit_kind", e.target.value)}>
+                <option value="">Select...</option>
+                {AUTH_KINDS.map(k => <option key={k.value} value={k.value}>{k.label}</option>)}
+              </select>
+            </FormField>
+            {perms.viewRates && (
+              <FormField label={worksheet ? "Rate *" : "Rate"} half>
+                <input style={{ ...fieldStyle, borderColor: worksheet ? `${CB.amber}60` : CB.border }} type="number" step="0.01" min="0"
+                  value={row.rate_per_unit} onChange={e => setRow(p => ({ ...p, rate_per_unit: e.target.value, rate_pending: false }))}
+                  placeholder={rule ? (worksheet ? `≤${rule.max_rate ?? "?"}` : `$${rule.rate ?? "?"}`) : "$0.00"} />
+                {worksheet && !row.rate_per_unit && (
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: CB.amber, marginTop: 6, cursor: "pointer" }}>
+                    <input type="checkbox" checked={!!row.rate_pending} onChange={e => upd("rate_pending", e.target.checked)} />
+                    Rate pending from SC
+                  </label>
+                )}
+              </FormField>
+            )}
+          </FormRow>
+          <FormRow>
+            <FormField label="Max Billable Units / Month" required half>
+              <input style={fieldStyle} type="number" min="0" step="1" value={row.max_units_per_month} onChange={e => upd("max_units_per_month", e.target.value)} placeholder="0" />
+            </FormField>
+            <FormField label="Units for the Period" required half>
+              <input style={fieldStyle} type="number" min="0" step="1" value={row.authorized_units} onChange={e => upd("authorized_units", e.target.value)} placeholder="0" />
+              <div style={{ fontSize: 11, color: CB.textLight, marginTop: 4 }}>The 1056's Annual Units: the total for this row's dates.</div>
+            </FormField>
+          </FormRow>
+          {perms.viewRates && worksheet && (
+            <div style={{ fontSize: 12, color: CB.amber, fontWeight: 500, marginBottom: 8 }}>
+              Worksheet service: the rate is person-specific (DSPD max ${rule?.max_rate != null ? Number(rule.max_rate).toFixed(2) : "N/A"} per unit).
+            </div>
+          )}
+        </>
+      );
+    }
+
+    // both counters of one row, in its Kind: this month (vs max billable per month) and the period (vs units for the period)
+    function AuthUsage({ a }) {
+      const kind = authKindOf(a);
+      const periodTotal = Number(a.authorized_units) || 0;
+      const periodUsed = Number(a.used_units) || 0;
+      const max = a.max_units_per_month == null ? null : Number(a.max_units_per_month);
+      const hasMonth = a.used_this_month !== undefined;               // read without the 1056 columns → period only
+      const month = a.used_this_month == null ? null : Number(a.used_this_month);
+      const tone = (u, t) => { const pct = t > 0 ? (u / t) * 100 : (u > 0 ? 100 : 0); return pct >= 100 ? CB.red : pct >= 80 ? CB.amber : CB.teal; };
+      const Bar = ({ u, t }) => (
+        <div style={{ height: 5, borderRadius: 3, background: CB.border, overflow: "hidden" }}>
+          <div style={{ width: `${t > 0 ? Math.min(100, (u / t) * 100) : (u > 0 ? 100 : 0)}%`, height: "100%", background: tone(u, t) }} />
+        </div>
+      );
+      return (
+        <div style={{ display: "grid", gap: 6, minWidth: 170 }}>
+          {hasMonth && (
+            <div>
+              <div style={{ fontSize: 12, color: CB.text, marginBottom: 3 }}>
+                <span style={{ color: CB.textLight }}>This month </span>
+                {month == null
+                  ? <span style={{ color: CB.textLight }}>outside this row's dates</span>
+                  : <strong>{month} of {max == null ? "no max set" : `${max} ${kindWord(kind, max)}`}</strong>}
+              </div>
+              {month != null && max != null && <Bar u={month} t={max} />}
+            </div>
+          )}
+          <div>
+            <div style={{ fontSize: 12, color: CB.text, marginBottom: 3 }}>
+              <span style={{ color: CB.textLight }}>Period </span>
+              <strong>{periodUsed} of {periodTotal} {kindWord(kind, periodTotal)}</strong>
+            </div>
+            <Bar u={periodUsed} t={periodTotal} />
+          </div>
+        </div>
+      );
+    }
+
+    // D1 — a note dated when no 1056 row covers it: saved, and flagged for managers
+    const NoAuthFlag = ({ state }) => state ? (
+      <span title={state === "lapse"
+          ? "No 1056 row covers this date (the budget lapsed, or the renewal isn't entered yet). The note bills once the row is entered."
+          : "This client has no 1056 row for this service. Enter the row, or correct the note's service code."}
+        style={{ fontSize: 10, color: CB.red, fontWeight: 700, background: `${CB.red}10`, padding: "1px 6px", borderRadius: 4, whiteSpace: "nowrap" }}>
+        NO CURRENT AUTHORIZATION
+      </span>
+    ) : null;
+    // manage tier only (the database answers nothing below it): { [noteId]: "lapse" | "none" }
+    const fetchNoAuthStates = async (noteIds) => {
+      if (!noteIds || noteIds.length === 0) return {};
+      const { data, error } = await supabase.rpc("notes_without_authorization", { p_note_ids: noteIds });
+      if (error) return null;                                       // unknown — callers show no flag rather than a wrong one
+      const out = {}; (data || []).forEach(r => { out[r.o_note_id] = r.o_state; });
+      return out;
     };
 
     // ═══════════════════════════════════════════════════════════════
@@ -6185,7 +5832,7 @@
         if (frontLine) { coStaffSeq.current += 1; setCoStaffOptions([]); setCoStaffError(null); setForm(p => ({ ...p, co_staff_ids: [] })); } // v20.0.13c — co-staff are per client
         if (!personId) return;
         const [authData, goalData, coData] = await Promise.all([
-          supabase.from(AUTH_VIEW).select("id, service_code_id, authorized_units, used_units, status, start_date, end_date, service_code_definitions(code)").eq("person_id", personId),
+          supabase.from(AUTH_VIEW).select(AUTH_SELECT).eq("person_id", personId), // v20.0.26 — the 1056 columns and both counters
           supabase.from("pcsp_goals").select("id, domain, goal_description, status").eq("person_id", personId).in("status", ["active", "in_progress"]).order("domain"),
           frontLine ? supabase.rpc("staff_sharing_person", { p_person_id: personId }) : Promise.resolve({ data: null }),
         ]);
@@ -6203,15 +5850,27 @@
       // service date: not expired/closed by status, and the date falls inside
       // its window. (Server-side: the deliver INSERT policy will require the
       // same — filed as a follow-up; today the compliance audit flags it.)
+      // v20.0.26 — the same test the database applies (sql/v20.0.26.sql,
+      // provly_note_auth_state): a row covers a day when it isn't rejected (or
+      // closed) and its dates include the day. An 'expired' row covers its own
+      // dates — the status only records that the end date has passed.
+      const AUTH_CLOSED = ["rejected", "closed", "terminated", "denied", "inactive", "cancelled", "canceled"];
       const authCurrentOn = (a, dateStr) => {
         if (!a) return false;
-        const st = String(a.status || "").toLowerCase();
-        if (["expired", "closed", "terminated", "denied", "inactive", "cancelled", "canceled"].includes(st)) return false;
+        if (AUTH_CLOSED.includes(String(a.status || "").toLowerCase())) return false;
         const d = dateStr || ymd();
         if (a.start_date && a.start_date > d) return false;
         if (a.end_date && a.end_date < d) return false;
         return true;
       };
+      // v20.0.26 (D1) — no row covers the date, but the client has had the code (a
+      // row starting on or before the date): the budget lapsed or the SC hasn't
+      // entered the renewal. The note saves and is flagged for the office.
+      const authHadBy = (a, dateStr) => !!a && !AUTH_CLOSED.includes(String(a.status || "").toLowerCase())
+        && (!a.start_date || a.start_date <= (dateStr || ymd()));
+      const codeInLapseOn = (codeId, dateStr) => !!codeId
+        && !clientAuths.some(a => a.service_code_id === codeId && authCurrentOn(a, dateStr))
+        && clientAuths.some(a => a.service_code_id === codeId && authHadBy(a, dateStr));
       const currentAuths = useMemo(() => clientAuths.filter(a => authCurrentOn(a, form.service_date)), [clientAuths, form.service_date]);
 
       // Find the active auth for the selected client + code combo
@@ -6236,7 +5895,8 @@
       // can never ride into the save payload.
       const handleDateChange = (dateStr) => {
         const dropCode = !!form.service_code_id && !form.context_id && !(showAllCodes && !frontLine)
-          && !clientAuths.some(a => a.service_code_id === form.service_code_id && authCurrentOn(a, dateStr));
+          && !clientAuths.some(a => a.service_code_id === form.service_code_id && authCurrentOn(a, dateStr))
+          && !codeInLapseOn(form.service_code_id, dateStr);          // v20.0.26 (D1) — a lapsed code stays; it saves flagged
         setForm(prev => ({ ...prev, service_date: dateStr, service_code_id: dropCode ? "" : prev.service_code_id }));
         if (dropCode) {
           setSelectedCode(null); setExtraFields({});
@@ -6307,8 +5967,9 @@
         const ctx = form.context_id ? contexts.find(c => c.id === form.context_id) : null;
         const codeViaContext = !!ctx && ctx.service_code_id === form.service_code_id
           && (contextMembers[form.context_id] || []).includes(form.person_id);
-        if (!codeIsCurrent && !codeViaContext && !(showAllCodes && !frontLine)) {
-          return addToast("That service code is not authorized for this client on the service date", "error");
+        const codeInLapse = !codeIsCurrent && codeInLapseOn(form.service_code_id, form.service_date); // v20.0.26 (D1)
+        if (!codeIsCurrent && !codeViaContext && !codeInLapse && !(showAllCodes && !frontLine)) {
+          return addToast("This client has no authorization for that service code. Ask your office.", "error");
         }
         savingRef.current = true; setSaving(true);
         // Calculate duration
@@ -6508,10 +6169,11 @@
                   never blocks recording reality — the compliance audit flags it). */}
               {serviceCodes.map(sc => {
                 const hasAuth = currentAuths.some(a => a.service_code_id === sc.id); // v20.0.13br1 — current on the service date
-                if (form.person_id && !hasAuth && !(showAllCodes && !frontLine)) return null;
+                const inLapse = !hasAuth && codeInLapseOn(sc.id, form.service_date); // v20.0.26 (D1) — offered, and marked
+                if (form.person_id && !hasAuth && !inLapse && !(showAllCodes && !frontLine)) return null;
                 if (!form.person_id && frontLine) return null;
                 if ((sc.code === "MTP" || sc.code === "HAP") && form.service_code_id !== sc.id) return null; // v20.0.23 (e520 D6) — MTP is answered on the DSG note; v20.0.25a — HAP is documented by the placement
-                return <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}{hasAuth ? " ✓" : ""}</option>;
+                return <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}{hasAuth ? " ✓" : inLapse ? " (no current authorization)" : ""}</option>;
               })}
             </select>
             {form.person_id && !frontLine && (
@@ -6527,11 +6189,23 @@
                 Locked to context's service code. Clear context to override.
               </div>
             )}
-            {activeAuth && (
-              <div style={{ marginTop: 6, fontSize: 12, color: CB.teal, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
-                {icons.checkCircle({ size: 13, color: CB.teal })}
-                Auth: {activeAuth.used_units || 0}/{activeAuth.authorized_units} units used
-                {activeAuth.rate_per_unit && perms.viewRates && <span>@ ${Number(activeAuth.rate_per_unit).toFixed(2)}/unit</span>}
+            {activeAuth && (() => {
+              const k = authKindOf(activeAuth);
+              const max = activeAuth.max_units_per_month;
+              return (
+                <div style={{ marginTop: 6, fontSize: 12, color: CB.teal, fontWeight: 600, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                  {icons.checkCircle({ size: 13, color: CB.teal })}
+                  {/* v20.0.26 — both counters, in the row's Kind */}
+                  {activeAuth.used_this_month != null && <span>This month {activeAuth.used_this_month}{max != null ? ` of ${max}` : ""} ·</span>}
+                  <span>Period {activeAuth.used_units || 0} of {activeAuth.authorized_units} {kindWord(k, Number(activeAuth.authorized_units))}</span>
+                  {activeAuth.rate_per_unit && perms.viewRates && <span>@ ${Number(activeAuth.rate_per_unit).toFixed(2)}/unit</span>}
+                </div>
+              );
+            })()}
+            {!activeAuth && form.service_code_id && !form.context_id && codeInLapseOn(form.service_code_id, form.service_date) && (
+              <div style={{ marginTop: 6, fontSize: 12, color: CB.amber, fontWeight: 600, display: "flex", alignItems: "flex-start", gap: 6 }}>
+                {icons.alertTriangle({ size: 13, color: CB.amber })}
+                <span>No authorization covers this date. The note still saves and is flagged for your office; it bills once the new budget row is entered.</span>
               </div>
             )}
           </FormField>
@@ -6975,6 +6649,11 @@
           rows.forEach(r => { r.co_staff = []; });
         }
 
+        // v20.0.26 (D1) — managers see which notes no authorization covers (computed on read, so it clears itself)
+        if (accessTier === "manage") {
+          const states = await fetchNoAuthStates(rows.map(r => r.id));
+          if (states) rows.forEach(r => { r.no_auth = states[r.id] || null; });
+        }
         setNotes(rows);
         setLoading(false);
       };
@@ -7123,7 +6802,7 @@
             </span>
           );
         }},
-        { label: "Status", render: (r) => <Badge text={r.status || "draft"} color={statusColors[r.status] || CB.textLight} /> },
+        { label: "Status", render: (r) => <span style={{ display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}><Badge text={r.status || "draft"} color={statusColors[r.status] || CB.textLight} /><NoAuthFlag state={r.no_auth} /></span> },
         { label: "", render: (r) => (
           <button onClick={(e) => { e.stopPropagation(); openDetail(r); }} style={{
             display: "flex", alignItems: "center", gap: 6, padding: "6px 12px",
@@ -7283,6 +6962,7 @@
                                     {n.duration_minutes && <span style={{ fontSize: 11, color: CB.textLight }}>{n.duration_minutes}min</span>}
                                   </div>
                                   <Badge text={n.status || "draft"} color={statusColors[n.status] || CB.textLight} />
+                                  <NoAuthFlag state={n.no_auth} />
                                 </div>
                               ))}
                             </div>
@@ -7315,6 +6995,7 @@
                       <Badge text={viewing.service_code_definitions?.code || "?"} color={CB.blue} />
                     )}
                     <Badge text={editForm.status || viewing.status || "draft"} color={statusColors[editForm.status || viewing.status] || CB.textLight} />
+                    <NoAuthFlag state={viewing.no_auth} />
                     {(() => { // v20.0.23 (e520 D6) — the MTP answer on a DSG note
                       const editCode = serviceCodes.find(sc => sc.id === editForm.service_code_id)?.code || viewing.service_code_definitions?.code;
                       if ((editing ? editCode : viewing.service_code_definitions?.code) !== "DSG") return null;
@@ -12670,20 +12351,27 @@
 
           // Pull all auths for rate lookup
           const { data: auths } = await supabase.from(AUTH_VIEW)
-            .select("id, person_id, service_code_id, authorized_units, used_units, rate_per_unit, service_code_definitions(code)");
+            .select("id, person_id, service_code_id, authorized_units, used_units, rate_per_unit, start_date, end_date, status, service_code_definitions(code)");
 
+          // v20.0.26 — a client + code now has one row per 1056 line (a new row every
+          // July 1 rate change): a note takes its rate from the row covering its date
           const authMap = {};
           (auths || []).forEach(a => {
             const key = `${a.person_id}_${a.service_code_id}`;
-            authMap[key] = a;
+            (authMap[key] = authMap[key] || []).push(a);
           });
+          const authFor = (key, day) => {
+            const list = (authMap[key] || []).filter(a => a.status !== "rejected");
+            return list.find(a => (!a.start_date || a.start_date <= day) && (!a.end_date || a.end_date >= day))
+              || list.sort((x, y) => String(y.start_date || "").localeCompare(String(x.start_date || "")))[0] || null;
+          };
 
           // Build claims from notes
           const claimRows = (notes || []).map(note => {
             const code = note.service_code_definitions?.code;
             const rule = BILLING_RULES[code];
             const authKey = `${note.persons?.id}_${note.service_code_definitions?.id}`;
-            const auth = authMap[authKey];
+            const auth = authFor(authKey, note.service_date);
             const authRate = auth?.rate_per_unit ? Number(auth.rate_per_unit) : null;
 
             let units = (note.id in qhUnitsByNote) ? qhUnitsByNote[note.id] : (note.billable_units || calculateBillableUnits(code, note.duration_minutes)); // v20.0.23r1 — D5 per day (stored units on older notes were rounded up, per note)
@@ -14031,7 +13719,7 @@
           // ═══ CLIENT FACE SHEET ═══
           else if (tmpl.id === "client_face_sheet") {
             const { data: client } = await supabase.from("persons").select("*").eq("id", entityId).single();
-            const { data: auths } = await supabase.from(AUTH_VIEW).select("authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code)").eq("person_id", entityId);
+            const { data: auths } = await supabase.from(AUTH_VIEW).select(AUTH_SELECT).eq("person_id", entityId); // v20.0.26 — the 1056 columns
             const doc = new jsPDF();
             let y = pdfHeader(doc, "Client Face Sheet — Tab 1", `${client.first_name} ${client.last_name}`);
             doc.setFontSize(10);
@@ -14052,8 +13740,8 @@
             if (auths?.length) {
               y += 6; doc.setFontSize(12); doc.setFont(undefined, "bold"); doc.text("Service Authorizations", 20, y); y += 8;
               doc.autoTable({
-                startY: y, head: [["Code", "Units", "Used", "Rate", "Start", "End"]],
-                body: auths.map(a => [a.service_code_definitions?.code || "?", a.authorized_units, a.used_units || 0, a.rate_per_unit ? `$${Number(a.rate_per_unit).toFixed(2)}` : "WS", a.start_date || "—", a.end_date || "—"]),
+                startY: y, head: [["Code", "Approval ID", "Start", "End", "Kind", "Rate", "Max/Mo", "Units (period)", "Used"]],
+                body: auths.map(a => [a.service_code_definitions?.code || "?", a.approval_id || "—", a.start_date || "—", a.end_date || "—", authKindOf(a) || "—", a.rate_per_unit ? `$${Number(a.rate_per_unit).toFixed(2)}` : "WS", a.max_units_per_month ?? "—", a.authorized_units, a.used_units || 0]),
                 styles: { fontSize: 8 }, headStyles: { fillColor: [0, 137, 123] },
               });
             }
@@ -15093,23 +14781,22 @@
         admission_date: ymd(),
         auths: [],
       });
-      const [newAuth, setNewAuth] = useState({ service_code_id: "", authorized_units: "", start_date: ymd(), end_date: "", rate_per_unit: "", rate_pending: false }); // v20.0.10 — rate_pending: deliberate null-rate attestation (UI-only, never stored)
+      const [newAuth, setNewAuth] = useState(() => ({ ...blank1056Row(), start_date: ymd() })); // v20.0.26 — a 1056 row (rate_pending: deliberate null-rate attestation, never stored)
 
       useEffect(() => {
-        supabase.from("service_code_definitions").select("id, code, name").order("code").then(({ data }) => setServiceCodes(data || []));
+        supabase.from("service_code_definitions").select("id, code, name, billing_unit").order("code").then(({ data }) => setServiceCodes(data || []));
       }, []);
 
       const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
 
       const addIntakeAuth = () => {
-        if (!newAuth.service_code_id || !newAuth.authorized_units) return addToast("Select code and enter units", "error");
         const sc = serviceCodes.find(s => s.id === newAuth.service_code_id);
-        // v20.0.10 (Item 2) — same worksheet-rate rules as ClientForm; the
+        // v20.0.26 — the same 1056 rules as the profile's Authorizations tab; the
         // requirement holds at both doors or it holds at neither.
-        const rateErr = validateNewAuthRate(newAuth, sc?.code, perms);
-        if (rateErr) return addToast(rateErr, "error");
+        const err = validate1056Row(newAuth, sc?.code, perms);
+        if (err) return addToast(err, "error");
         setForm(prev => ({ ...prev, auths: [...prev.auths, { ...newAuth, code: sc?.code, name: sc?.name }] }));
-        setNewAuth({ service_code_id: "", authorized_units: "", start_date: ymd(), end_date: "", rate_per_unit: "", rate_pending: false });
+        setNewAuth({ ...blank1056Row(), start_date: ymd() });
       };
 
       const removeIntakeAuth = (idx) => {
@@ -15166,23 +14853,12 @@
 
         // Step 2: Create auths
         if (form.auths.length > 0) {
-          const authPayloads = form.auths.map(a => {
-            const startDate = a.start_date || ymd();
-            let endDate = a.end_date;
-            if (!endDate) {
-              endDate = ymdAddMonths(startDate, 12); // v20.0.14r1 — calendar math on the string
-            }
-            return {
-              org_id: orgId, person_id: personId,
-              service_code_id: a.service_code_id,
-              authorized_units: parseInt(a.authorized_units),
-              used_units: 0,
-              start_date: startDate,
-              end_date: endDate,
-              rate_per_unit: a.rate_per_unit ? parseFloat(a.rate_per_unit) : null,
-              status: deriveAuthStatus(endDate), // v20.0.10 (Item 3)
-            };
-          });
+          const authPayloads = form.auths.map(a => ({
+            org_id: orgId, person_id: personId,
+            ...payloadFrom1056Row(a),                                  // v20.0.26 — the 1056 row as entered (dates required)
+            used_units: 0,
+            status: deriveAuthStatus(a.end_date), // v20.0.10 (Item 3)
+          }));
           const { error: authErr } = await supabase.from("person_service_authorizations").insert(authPayloads);
           if (authErr) addToast("Client created but auth insert failed: " + authErr.message, "warning");
         }
@@ -15227,10 +14903,6 @@
           </div>
         );
       }
-
-      const newAuthCode = serviceCodes.find(sc => sc.id === newAuth.service_code_id)?.code;
-      const newAuthRule = BILLING_RULES[newAuthCode];
-      const isWorksheet = newAuthRule?.worksheet;
 
       return (
         <div>
@@ -15448,7 +15120,8 @@
                         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                           <Badge text={a.code} color={CB.blue} />
                           <RateNeededChip code={a.code} rate={a.rate_per_unit} />
-                          <span style={{ fontSize: 13, color: CB.text, fontWeight: 600 }}>{a.authorized_units} units</span>
+                          <span style={{ fontSize: 13, color: CB.text, fontWeight: 600 }}>{a.authorized_units} {kindWord(a.unit_kind, Number(a.authorized_units))} for {a.start_date} – {a.end_date}</span>
+                          <span style={{ fontSize: 12, color: CB.textMid }}>max {a.max_units_per_month}/month · Kind {a.unit_kind}{a.approval_id ? ` · Approval ${a.approval_id}` : ""}</span>
                           {a.rate_per_unit && perms.viewRates && <span style={{ fontSize: 12, color: CB.teal, fontWeight: 700 }}>@ ${Number(a.rate_per_unit).toFixed(2)}</span>}
                         </div>
                         <button onClick={() => removeIntakeAuth(i)} style={{
@@ -15459,52 +15132,16 @@
                     ))}
                   </div>
                 )}
-                <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
-                  <div style={{ flex: "1 1 160px" }}>
-                    <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>Service Code</label>
-                    <select style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} value={newAuth.service_code_id} onChange={e => setNewAuth(p => ({ ...p, service_code_id: e.target.value }))}>
-                      <option value="">Select...</option>
-                      {serviceCodes.map(sc => <option key={sc.id} value={sc.id}>{sc.code} — {sc.name}</option>)}
-                    </select>
-                  </div>
-                  <div style={{ flex: "0 0 80px" }}>
-                    <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>Units</label>
-                    <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} type="number" value={newAuth.authorized_units} onChange={e => setNewAuth(p => ({ ...p, authorized_units: e.target.value }))} placeholder="0" />
-                  </div>
-                  {perms.viewRates && (
-                    <div style={{ flex: "0 0 100px" }}>
-                      <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: isWorksheet ? CB.amber : CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>
-                        {isWorksheet ? "Rate *" : "Rate"}
-                      </label>
-                      <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13, borderColor: isWorksheet ? `${CB.amber}40` : CB.border }}
-                        type="number" step="0.01" value={newAuth.rate_per_unit}
-                        onChange={e => setNewAuth(p => ({ ...p, rate_per_unit: e.target.value, rate_pending: false }))}
-                        placeholder={newAuthRule ? (isWorksheet ? `≤${newAuthRule.max_rate || "?"}` : `$${newAuthRule.rate || "?"}`) : "$0.00"} />
-                    </div>
-                  )}
-                  {/* v20.0.10 (Item 2, 2b) — same deliberate-deferral valve as ClientForm */}
-                  {perms.viewRates && isWorksheet && !newAuth.rate_per_unit && (
-                    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: CB.amber, marginBottom: 16, whiteSpace: "nowrap", cursor: "pointer" }}>
-                      <input type="checkbox" checked={!!newAuth.rate_pending} onChange={e => setNewAuth(p => ({ ...p, rate_pending: e.target.checked }))} />
-                      Rate pending from SC
-                    </label>
-                  )}
-                  <div style={{ flex: "0 0 130px" }}>
-                    <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: CB.textLight, marginBottom: 4, textTransform: "uppercase" }}>Start</label>
-                    <input style={{ ...fieldStyle, padding: "9px 12px", fontSize: 13 }} type="date" value={newAuth.start_date} onChange={e => setNewAuth(p => ({ ...p, start_date: e.target.value }))} />
-                  </div>
+                {/* v20.0.26 — one row of the client's 1056, in its column order */}
+                <div style={{ padding: 16, borderRadius: 12, border: `1px solid ${CB.border}`, background: CB.white }}>
+                  <Auth1056Fields row={newAuth} setRow={setNewAuth} serviceCodes={serviceCodes} perms={perms} />
                   <button onClick={addIntakeAuth} style={{
                     padding: "9px 16px", borderRadius: 10, border: `2px dashed ${CB.blue}`,
                     background: `${CB.blue}08`, color: CB.blue, fontSize: 13, fontWeight: 700,
-                    cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap", marginBottom: 16,
+                    cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap",
                     display: "flex", alignItems: "center", gap: 6,
-                  }}>{icons.plus({ size: 14, color: CB.blue })} Add Auth</button>
+                  }}>{icons.plus({ size: 14, color: CB.blue })} Add 1056 Row</button>
                 </div>
-                {isWorksheet && (
-                  <div style={{ fontSize: 12, color: CB.amber, fontWeight: 500, marginTop: -8, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
-                    {icons.alertTriangle({ size: 13, color: CB.amber })} Worksheet service — rate is person-specific (max ${newAuthRule?.max_rate?.toFixed(2) || "N/A"}/unit)
-                  </div>
-                )}
               </>
             )}
 
@@ -15550,7 +15187,7 @@
                         {form.auths.map((a, i) => (
                           <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 8, background: CB.white, border: `1px solid ${CB.border}` }}>
                             <Badge text={a.code} color={CB.blue} />
-                            <span style={{ fontSize: 13, fontWeight: 600, color: CB.navy }}>{a.authorized_units} units</span>
+                            <span style={{ fontSize: 13, fontWeight: 600, color: CB.navy }}>{a.authorized_units} {kindWord(a.unit_kind, Number(a.authorized_units))} · max {a.max_units_per_month}/mo</span>
                             {a.rate_per_unit && perms.viewRates && <span style={{ fontSize: 12, color: CB.teal }}>@ ${Number(a.rate_per_unit).toFixed(2)}</span>}
                           </div>
                         ))}
@@ -17640,23 +17277,19 @@
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {auths.map(a => {
                   const code = a.service_code_definitions?.code || "?";
-                  const pct = a.authorized_units > 0 ? Math.min(100, (a.used_units / a.authorized_units) * 100) : 0;
-                  const barColor = pct >= 90 ? CB.red : pct >= 75 ? CB.amber : CB.teal;
                   return (
                     <div key={a.id} style={{ padding: "12px 14px", borderRadius: 10, background: CB.cream, border: `1px solid ${CB.border}` }}>
                       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 8, flexWrap: "wrap" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                           <Badge text={code} color={CB.blue} />
                           <RateNeededChip code={code} rate={a.rate_per_unit} />
-                          <span style={{ fontSize: 13, fontWeight: 600, color: CB.text }}>{a.used_units || 0} / {a.authorized_units} units</span>
+                          {a.approval_id && <span style={{ fontSize: 12, color: CB.textMid }}>Approval {a.approval_id}</span>}
                         </div>
                         <span style={{ fontSize: 11, color: CB.textLight }}>
                           {a.start_date ? fmtDate(a.start_date) : "—"} → {a.end_date ? fmtDate(a.end_date) : "—"}
                         </span>
                       </div>
-                      <div style={{ height: 6, borderRadius: 3, background: CB.border, overflow: "hidden" }}>
-                        <div style={{ width: `${pct}%`, height: "100%", background: barColor, transition: "width 0.4s ease" }} />
-                      </div>
+                      <AuthUsage a={a} /> {/* v20.0.26 — this month and the period, in the row's Kind */}
                     </div>
                   );
                 })}
@@ -17832,20 +17465,29 @@
     }
 
     function ClientNotesTab({ clientId, onChanged }) {
+      const { accessTier } = useAuth();                           // v20.0.26 (D1) — the flag is for managers
+      const [noAuth, setNoAuth] = useState({});
       const [notes, setNotes] = useState([]);
       const [loading, setLoading] = useState(true);
       const [reloadKey, setReloadKey] = useState(0);      // v20.0.15
       const [noteOpen, setNoteOpen] = useState(false);    // v20.0.15 — New Service Note from the profile
 
       useEffect(() => {
+        let alive = true;                                          // v20.0.26 — a response for a client that's no longer open is dropped
         setLoading(true);
         supabase.from("service_notes")
           .select("id, service_date, duration_minutes, status, staff!service_notes_staff_id_fkey(first_name, last_name), service_code_definitions(code, name)")
           .eq("person_id", clientId)
           .order("service_date", { ascending: false })
           .limit(1000)
-          .then(({ data }) => { setNotes(data || []); setLoading(false); });
-      }, [clientId, reloadKey]);
+          .then(async ({ data }) => {
+            const states = accessTier === "manage" ? await fetchNoAuthStates((data || []).map(n => n.id)) : null;
+            if (!alive) return;
+            setNoAuth(states || {});
+            setNotes(data || []); setLoading(false);
+          });
+        return () => { alive = false; };
+      }, [clientId, reloadKey, accessTier]);
 
       if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
       // v20.0.15r1 — the first record is created from the empty state too
@@ -17900,7 +17542,10 @@
                           <span style={{ fontSize: 12, color: CB.textMid }}>{n.staff ? `${n.staff.first_name} ${n.staff.last_name}` : "—"}</span>
                           {n.duration_minutes && <span style={{ fontSize: 11, color: CB.textLight }}>{n.duration_minutes}min</span>}
                         </div>
-                        <Badge text={n.status || "draft"} color={n.status === "approved" ? CB.green : n.status === "submitted" ? CB.blue : CB.amber} />
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                          <NoAuthFlag state={noAuth[n.id]} />
+                          <Badge text={n.status || "draft"} color={n.status === "approved" ? CB.green : n.status === "submitted" ? CB.blue : CB.amber} />
+                        </span>
                       </div>
                     ))}
                   </div>
@@ -18809,6 +18454,258 @@
       );
     }
 
+    // v20.0.26 — the client's 1056 rows: the one place authorizations are added and edited
+    function ClientAuthorizationsTab({ clientId, onChanged }) {
+      const { addToast } = useToast();
+      const { orgId, accessTier } = useAuth();
+      const perms = usePermissions();
+      const canEdit = accessTier === "manage";                     // the database allows writes to the manage tier only
+      const [rows, setRows] = useState([]);
+      const [loadedOnce, setLoadedOnce] = useState(false);
+      const [loadError, setLoadError] = useState(null);           // a failed read is an error, never "no rows"
+      const [serviceCodes, setServiceCodes] = useState([]);
+      const [lapseNotes, setLapseNotes] = useState([]);           // D1: notes no row covers (manage tier)
+      const [editor, setEditor] = useState(null);                 // { mode: "add" | "edit", id, row, stored }
+      const [saving, setSaving] = useState(false);
+      const loadSeq = useRef(0);
+
+      const load = async () => {
+        const seq = ++loadSeq.current;
+        setLoadError(null);
+        const { data, error } = await supabase.from(AUTH_VIEW).select(AUTH_SELECT).eq("person_id", clientId);
+        if (seq !== loadSeq.current) return;                        // superseded by a newer load
+        setLoadedOnce(true);
+        if (error) { setLoadError(error.message || "request failed"); return; } // keep the last good rows
+        setRows(data || []);
+        if (!canEdit) return;
+        const { data: notes } = await supabase.from("service_notes")
+          .select("id, service_date, service_code_definitions(code)")
+          .eq("person_id", clientId).order("service_date", { ascending: false }).limit(1000);
+        const states = await fetchNoAuthStates((notes || []).map(n => n.id));
+        if (seq !== loadSeq.current || states === null) return;
+        setLapseNotes((notes || []).filter(n => states[n.id]).map(n => ({ ...n, state: states[n.id] })));
+      };
+      useEffect(() => { setRows([]); setLapseNotes([]); setLoadedOnce(false); setEditor(null); load(); }, [clientId]);
+      useEffect(() => {
+        supabase.from("service_code_definitions").select("id, code, name, billing_unit").order("code").then(({ data }) => setServiceCodes(data || []));
+      }, []);
+
+      const today = ymd();
+      const fmtD = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString() : "—";
+      const codeOf = (a) => a.service_code_definitions?.code || serviceCodes.find(s => s.id === a.service_code_id)?.code || "?";
+      const sorted = [...rows].sort((a, b) => codeOf(a).localeCompare(codeOf(b)) || String(b.start_date || "").localeCompare(String(a.start_date || "")));
+      const ended = (a) => !!a.end_date && a.end_date < today;
+      const upcoming = (a) => !!a.start_date && a.start_date > today;
+
+      // the stored values of a row, in the payload's shape — an edit sends only what changed
+      const storedOf = (a) => ({
+        service_code_id: a.service_code_id, approval_id: a.approval_id ?? null, start_date: a.start_date, end_date: a.end_date,
+        unit_kind: a.unit_kind ?? null, rate_per_unit: a.rate_per_unit == null ? null : Number(a.rate_per_unit),
+        max_units_per_month: a.max_units_per_month == null ? null : Number(a.max_units_per_month),
+        authorized_units: a.authorized_units == null ? null : Number(a.authorized_units), status: a.status ?? null,
+      });
+      const rowOf = (a) => ({
+        service_code_id: a.service_code_id || "", approval_id: a.approval_id || "",
+        start_date: a.start_date || "", end_date: a.end_date || "",
+        unit_kind: a.unit_kind || a.unit_kind_effective || "",       // an older row shows the code table's Kind; saving writes it onto the row
+        rate_per_unit: a.rate_per_unit == null ? "" : String(a.rate_per_unit),
+        rate_pending: a.rate_per_unit == null,                        // a null rate on file is already the deliberate "pending" state
+        max_units_per_month: a.max_units_per_month == null ? "" : String(a.max_units_per_month),
+        authorized_units: a.authorized_units == null ? "" : String(a.authorized_units),
+        status: a.status || "approved",
+      });
+      // an add owns one client-generated id for the whole time its form is open: pressing Save again
+      // after a lost response hits the primary key instead of adding a twin
+      const openAdd = () => setEditor({ mode: "add", id: crypto.randomUUID(), row: { ...blank1056Row(), start_date: today } });
+      const openEdit = (a) => setEditor({ mode: "edit", id: a.id, row: rowOf(a), stored: storedOf(a) });
+      const setEditorRow = (fn) => setEditor(cur => cur ? { ...cur, row: typeof fn === "function" ? fn(cur.row) : fn } : cur);
+      const closeEditorFor = (target) => setEditor(cur => (cur && cur.id === target.id && cur.mode === target.mode) ? null : cur);
+
+      const noWriteMsg = "Not saved — only owners, admins and compliance directors can change authorizations";
+      const save = async () => {
+        if (!editor || saving) return;
+        const target = editor;                                      // the form this click belongs to
+        const code = serviceCodes.find(s => s.id === target.row.service_code_id)?.code;
+        const err = validate1056Row(target.row, code, perms);
+        if (err) return addToast(err, "error");
+        const payload = { ...payloadFrom1056Row(target.row), status: target.row.status || deriveAuthStatus(target.row.end_date) };
+        let request;
+        if (target.mode === "add") {
+          request = () => supabase.from("person_service_authorizations")
+            .insert({ id: target.id, org_id: orgId, person_id: clientId, used_units: 0, ...payload }).select("id");
+        } else {
+          const changes = {};
+          Object.keys(payload).forEach(k => { if ((payload[k] ?? null) !== (target.stored[k] ?? null)) changes[k] = payload[k]; });
+          if (Object.keys(changes).length === 0) { closeEditorFor(target); return addToast("No changes to save", "info"); }
+          request = () => supabase.from("person_service_authorizations").update(changes).eq("id", target.id).select("id");
+        }
+        setSaving(true);
+        let res;
+        try { res = await request(); } catch (e) { res = { error: { message: e?.message || "network error", code: "NETWORK" } }; }
+        setSaving(false);
+        const { data, error } = res;
+        if (error) {
+          const msg = error.message || "";
+          if (error.code === "23505" && /uq_psa_identical/i.test(msg)) {
+            if (target.mode === "add") { closeEditorFor(target); load(); return addToast(`An identical ${code || ""} row is already on file for this client — nothing was added`, "info"); }
+            return addToast("Another row on file is identical to this one. Change a field, or delete the other row.", "error");
+          }
+          if (target.mode === "add" && error.code === "23505" && /_pkey/i.test(msg)) {
+            closeEditorFor(target); load(); onChanged?.();
+            return addToast("1056 row added — your earlier attempt had already gone through", "success");
+          }
+          if (!error.code || error.code === "NETWORK") {
+            return addToast("The save couldn't be confirmed (connection problem). Press Save again — it won't be added twice.", "error");
+          }
+          return addToast(msg, "error");
+        }
+        if (!data || data.length === 0) return addToast(noWriteMsg, "error");
+        closeEditorFor(target);
+        addToast(target.mode === "add" ? `${code} row added` : `${code} row saved`, "success");
+        load(); onChanged?.();
+      };
+
+      const remove = async (a) => {
+        const code = codeOf(a);
+        if (!confirm(`Delete the ${code} row ${fmtD(a.start_date)} – ${fmtD(a.end_date)}?\n\nService notes stay on file. The deletion is written to the audit log.`)) return;
+        const { data, error } = await supabase.from("person_service_authorizations").delete().eq("id", a.id).select("id");
+        if (error) return addToast(error.message, "error");
+        if (!data || data.length === 0) return addToast("Not deleted — only owners, admins and compliance directors can change authorizations", "error");
+        addToast(`${code} row deleted`, "success");
+        load(); onChanged?.();
+      };
+
+      if (!loadedOnce) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
+
+      const th = { fontSize: 11, fontWeight: 700, color: CB.textLight, textAlign: "left", padding: "8px 10px", whiteSpace: "nowrap", borderBottom: `1px solid ${CB.border}` };
+      const td = { fontSize: 13, color: CB.text, padding: "10px 10px", borderBottom: `1px solid ${CB.border}`, verticalAlign: "top" };
+
+      return (
+        <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, padding: 20 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 6, flexWrap: "wrap" }}>
+            <h4 style={{ fontSize: 15, fontWeight: 700, color: CB.navy }}>Authorizations (1056 budget)</h4>
+            {canEdit && <PrimaryButton onClick={openAdd}>{icons.plus({ size: 14 })} Add 1056 Row</PrimaryButton>}
+          </div>
+          <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 16 }}>
+            One row per line of the client's 1056. A new row starts when DSPD's rates change on July 1. Counts are in each row's Kind.
+          </div>
+
+          {loadError && (
+            <div role="alert" style={{ padding: "12px 14px", borderRadius: 10, border: `1px solid ${CB.red}`, color: CB.red, fontSize: 13, marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+              <span>Couldn't load authorizations ({loadError}).</span>
+              <SecondaryButton onClick={load}>Retry</SecondaryButton>
+            </div>
+          )}
+
+          {canEdit && lapseNotes.length > 0 && (
+            <div style={{ padding: "12px 14px", borderRadius: 10, background: `${CB.amber}10`, border: `1px solid ${CB.amber}50`, fontSize: 13, color: CB.text, marginBottom: 14 }}>
+              <div style={{ fontWeight: 700, marginBottom: 4 }}>
+                {lapseNotes.length} service note{lapseNotes.length === 1 ? " is" : "s are"} dated when no row covers {lapseNotes.length === 1 ? "it" : "them"}
+              </div>
+              <div style={{ color: CB.textMid, marginBottom: 8 }}>They're saved and flagged. Enter the missing 1056 rows and they bill normally.</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {lapseNotes.slice(0, 12).map(n => (
+                  <span key={n.id} title={n.state === "lapse" ? "Budget lapsed or renewal not entered" : "No row for this service on file"}
+                    style={{ fontSize: 12, padding: "2px 8px", borderRadius: 6, background: CB.white, border: `1px solid ${CB.border}` }}>
+                    {fmtD(n.service_date)} · {n.service_code_definitions?.code || "?"}{n.state === "none" ? " (never had)" : ""}
+                  </span>
+                ))}
+                {lapseNotes.length > 12 && <span style={{ fontSize: 12, color: CB.textLight }}>and {lapseNotes.length - 12} more</span>}
+              </div>
+            </div>
+          )}
+
+          {!loadError && sorted.length === 0 && (
+            <div style={{ padding: "14px 16px", borderRadius: 12, border: `1px dashed ${CB.border}`, color: CB.textLight, fontSize: 13 }}>
+              No 1056 rows on file. {canEdit ? "Add each row from the client's 1056." : "Your office enters these from the client's 1056."}
+            </div>
+          )}
+
+          {sorted.length > 0 && (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 900 }}>
+                <thead>
+                  <tr>
+                    <th style={th}>Service</th>
+                    <th style={th}>Approval ID</th>
+                    <th style={th}>Start</th>
+                    <th style={th}>End</th>
+                    <th style={th}>Kind</th>
+                    {perms.viewRates && <th style={th}>Rate</th>}
+                    <th style={th}>Max / Month</th>
+                    <th style={th}>Units for Period</th>
+                    <th style={th}>Used</th>
+                    {canEdit && <th style={th}></th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {sorted.map(a => {
+                    const code = codeOf(a);
+                    const kind = authKindOf(a);
+                    return (
+                      <tr key={a.id} style={{ opacity: ended(a) ? 0.6 : 1 }}>
+                        <td style={td}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                            <Badge text={code} color={CB.blue} />
+                            <RateNeededChip code={code} rate={a.rate_per_unit} />
+                            {a.status === "rejected" && <Badge text="Rejected" color={CB.red} />}
+                            {a.status === "pending" && <Badge text="Pending" color={CB.amber} />}
+                            {ended(a) && <span style={{ fontSize: 11, color: CB.textLight }}>ended</span>}
+                            {upcoming(a) && <span style={{ fontSize: 11, color: CB.textLight }}>starts later</span>}
+                          </div>
+                        </td>
+                        <td style={td}>{a.approval_id || <span style={{ color: CB.textLight }}>—</span>}</td>
+                        <td style={{ ...td, whiteSpace: "nowrap" }}>{fmtD(a.start_date)}</td>
+                        <td style={{ ...td, whiteSpace: "nowrap" }}>{fmtD(a.end_date)}</td>
+                        <td style={td} title={a.unit_kind ? "" : "Not set on the row yet — this is the code table's unit"}>
+                          <strong>{kind || "—"}</strong>{!a.unit_kind && kind && <span style={{ fontSize: 11, color: CB.textLight }}> (default)</span>}
+                        </td>
+                        {perms.viewRates && <td style={{ ...td, whiteSpace: "nowrap" }}>{a.rate_per_unit != null ? `$${Number(a.rate_per_unit).toFixed(2)}` : <span style={{ color: CB.textLight }}>—</span>}</td>}
+                        <td style={td}>{a.max_units_per_month ?? <span style={{ color: CB.textLight }}>—</span>}</td>
+                        <td style={td}>{a.authorized_units ?? "—"}</td>
+                        <td style={td}><AuthUsage a={a} /></td>
+                        {canEdit && (
+                          <td style={{ ...td, whiteSpace: "nowrap" }}>
+                            <div style={{ display: "flex", gap: 6 }}>
+                              <SecondaryButton onClick={() => openEdit(a)}>Edit</SecondaryButton>
+                              <SecondaryButton onClick={() => remove(a)} color={CB.red}>Delete</SecondaryButton>
+                            </div>
+                          </td>
+                        )}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <Modal open={!!editor} onClose={() => setEditor(null)} width={640}
+            title={editor?.mode === "edit" ? "Edit 1056 Row" : "Add 1056 Row"}
+            subtitle="Enter the row as it appears on the client's 1056. Changes are written to the audit log.">
+            {editor && (
+              <>
+                <Auth1056Fields row={editor.row} setRow={setEditorRow} serviceCodes={serviceCodes} perms={perms} />
+                <FormField label="Status">
+                  <select style={fieldStyle} value={editor.row.status} onChange={e => setEditorRow(p => ({ ...p, status: e.target.value }))}>
+                    {editor.mode === "add" && <option value="">Approved (or expired, if the end date has passed)</option>}
+                    <option value="approved">Approved</option>
+                    <option value="pending">Pending</option>
+                    <option value="rejected">Rejected</option>
+                    <option value="expired">Expired</option>
+                  </select>
+                </FormField>
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 8 }}>
+                  <SecondaryButton onClick={() => setEditor(null)}>Cancel</SecondaryButton>
+                  <PrimaryButton onClick={save} loading={saving}>{icons.save({ size: 15 })} Save</PrimaryButton>
+                </div>
+              </>
+            )}
+          </Modal>
+        </div>
+      );
+    }
+
     function ClientProfilePage({ clientId, onNavigate, onBack }) {
       const [client, setClient] = useState(null);
       const [loading, setLoading] = useState(true);
@@ -18820,7 +18717,7 @@
       const loadClient = async () => {
         setLoading(true);
         const { data } = await supabase.from("persons")
-          .select("*, person_service_authorizations:person_service_authorizations_v(id, service_code_id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code))")
+          .select("*, person_service_authorizations:person_service_authorizations_v(" + AUTH_SELECT + ")")
           .eq("id", clientId).single();
         setClient(data);
         setLoading(false);
@@ -18841,6 +18738,7 @@
 
       const tabs = [
         { key: "overview", label: "Overview", icon: icons.users, content: <ClientOverviewTab client={client} /> },
+        { key: "authorizations", label: "Authorizations", icon: icons.fileText, count: (client.person_service_authorizations || []).length, content: <ClientAuthorizationsTab clientId={clientId} onChanged={loadClient} /> }, // v20.0.26 — the 1056 rows
         { key: "residence", label: "Residence", icon: icons.heart, content: <ClientResidenceTab clientId={clientId} orgId={orgId} /> }, // v20.0.4
         { key: "absences", label: "Absences", icon: icons.calendar, content: <ClientAbsencesTab clientId={clientId} /> }, // v20.0.23 (e520 D7)
         { key: "goals", label: "PCSP Goals", icon: icons.crosshair, count: counts.goals, content: <ClientGoalsTab clientId={clientId} onChanged={loadClient} /> },
@@ -18867,7 +18765,8 @@
             onBack={onBack}
             onEdit={() => setEditOpen(true)}
           />
-          <ClientForm open={editOpen} onClose={() => { setEditOpen(false); loadClient(); }} onSaved={loadClient} editing={client} />
+          <ClientForm open={editOpen} onClose={() => { setEditOpen(false); loadClient(); }} onSaved={loadClient} editing={client}
+            onOpenAuthorizations={() => { setEditOpen(false); setActiveTab("authorizations"); }} />
         </>
       );
     }
@@ -20441,7 +20340,7 @@
       // Pull all the data we need in parallel
       const [personRes, authRes, medRes, contactRes, contextMemRes] = await Promise.all([
         supabase.from("persons").select("*").eq("id", personId).maybeSingle(),
-        supabase.from(AUTH_VIEW).select("id, authorized_units, used_units, start_date, end_date, rate_per_unit, service_code_definitions(code, name)").eq("person_id", personId),
+        supabase.from(AUTH_VIEW).select(AUTH_SELECT).eq("person_id", personId), // v20.0.26 — the 1056 columns
         supabase.from("medications").select("medication_name, dosage, frequency, schedule_times, is_prn, prn_reason, is_active").eq("person_id", personId).eq("is_active", true).limit(50),
         supabase.from("person_contacts").select("contact_type, name, relationship, phone, email").eq("person_id", personId),
         supabase.from("service_delivery_context_members").select("context_id, is_active, end_date, service_delivery_contexts(name, delivery_type, service_code_definitions(code))").eq("person_id", personId),
@@ -20605,11 +20504,13 @@
         doc.paragraph("No active authorizations on file.", { muted: true });
       } else {
         doc.tableSimple(
-          ["Code", "Service", "Period", "Authorized", "Used", "Remaining"],
+          ["Code", "Service", "Period", "Kind", "Max/Mo", "Units (period)", "Used", "Remaining"],
           auths.map(a => [
             a.service_code_definitions?.code || "—",
             a.service_code_definitions?.name || "—",
             `${formatDate(a.start_date)} – ${formatDate(a.end_date)}`,
+            authKindOf(a) || "—",
+            a.max_units_per_month ?? "—",
             a.authorized_units || "—",
             a.used_units || 0,
             (a.authorized_units || 0) - (a.used_units || 0),
