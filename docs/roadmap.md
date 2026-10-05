@@ -42,6 +42,7 @@ Updated: Oct 4 2026.
 - ✅ Authorizations design v1.0 approved — `docs/authorizations-design.md`, decisions A, D1–D4 (Sep 28)
 - ✅ v20.0.26 — authorizations become 1056 rows: Approval ID, Kind (D / Q / S / M), max billable units per month, units for the period; the client profile's Authorizations tab is the one place rows are added and edited (Edit Client read-only; intake rows carry the same fields); every change audited; two counters per row in its Kind (this month, the period); D1 — a note during a budget lapse saves and managers see it flagged until the row is entered; PBA per session; the payment file fills S lines (Sep 30)
 - ✅ v20.0.27 — renewals: a review list per client (Medicaid, DWS, PCSP meeting, Other; Mark Completed takes the next due date); the "Renewals & Budgets" card on the Dashboard and a Compliance tab, manage tier — budget ends, reviews due, and run-outs at the actual pace, 60 / 30 / 14 days (Oct 4)
+- ✅ v20.0.28 — snappier: the Provly logo is a Home button; JSX-only compile (no ES5 down-compile), PDF/CSV libraries deferred, database preconnect; entrance animations 0.16s, no staggers (Oct 4)
 
 ## Tier 1 — finish Item 4 (security)
 - 🔄 **Go live with identities.** Operator invites sent Sep 22 (Elena, Kujang, Ethan); Asunta once her email is on file; Siale and Asia held until they have someone to support (no assignment = empty login); assignments kept current as a security control.
