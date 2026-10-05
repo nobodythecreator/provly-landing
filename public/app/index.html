@@ -40,6 +40,8 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.29 r1 (Greptile r1): new ids come from newId() — crypto.randomUUID where the browser has it, else a v4 UUID from crypto.getRandomValues — so every form opens on the stated minimum browsers (iOS 12 has no randomUUID). A purchaser signs their own Lost Receipt Affidavits from a Dashboard card, PBA role or not. Compliance → PBA lists staff-level flags (the affidavit pattern) apart from each Person's. The ledger's request picker offers only open approvals (plus the one an entry already spends). Database side: sql/v20.0.29r1_pba.sql. -->
+  <!-- v20.0.29 (PBA Release 1 — the record; docs/pba-design.md v1.1, requirements docs/pba-module-spec-v1.md): a PBA tab on the client profile, shown only to the Person's assigned PBA Manager, Administrative Reviewer and Quarterly Auditor, the Compliance Director and the owner. Start a PBA record (it opens as Pending enrollment until the fiduciary proof and a signed Natural Support Determination — Form A — are filed); assign the three roles (the database refuses one person in two roles and the Person's host in any); accounts with titling and the not-provider-funds attestation; the ledger (deposits, purchases, transfers, cash with who received it and why; receipts by camera into a private add-only bucket, fingerprinted; the Lost Receipt Affidavit signed by the purchaser and countersigned; entries editable with a reason until the month closes, voids instead of deletes, reversing entries after); purchase requests where the blocks live (the Person's own words, this month's needs met, PBA Manager approval); signatures in Provly (staff attest; the Person or guardian signs on screen or by scan); open flags on the tab and on Compliance → PBA. Database side: sql/v20.0.29.sql. -->
   <!-- v20.0.28 r3 (Greptile on the hotfix): the startup-failure screen covers every way the app can fail to appear — its guard is the first script in <head>, the started flag is set only after the first render succeeds, and if the app never runs at all (Babel or React didn't load) a check after page load shows the screen instead of a blank page. -->
   <!-- v20.0.28 r2 (hotfix — the blank page): the app's code runs inside its own function scope. v20.0.28 left let/const native, so the app's top-level `const supabase` collided with the `supabase` global the Supabase library declares, and the browser refused the whole script. Inside the function the names shadow instead of collide (only `supabase` overlapped; the app reads the library as window.supabase). If anything ever fails before the app first renders, a "Provly couldn't start — Reload" screen shows instead of a blank page. -->
   <!-- v20.0.28 r1 (Greptile r1): minimum browsers stated and compiled for — Chrome / Edge 79+, Firefox 60+, Safari / iOS 12+. Babel's env preset now targets exactly those (a custom "provly" preset), so older iPhones that can't parse ?. or ?? get them transformed, while everything those browsers run natively stays native. -->
@@ -184,6 +186,15 @@
     // the app's names shadow the globals instead of colliding with them.
     (function () {
     const { useState, useEffect, useContext, createContext, useCallback, useRef, useMemo } = React;
+    // v20.0.29 r1 — client-generated ids on every supported browser: crypto.randomUUID (Chrome 92+,
+    // Safari 15.4+, Firefox 95+) when present, else an RFC 4122 v4 UUID from crypto.getRandomValues
+    const newId = () => {
+      if (window.crypto && typeof window.crypto.randomUUID === "function") return window.crypto.randomUUID();
+      const b = window.crypto.getRandomValues(new Uint8Array(16));
+      b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+      const h = Array.from(b, x => x.toString(16).padStart(2, "0")).join("");
+      return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+    };
 
     // v20.0.14 / r1 — BUSINESS calendar dates. Provly's records are Utah
     // records: the service date, the EVV day, the MAR day are the date in
@@ -1871,7 +1882,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.28</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.29</span>
               </div>
             </button>
             {isMobile && (
@@ -2253,6 +2264,7 @@
                 <StatCard label="Overdue Trainings" value={stats.trainings} icon={icons.alertTriangle} color={stats.trainings > 0 ? CB.red : CB.green} delay={0.1} onClick={onNavigate ? () => onNavigate("training") : undefined} />
                 <StatCard label="Authorizations" value={stats.auths} icon={icons.fileText} color={CB.navy} delay={0.15} onClick={onNavigate ? () => onNavigate("clients") : undefined} />
               </div>
+              <PbaAffidavitsToSignCard /> {/* v20.0.29 r1 — shows only when you have affidavits to sign */}
               {accessTier === "manage" && <RenewalsCard onNavigate={onNavigate} compact />} {/* v20.0.27 (D3) */}
               <div style={{
                 background: CB.white, borderRadius: 16, padding: 24,
@@ -10159,7 +10171,7 @@
       const [issues, setIssues] = useState([]);
       const [tab, setTab] = useState("audit");
       const perms = usePermissions();
-      const { brand, accessTier } = useAuth();                     // v20.0.27 — Renewals & Budgets is manage tier
+      const { brand, accessTier, role } = useAuth();               // v20.0.27 — Renewals & Budgets is manage tier; v20.0.29 — PBA for owner / Compliance Director
 
       useEffect(() => { runAudit(); }, []);
 
@@ -10360,9 +10372,11 @@
             <CompTab value="audit" label="Audit Scores" />
             <CompTab value="deadlines" label={`SOW Deadlines (${SOW_DEADLINES.length})`} />
             {accessTier === "manage" && <CompTab value="renewals" label="Renewals & Budgets" />}
+            {(role === "owner" || role === "compliance_director") && <CompTab value="pba" label="PBA" />}
           </div>
 
           {tab === "renewals" && accessTier === "manage" && <RenewalsCard onNavigate={onNavigate} />} {/* v20.0.27 (D3) */}
+          {tab === "pba" && (role === "owner" || role === "compliance_director") && <CompliancePbaPanel onNavigate={onNavigate} />} {/* v20.0.29 */}
 
           {tab === "audit" && (
             <>
@@ -18814,6 +18828,878 @@
       );
     }
 
+
+    // ═══════════════════════════════════════════════════════════════
+    // v20.0.29 — PBA (PERSONAL BUDGET ASSISTANCE), RELEASE 1: THE RECORD
+    // docs/pba-design.md v1.1 · requirements docs/pba-module-spec-v1.md.
+    // The database decides everything (sql/v20.0.29.sql): who may read a Person's
+    // money (their assigned PBA roles + the Compliance Director + the owner), who
+    // may write (their PBA Manager), what is refused. This UI only asks and shows.
+    // Files go to the private, add-only "pba" bucket and are fingerprinted (SHA-256).
+    // ═══════════════════════════════════════════════════════════════
+    const PBA_ROLES = [
+      { value: "manager", label: "PBA Manager" },
+      { value: "reviewer", label: "Administrative Reviewer" },
+      { value: "auditor", label: "Quarterly Auditor" },
+    ];
+    const PBA_FIDUCIARY = [
+      { value: "ssa_payee", label: "SSA representative payee" },
+      { value: "conservator", label: "Conservator" },
+      { value: "voluntary", label: "Voluntary personal funds manager" },
+    ];
+    const PBA_ACCOUNT_KINDS = [
+      { value: "bank", label: "Bank account" },
+      { value: "pay_card", label: "Pay / spending card" },
+      { value: "cash", label: "Cash on hand" },
+      { value: "able", label: "ABLE account" },
+    ];
+    const PBA_TXN_TYPES = [
+      { value: "withdrawal", label: "Purchase / payment" },
+      { value: "deposit", label: "Deposit" },
+      { value: "transfer", label: "Transfer between accounts" },
+      { value: "cash_out", label: "Cash withdrawal (handed to someone)" },
+      { value: "interest", label: "Interest" },
+      { value: "fee", label: "Bank fee" },
+    ];
+    const PBA_CATEGORIES = [
+      ["benefit_deposit", "Benefit deposit (SSI / SSDI)"], ["room_board", "Room & board"], ["food", "Food"], ["clothing", "Clothing"],
+      ["medical", "Medical"], ["personal", "Personal items"], ["recreation", "Recreation"], ["phone", "Phone"], ["utilities", "Utilities"],
+      ["transportation", "Transportation"], ["gift", "Gift"], ["savings", "Savings"], ["debt_repayment", "Debt repayment"], ["other", "Other"],
+    ];
+    const PBA_FLAG_LABELS = {
+      pending_enrollment: "Pending enrollment", missing_receipt: "Missing receipt", third_party_pattern: "Third-party pattern",
+      affidavit_pattern: "Affidavit pattern", roles_incomplete: "Roles incomplete", host_conflict: "Host conflict",
+      recorded_over_block: "Recorded over a block",
+    };
+    const pbaMoney = (n) => `$${Number(n || 0).toFixed(2)}`;
+    const pbaRoleLabel = (r) => PBA_ROLES.find(x => x.value === r)?.label || r;
+    const pbaCatLabel = (c) => (PBA_CATEGORIES.find(x => x[0] === c) || [null, c || "—"])[1];
+    const pbaTypeLabel = (t) => PBA_TXN_TYPES.find(x => x.value === t)?.label || t;
+    // the balance direction of an entry for one account (mirrors _pba_effect; display only)
+    const pbaSign = (t, accountId) => {
+      if (t.status !== "active") return 0;
+      const rev = t.reverses_id ? -1 : 1;
+      if ((t.type === "deposit" || t.type === "interest") && t.account_id === accountId) return rev;
+      if (["withdrawal", "fee", "cash_out", "transfer"].includes(t.type) && t.account_id === accountId) return -rev;
+      if (t.type === "transfer" && t.to_account_id === accountId) return rev;
+      return 0;
+    };
+    async function pbaSha256(file) {
+      const buf = await file.arrayBuffer();
+      const h = await crypto.subtle.digest("SHA-256", buf);
+      return Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2, "0")).join("");
+    }
+    // upload to {org}/{person}/{folder}/{uuid}.{ext}, then register it (the database checks the object exists)
+    async function uploadPbaFile({ orgId, personId, purpose, file }) {
+      const id = newId();
+      const folder = purpose === "receipt" ? "receipts" : purpose === "signature" ? "signatures" : purpose === "statement" ? "statements" : "documents";
+      const fromName = file.name && file.name.includes(".") ? file.name.split(".").pop() : "";
+      const ext = (fromName || (file.type || "").split("/")[1] || "bin").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 5) || "bin";
+      const path = `${orgId}/${personId}/${folder}/${id}.${ext}`;
+      const sha = await pbaSha256(file);
+      const { error: upErr } = await supabase.storage.from("pba").upload(path, file, { upsert: false, contentType: file.type || undefined });
+      if (upErr) throw new Error(upErr.message || "Upload failed");
+      const { error } = await supabase.rpc("pba_register_file", {
+        p_id: id, p_person: personId, p_purpose: purpose, p_path: path, p_sha256: sha, p_mime: file.type || null, p_bytes: file.size || null,
+      });
+      if (error) throw new Error(error.message);
+      return { id, path, sha };
+    }
+    async function openPbaFile(path, addToast) {
+      const { data, error } = await supabase.storage.from("pba").createSignedUrl(path, 300);
+      if (error || !data?.signedUrl) return addToast(error?.message || "Couldn't open the file", "error");
+      window.open(data.signedUrl, "_blank", "noopener");
+    }
+
+    // Decision 7 — the Person or guardian signs on screen (finger or mouse)
+    function SignaturePad({ padRef, height = 160 }) {
+      const canvasRef = useRef(null);
+      const drawing = useRef(false);
+      const inked = useRef(false);
+      useEffect(() => {
+        const c = canvasRef.current; if (!c) return;
+        const ratio = window.devicePixelRatio || 1;
+        c.width = c.offsetWidth * ratio; c.height = height * ratio;
+        const ctx = c.getContext("2d"); ctx.scale(ratio, ratio); ctx.lineWidth = 2.2; ctx.lineCap = "round"; ctx.strokeStyle = "#111";
+        padRef.current = {
+          isEmpty: () => !inked.current,
+          clear: () => { ctx.clearRect(0, 0, c.width, c.height); inked.current = false; },
+          toBlob: () => new Promise(res => c.toBlob(res, "image/png")),
+        };
+      }, []);
+      const pos = (e) => { const r = canvasRef.current.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+      const down = (e) => { e.preventDefault(); drawing.current = true; const ctx = canvasRef.current.getContext("2d"); const [x, y] = pos(e); ctx.beginPath(); ctx.moveTo(x, y); if (e.pointerId != null && canvasRef.current.setPointerCapture) canvasRef.current.setPointerCapture(e.pointerId); };
+      const move = (e) => { if (!drawing.current) return; e.preventDefault(); const ctx = canvasRef.current.getContext("2d"); const [x, y] = pos(e); ctx.lineTo(x, y); ctx.stroke(); inked.current = true; };
+      const up = () => { drawing.current = false; };
+      return (
+        <div>
+          <canvas ref={canvasRef}
+            {...(window.PointerEvent
+              ? { onPointerDown: down, onPointerMove: move, onPointerUp: up, onPointerLeave: up }
+              // r1 — iOS 12 has no Pointer Events: the same strokes from touch (and mouse)
+              : { onTouchStart: ev => down({ preventDefault: () => ev.preventDefault(), clientX: ev.touches[0].clientX, clientY: ev.touches[0].clientY }),
+                  onTouchMove: ev => move({ preventDefault: () => ev.preventDefault(), clientX: ev.touches[0].clientX, clientY: ev.touches[0].clientY }),
+                  onTouchEnd: up, onMouseDown: down, onMouseMove: move, onMouseUp: up, onMouseLeave: up })}
+            style={{ width: "100%", height, border: `1px dashed ${CB.border}`, borderRadius: 10, background: CB.white, touchAction: "none", display: "block" }} />
+          <button type="button" onClick={() => padRef.current?.clear()} style={{ marginTop: 6, background: "none", border: "none", color: CB.textMid, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Clear signature</button>
+        </div>
+      );
+    }
+
+    // a card used by every PBA section
+    const PbaCard = ({ title, actions, children }) => (
+      <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, padding: 18, marginBottom: 14 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
+          <h4 style={{ fontSize: 15, fontWeight: 700, color: CB.navy }}>{title}</h4>
+          {actions && <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{actions}</div>}
+        </div>
+        {children}
+      </div>
+    );
+
+    // v20.0.29 r1 — a purchaser signs their own Lost Receipt Affidavits here, PBA role or not
+    function PbaAffidavitsToSignCard() {
+      const { addToast } = useToast();
+      const [rows, setRows] = useState([]);
+      const [signing, setSigning] = useState(null);                  // { id, name, agree }
+      const [busy, setBusy] = useState(false);
+      const load = async () => {
+        const { data, error } = await supabase.rpc("pba_affidavits_to_sign");
+        if (!error) setRows(data || []);
+      };
+      useEffect(() => { load(); }, []);
+      if (rows.length === 0) return null;
+      const sign = async () => {
+        if (!signing.name.trim()) return addToast("Type your full name", "error");
+        if (!signing.agree) return addToast("Tick the attestation to sign", "error");
+        setBusy(true);
+        const { error } = await supabase.rpc("pba_sign", { p_form_type: "form_f", p_form_id: signing.id, p_signer_kind: "staff", p_signer_name: signing.name.trim(),
+          p_attestation: "I made this purchase. The receipt is lost; the details above are true.", p_drawn_file: null, p_scan_file: null });
+        setBusy(false);
+        if (error) return addToast(error.message, "error");
+        addToast("Affidavit signed", "success"); setSigning(null); load();
+      };
+      const cur = signing && rows.find(r => r.o_affidavit_id === signing.id);
+      return (
+        <div style={{ background: CB.white, borderRadius: 16, padding: 20, border: `1px solid ${CB.amber}60`, marginBottom: 20 }}>
+          <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Lost Receipt Affidavits to sign ({rows.length})</h3>
+          <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 10 }}>You made these purchases and the receipts are lost. Check the details and sign.</div>
+          {rows.map(r => (
+            <div key={r.o_affidavit_id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "8px 0", borderTop: `1px solid ${CB.border}`, flexWrap: "wrap" }}>
+              <div style={{ fontSize: 13 }}><strong>{r.o_person_name}</strong> · {r.o_store} · ${Number(r.o_amount).toFixed(2)} · {new Date(r.o_purchase_date + "T00:00:00").toLocaleDateString()}
+                <div style={{ fontSize: 12, color: CB.textMid }}>{r.o_reason}</div></div>
+              <SecondaryButton onClick={() => setSigning({ id: r.o_affidavit_id, name: "", agree: false })}>Sign</SecondaryButton>
+            </div>
+          ))}
+          <Modal open={!!cur} onClose={() => setSigning(null)} width={500} title="Sign the Lost Receipt Affidavit" subtitle="Your signature locks the affidavit.">
+            {cur && <>
+              <div style={{ fontSize: 13, padding: "10px 12px", borderRadius: 10, background: CB.cream, marginBottom: 12 }}>
+                {cur.o_store} · ${Number(cur.o_amount).toFixed(2)} · {new Date(cur.o_purchase_date + "T00:00:00").toLocaleDateString()}{cur.o_statement_line_ref ? ` · statement: ${cur.o_statement_line_ref}` : ""}
+                <div style={{ marginTop: 6 }}>I made this purchase. The receipt is lost; the details above are true.</div>
+              </div>
+              <FormField label="Type your full name" required><input style={fieldStyle} value={signing.name} onChange={ev => setSigning(s => ({ ...s, name: ev.target.value }))} /></FormField>
+              <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, cursor: "pointer" }}>
+                <input type="checkbox" checked={signing.agree} onChange={ev => setSigning(s => ({ ...s, agree: ev.target.checked }))} />
+                <span>I am signing as myself, and I attest to the statement above.</span>
+              </label>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 10 }}>
+                <SecondaryButton onClick={() => setSigning(null)}>Cancel</SecondaryButton>
+                <PrimaryButton loading={busy} onClick={sign}>Sign</PrimaryButton>
+              </div>
+            </>}
+          </Modal>
+        </div>
+      );
+    }
+
+    function ClientPbaTab({ clientId, client, access, onChanged }) {
+      const { addToast } = useToast();
+      const { orgId } = useAuth();
+      const [d, setD] = useState(null);                              // everything loaded for this Person
+      const [loadError, setLoadError] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const [modal, setModal] = useState(null);                      // { kind, ...state }
+      const [month, setMonth] = useState(() => ymd().slice(0, 7));
+      const seq = useRef(0);
+      const padRef = useRef(null);
+      const isOffice = !!(access?.owner || access?.compliance);
+      const isManager = access?.role === "manager";
+      const canAccounts = isManager || isOffice;
+      const myStaff = access?.staff_id || null;
+
+      const load = async () => {
+        const mine = ++seq.current;
+        setLoadError(null);
+        const q = (p) => p.then(r => { if (r.error) throw new Error(r.error.message); return r.data; });
+        try {
+          const [enr, formA, sigs, roles, accounts, balances, txns, affs, reqs, files, flags, staff] = await Promise.all([
+            q(supabase.from("pba_enrollments").select("*").eq("person_id", clientId).limit(1)),
+            q(supabase.from("pba_natural_support_determinations").select("*").eq("person_id", clientId).order("version", { ascending: false }).limit(1)),
+            q(supabase.from("pba_signatures").select("*").eq("person_id", clientId)),
+            q(supabase.from("pba_role_assignments").select("*").eq("person_id", clientId).order("start_date", { ascending: false })),
+            q(supabase.from("pba_accounts").select("*").eq("person_id", clientId).order("created_at")),
+            q(supabase.rpc("pba_balances", { p_person: clientId })),
+            q(supabase.from("pba_transactions").select("*, pba_receipts(id, file_id)").eq("person_id", clientId).order("entry_date", { ascending: false }).order("created_at", { ascending: false }).limit(2000)),
+            q(supabase.from("pba_lost_receipt_affidavits").select("*").eq("person_id", clientId)),
+            q(supabase.from("pba_purchase_requests").select("*").eq("person_id", clientId).order("requested_at", { ascending: false }).limit(200)),
+            q(supabase.from("pba_files").select("id, purpose, storage_path, uploaded_at").eq("person_id", clientId)),
+            q(supabase.rpc("pba_flags", { p_person: clientId })),
+            q(supabase.from("staff_directory_v").select("id, first_name, last_name, role").order("last_name")),
+          ]);
+          if (mine !== seq.current) return;
+          setD({ enrollment: enr?.[0] || null, formA: formA?.[0] || null, sigs: sigs || [], roles: roles || [], accounts: accounts || [],
+                 balances: Object.fromEntries((balances || []).map(b => [b.o_account_id, Number(b.o_balance)])),
+                 txns: txns || [], affs: affs || [], reqs: reqs || [], files: Object.fromEntries((files || []).map(f => [f.id, f])),
+                 flags: flags || [], staff: staff || [] });
+        } catch (e) {
+          if (mine !== seq.current) return;
+          setLoadError(e.message || "request failed");
+        }
+      };
+      useEffect(() => { setD(null); setModal(null); load(); }, [clientId]);
+
+      // every write: one RPC, the database's own message on refusal, then a reload
+      const run = async (fn, args, okMsg) => {
+        if (busy) return false;
+        setBusy(true);
+        let res;
+        try { res = await supabase.rpc(fn, args); } catch (e) { res = { error: { message: e?.message || "network error" } }; }
+        setBusy(false);
+        if (res.error) { addToast(res.error.message || "Not saved", "error"); return false; }
+        if (okMsg) addToast(okMsg, "success");
+        load(); onChanged?.();
+        return true;
+      };
+      const staffName = (id) => { const s = d?.staff.find(x => x.id === id); return s ? `${s.first_name} ${s.last_name}` : "—"; };
+      const fmtD = (x) => x ? new Date(x + "T00:00:00").toLocaleDateString() : "—";
+      const setM = (patch) => setModal(cur => cur ? { ...cur, ...patch } : cur);
+
+      if (loadError) return (
+        <div role="alert" style={{ padding: "14px 16px", borderRadius: 12, border: `1px solid ${CB.red}`, color: CB.red, fontSize: 13, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+          <span>Couldn't load the PBA record ({loadError}).</span><SecondaryButton onClick={load}>Retry</SecondaryButton>
+        </div>
+      );
+      if (!d) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><Spinner size={24} /></div>;
+
+      const e = d.enrollment;
+      const clientName = `${client?.first_name || ""} ${client?.last_name || ""}`.trim() || "this Person";
+      // ── not started ──────────────────────────────────────────────
+      if (!e) return (
+        <PbaCard title="Personal Budget Assistance">
+          <div style={{ fontSize: 13, color: CB.textMid, marginBottom: 12 }}>
+            {clientName} has no PBA record yet. Starting one opens the money record right away as <strong>Pending enrollment</strong>; months can't close until the fiduciary proof and the Natural Support Determination (Form A) are filed.
+          </div>
+          {isOffice ? (
+            <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
+              <FormField label="Fiduciary type (if known)">
+                <select style={fieldStyle} value={modal?.fid || ""} onChange={ev => setModal({ kind: "start", fid: ev.target.value })}>
+                  <option value="">Not known yet</option>
+                  {PBA_FIDUCIARY.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
+                </select>
+              </FormField>
+              <PrimaryButton loading={busy} onClick={() => run("pba_start", { p_person: clientId, p_fiduciary_type: modal?.fid || null }, "PBA record started")}>
+                {icons.plus({ size: 14 })} Start PBA Record
+              </PrimaryButton>
+            </div>
+          ) : <div style={{ fontSize: 13, color: CB.textLight }}>The owner or the Compliance Director starts PBA records.</div>}
+        </PbaCard>
+      );
+
+      const roleOf = (r) => d.roles.find(x => x.role === r && !x.end_date);
+      const formASigs = d.formA ? d.sigs.filter(s => s.form_type === "form_a" && s.form_id === d.formA.id) : [];
+      const formASigned = formASigs.some(s => s.signer_kind === "staff");
+      const proof = e.proof_file_id ? d.files[e.proof_file_id] : null;
+      const status = e.ended_on ? "ended" : (e.fiduciary_type && proof && formASigned ? "enrolled" : "pending");
+      const affOf = (txnId) => d.affs.find(a => a.transaction_id === txnId);
+      const affSigs = (affId) => d.sigs.filter(s => s.form_type === "form_f" && s.form_id === affId);
+      const monthTxns = d.txns.filter(t => (t.entry_date || "").slice(0, 7) === month);
+      const accountName = (id) => { const a = d.accounts.find(x => x.id === id); return a ? `${PBA_ACCOUNT_KINDS.find(k => k.value === a.kind)?.label || a.kind}${a.last4 ? ` ··${a.last4}` : ""}` : "—"; };
+      const approvedReqs = d.reqs.filter(q => q.status === "approved" || (modal?.kind === "txn" && !modal.isNew && q.id === modal.f?.request_id)); // r1
+
+      // ── upload helper bound to this Person ───────────────────────
+      const upload = async (purpose, file) => {
+        if (!file) return null;
+        setBusy(true);
+        try { return await uploadPbaFile({ orgId, personId: clientId, purpose, file }); }
+        catch (err) { addToast(err.message || "Upload failed", "error"); return null; }
+        finally { setBusy(false); }
+      };
+
+      // ── flags ────────────────────────────────────────────────────
+      const flagBox = d.flags.length > 0 && (
+        <div style={{ padding: "12px 14px", borderRadius: 10, background: `${CB.red}08`, border: `1px solid ${CB.red}40`, marginBottom: 14 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: CB.red, marginBottom: 6 }}>{d.flags.length} open flag{d.flags.length === 1 ? "" : "s"}</div>
+          {d.flags.map((f, i) => (
+            <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "6px 0", borderTop: i ? `1px solid ${CB.border}` : "none" }}>
+              <div style={{ fontSize: 13 }}><strong>{PBA_FLAG_LABELS[f.o_flag] || f.o_flag}</strong> <span style={{ color: CB.textMid }}>· {f.o_detail}</span></div>
+              {f.o_flag === "recorded_over_block" && (access?.owner || (access?.compliance && !isManager)) && (
+                <SecondaryButton onClick={() => setModal({ kind: "resolve", txn: f.o_ref, reason: "" })}>Resolve</SecondaryButton>
+              )}
+            </div>
+          ))}
+        </div>
+      );
+
+      return (
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+            <h3 style={{ fontSize: 17, fontWeight: 800, color: CB.navy }}>Personal Budget Assistance</h3>
+            <Badge text={status === "enrolled" ? "Enrolled" : status === "ended" ? "Ended" : "Pending enrollment"} color={status === "enrolled" ? CB.green : status === "ended" ? CB.textLight : CB.red} />
+            <span style={{ fontSize: 12, color: CB.textLight }}>
+              You: {access?.role ? pbaRoleLabel(access.role) : access?.owner ? "Owner (read)" : access?.compliance ? "Compliance Director (read)" : "—"}
+            </span>
+          </div>
+          {flagBox}
+
+          {/* ── enrollment (Gap 16) ── */}
+          <PbaCard title="Enrollment">
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
+              <div>
+                <div style={{ fontSize: 12, color: CB.textLight, marginBottom: 4 }}>Fiduciary type</div>
+                {(isOffice || isManager) ? (
+                  <select style={fieldStyle} value={e.fiduciary_type || ""} disabled={busy}
+                    onChange={ev => run("pba_set_enrollment", { p_person: clientId, p_fiduciary_type: ev.target.value || null, p_proof_file: null }, "Fiduciary type saved")}>
+                    <option value="">Not set</option>
+                    {PBA_FIDUCIARY.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
+                  </select>
+                ) : <div style={{ fontSize: 14 }}>{PBA_FIDUCIARY.find(f => f.value === e.fiduciary_type)?.label || "Not set"}</div>}
+              </div>
+              <div>
+                <div style={{ fontSize: 12, color: CB.textLight, marginBottom: 4 }}>Proof (SSA payee letter, conservatorship order or signed agreement)</div>
+                {proof ? (
+                  <button onClick={() => openPbaFile(proof.storage_path, addToast)} style={{ background: "none", border: "none", color: CB.blue, cursor: "pointer", fontSize: 14, padding: 0, fontFamily: "inherit" }}>
+                    {icons.eye({ size: 13 })} View proof (filed {new Date(proof.uploaded_at).toLocaleDateString()})
+                  </button>
+                ) : (isOffice || isManager) ? (
+                  <input type="file" accept="application/pdf,image/*" disabled={busy} onChange={async ev => {
+                    const f = await upload("fiduciary_proof", ev.target.files?.[0]); ev.target.value = "";
+                    if (f) run("pba_set_enrollment", { p_person: clientId, p_fiduciary_type: null, p_proof_file: f.id }, "Proof filed");
+                  }} />
+                ) : <div style={{ fontSize: 14, color: CB.red }}>Not on file</div>}
+              </div>
+            </div>
+
+            <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${CB.border}` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 6 }}>
+                <div style={{ fontSize: 14, fontWeight: 700 }}>Natural Support Determination (Form A){d.formA ? ` · version ${d.formA.version}` : ""}</div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {(isOffice || isManager) && (
+                    <SecondaryButton onClick={() => setModal({ kind: "formA", rows: (d.formA?.entries?.length ? d.formA.entries : [{ name: "", relationship: "", reason: "" }]).map(r => ({ ...r })) })}>
+                      {d.formA ? "New version" : "Prepare Form A"}
+                    </SecondaryButton>
+                  )}
+                  {d.formA && !formASigned && (
+                    <SecondaryButton onClick={() => setModal({ kind: "sign", form: "form_a", formId: d.formA.id, signer: "staff", name: "", agree: false,
+                      attestation: "I prepared this Natural Support Determination and it is accurate to the best of my knowledge." })}>Sign as preparer</SecondaryButton>
+                  )}
+                  {d.formA && (
+                    <SecondaryButton onClick={() => setModal({ kind: "sign", form: "form_a", formId: d.formA.id, signer: "guardian", name: "", agree: false, scan: null,
+                      attestation: "I have reviewed this Natural Support Determination." })}>Add Person / guardian signature</SecondaryButton>
+                  )}
+                </div>
+              </div>
+              {!d.formA ? <div style={{ fontSize: 13, color: CB.textLight }}>Not prepared yet — list each natural support or guardian and why they aren't the payee (SOW 15.4(1)).</div> : (
+                <>
+                  {d.formA.entries.map((r, i) => (
+                    <div key={i} style={{ fontSize: 13, padding: "4px 0" }}><strong>{r.name}</strong>{r.relationship ? ` (${r.relationship})` : ""} — {r.reason}</div>
+                  ))}
+                  <div style={{ fontSize: 12, color: formASigned ? CB.green : CB.red, marginTop: 6 }}>
+                    {formASigs.length === 0 ? "Not signed" : formASigs.map(s => `${s.signer_name} (${s.capacity}) ${new Date(s.signed_at).toLocaleDateString()}`).join(" · ")}
+                  </div>
+                </>
+              )}
+            </div>
+          </PbaCard>
+
+          {/* ── roles (Gap 20) ── */}
+          <PbaCard title="Roles" actions={isOffice ? <SecondaryButton onClick={() => setModal({ kind: "role", role: "manager", staff: "" })}>{icons.plus({ size: 13 })} Assign</SecondaryButton> : null}>
+            <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 8 }}>Three different people. The Person's host — or anyone on the host home's staff — can never hold a PBA role for them.</div>
+            {PBA_ROLES.map(r => {
+              const a = roleOf(r.value);
+              return (
+                <div key={r.value} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "8px 0", borderTop: `1px solid ${CB.border}` }}>
+                  <div style={{ fontSize: 13 }}><span style={{ color: CB.textLight }}>{r.label}: </span>{a ? <strong>{staffName(a.staff_id)}</strong> : <span style={{ color: CB.red }}>Vacant</span>}
+                    {a && <span style={{ color: CB.textLight }}> · since {fmtD(a.start_date)}</span>}</div>
+                  {a && isOffice && <SecondaryButton onClick={() => { if (confirm(`End ${staffName(a.staff_id)}'s ${r.label} role?`)) run("pba_end_role", { p_assignment: a.id }, "Role ended"); }}>End</SecondaryButton>}
+                </div>
+              );
+            })}
+          </PbaCard>
+
+          {/* ── accounts (Gap 17) ── */}
+          <PbaCard title="Accounts" actions={canAccounts ? <SecondaryButton onClick={() => setModal({ kind: "account", id: newId(), isNew: true,
+              f: { kind: "bank", institution: "", last4: "", titling: clientName, supervising_institution: "", opening_balance: "", opening_date: "", attest: false } })}>{icons.plus({ size: 13 })} Add Account</SecondaryButton> : null}>
+            {d.accounts.length === 0 ? <div style={{ fontSize: 13, color: CB.textLight }}>No accounts yet.</div> : d.accounts.map(a => (
+              <div key={a.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "8px 0", borderTop: `1px solid ${CB.border}`, opacity: a.closed_on ? 0.6 : 1 }}>
+                <div style={{ fontSize: 13 }}>
+                  <strong>{accountName(a.id)}</strong>{a.institution ? ` · ${a.institution}` : ""}<span style={{ color: CB.textLight }}> · titled “{a.titling}”{a.closed_on ? ` · closed ${fmtD(a.closed_on)}` : ""}</span>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <strong style={{ fontSize: 14 }}>{pbaMoney(d.balances[a.id])}</strong>
+                  {canAccounts && <SecondaryButton onClick={() => setModal({ kind: "account", id: a.id, isNew: false,
+                    f: { kind: a.kind, institution: a.institution || "", last4: a.last4 || "", titling: a.titling, supervising_institution: a.supervising_institution || "",
+                         opening_balance: String(a.opening_balance ?? ""), opening_date: a.opening_date || "", closed_on: a.closed_on || "", attest: !!a.not_provider_funds_attested } })}>Edit</SecondaryButton>}
+                </div>
+              </div>
+            ))}
+          </PbaCard>
+
+          {/* ── purchase requests (Decision 2: the blocks apply here) ── */}
+          <PbaCard title="Purchase Requests" actions={isManager ? <SecondaryButton onClick={() => setModal({ kind: "request", id: newId(),
+              f: { amount: "", payee: "", category: "personal", beneficiary: "person", beneficiary_name: "", beneficiary_relationship: "", person_choice: "" } })}>{icons.plus({ size: 13 })} New Request</SecondaryButton> : null}>
+            <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 8 }}>Gifts, savings, debt payments and anything for another person need the Person's choice in their own words and this month's needs met (food, shelter, clothing, medical care) before approval.</div>
+            {d.reqs.length === 0 ? <div style={{ fontSize: 13, color: CB.textLight }}>No requests.</div> : d.reqs.slice(0, 20).map(q => (
+              <div key={q.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "8px 0", borderTop: `1px solid ${CB.border}`, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 13 }}>
+                  <strong>{pbaMoney(q.amount)}</strong> · {q.payee || "—"} · {pbaCatLabel(q.category)}
+                  {q.beneficiary === "other" && <span> · for <strong>{q.beneficiary_name}</strong>{q.beneficiary_relationship ? ` (${q.beneficiary_relationship})` : ""}</span>}
+                  {q.person_choice && <div style={{ fontSize: 12, color: CB.textMid, fontStyle: "italic" }}>“{q.person_choice}”</div>}
+                  {q.decline_reason && <div style={{ fontSize: 12, color: CB.red }}>Declined: {q.decline_reason}</div>}
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <Badge text={q.status} color={q.status === "approved" || q.status === "spent" ? CB.green : q.status === "declined" ? CB.red : CB.amber} />
+                  {isManager && q.status === "requested" && <>
+                    <SecondaryButton onClick={() => setModal({ kind: "decide", id: q.id, needs: { food: false, shelter: false, clothing: false, medical: false }, reason: "" })}>Decide</SecondaryButton>
+                  </>}
+                </div>
+              </div>
+            ))}
+          </PbaCard>
+
+          {/* ── the ledger (Gap 18) ── */}
+          <PbaCard title="Ledger" actions={<>
+              <input type="month" value={month} onChange={ev => setMonth(ev.target.value || ymd().slice(0, 7))} style={{ ...fieldStyle, width: 170, padding: "6px 10px" }} />
+              {isManager && d.accounts.length > 0 && <PrimaryButton onClick={() => setModal({ kind: "txn", id: newId(), isNew: true,
+                f: { type: "withdrawal", account_id: d.accounts.find(a => !a.closed_on)?.id || d.accounts[0].id, to_account_id: "", entry_date: ymd(), amount: "", payee: "", category: "personal",
+                     beneficiary: "person", beneficiary_name: "", beneficiary_relationship: "", purchased_by: "", purchased_by_staff_id: "", handed_to: "", handed_to_staff_id: "",
+                     handed_to_name: "", purpose: "", request_id: "", notes: "" } })}>{icons.plus({ size: 14 })} Add Entry</PrimaryButton>}
+            </>}>
+            {isManager && d.accounts.length === 0 && <div style={{ fontSize: 13, color: CB.textLight, marginBottom: 8 }}>Add an account first.</div>}
+            {monthTxns.length === 0 ? <div style={{ fontSize: 13, color: CB.textLight }}>No entries in {new Date(month + "-01T00:00:00").toLocaleDateString(undefined, { month: "long", year: "numeric" })}.</div> : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 760 }}>
+                  <thead><tr>{["Date", "Entry", "Account", "Amount", "Receipt", ""].map(h => (
+                    <th key={h} style={{ fontSize: 11, fontWeight: 700, color: CB.textLight, textAlign: "left", padding: "6px 8px", borderBottom: `1px solid ${CB.border}` }}>{h}</th>))}</tr></thead>
+                  <tbody>
+                    {monthTxns.map(t => {
+                      const voided = t.status !== "active";
+                      const sign = pbaSign(t, t.account_id);
+                      const hasReceipt = (t.pba_receipts || []).length > 0;
+                      const aff = affOf(t.id);
+                      const sigs = aff ? affSigs(aff.id) : [];
+                      const reversed = d.txns.some(x => x.reverses_id === t.id && x.status === "active");
+                      const needs = t.status === "active" && !t.reverses_id && !reversed && t.type === "withdrawal" && Number(t.amount) > 50;
+                      const td = { fontSize: 13, padding: "8px", borderBottom: `1px solid ${CB.border}`, verticalAlign: "top", textDecoration: voided ? "line-through" : "none", color: voided ? CB.textLight : CB.text };
+                      return (
+                        <tr key={t.id}>
+                          <td style={{ ...td, whiteSpace: "nowrap" }}>{fmtD(t.entry_date)}</td>
+                          <td style={td}>
+                            <div><strong>{pbaTypeLabel(t.type)}</strong>{t.payee ? ` · ${t.payee}` : ""} · {pbaCatLabel(t.category)}</div>
+                            {t.beneficiary === "other" && <div style={{ fontSize: 12 }}>For <strong>{t.beneficiary_name}</strong>{t.beneficiary_relationship ? ` (${t.beneficiary_relationship})` : ""}</div>}
+                            {t.type === "transfer" && <div style={{ fontSize: 12, color: CB.textMid }}>to {accountName(t.to_account_id)}</div>}
+                            {t.handed_to && <div style={{ fontSize: 12, color: CB.textMid }}>Handed to {t.handed_to === "person" ? clientName : (t.handed_to_staff_id ? staffName(t.handed_to_staff_id) : t.handed_to_name)} — {t.purpose}</div>}
+                            {t.reverses_id && <div style={{ fontSize: 12, color: CB.amber }}>Reversing entry</div>}
+                            {reversed && <div style={{ fontSize: 12, color: CB.amber }}>Reversed</div>}
+                            {voided && <div style={{ fontSize: 12, color: CB.red, textDecoration: "none" }}>Voided: {t.void_reason}</div>}
+                            {t.notes && <div style={{ fontSize: 12, color: CB.textMid }}>{t.notes}</div>}
+                          </td>
+                          <td style={{ ...td, whiteSpace: "nowrap" }}>{accountName(t.account_id)}</td>
+                          <td style={{ ...td, whiteSpace: "nowrap", fontWeight: 700, color: voided ? CB.textLight : sign > 0 ? CB.green : CB.text }}>{sign > 0 ? "+" : sign < 0 ? "−" : ""}{pbaMoney(t.amount)}</td>
+                          <td style={{ ...td, textDecoration: "none" }}>
+                            {hasReceipt ? (t.pba_receipts.map(r => d.files[r.file_id] && (
+                              <button key={r.id} onClick={() => openPbaFile(d.files[r.file_id].storage_path, addToast)} style={{ background: "none", border: "none", color: CB.blue, cursor: "pointer", fontSize: 12, padding: 0, fontFamily: "inherit", display: "block" }}>{icons.eye({ size: 12 })} Receipt</button>)))
+                              : aff ? (
+                                <div style={{ fontSize: 12 }}>
+                                  <div style={{ color: sigs.length >= 2 ? CB.green : CB.amber }}>Affidavit · {sigs.length}/2 signed</div>
+                                  {!sigs.some(s => s.capacity === "purchaser") && myStaff === aff.purchaser_staff_id &&
+                                    <button onClick={() => setModal({ kind: "sign", form: "form_f", formId: aff.id, signer: "staff", name: "", agree: false, attestation: "I made this purchase. The receipt is lost; the details above are true." })} style={{ background: "none", border: "none", color: CB.blue, cursor: "pointer", fontSize: 12, padding: 0, fontFamily: "inherit" }}>Sign as purchaser</button>}
+                                  {!sigs.some(s => s.capacity === "countersigner") && myStaff !== aff.purchaser_staff_id && (access?.owner || (access?.compliance && !isManager)) &&
+                                    <button onClick={() => setModal({ kind: "sign", form: "form_f", formId: aff.id, signer: "staff", name: "", agree: false, attestation: "I reviewed this Lost Receipt Affidavit against the bank statement." })} style={{ background: "none", border: "none", color: CB.blue, cursor: "pointer", fontSize: 12, padding: 0, fontFamily: "inherit" }}>Countersign</button>}
+                                </div>
+                              ) : needs ? <span style={{ fontSize: 12, color: CB.red, fontWeight: 700 }}>Needed</span> : <span style={{ fontSize: 12, color: CB.textLight }}>—</span>}
+                          </td>
+                          <td style={{ ...td, textDecoration: "none", whiteSpace: "nowrap" }}>
+                            {isManager && !voided && (
+                              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                                {needs && !hasReceipt && !aff && (
+                                  <label style={{ fontSize: 12, color: CB.blue, cursor: "pointer", fontWeight: 600 }}>
+                                    {icons.upload({ size: 12 })} Receipt
+                                    <input type="file" accept="image/*,application/pdf" capture="environment" style={{ display: "none" }} disabled={busy} onChange={async ev => {
+                                      const f = await upload("receipt", ev.target.files?.[0]); ev.target.value = "";
+                                      if (f) run("pba_attach_receipt", { p_txn: t.id, p_file: f.id }, "Receipt attached");
+                                    }} />
+                                  </label>
+                                )}
+                                {needs && !hasReceipt && !aff && <button onClick={() => setModal({ kind: "affidavit", id: newId(), txn: t.id,
+                                  f: { purchaser_staff_id: t.purchased_by_staff_id || "", store: t.payee || "", statement_line_ref: "", reason: "" } })}
+                                  style={{ background: "none", border: "none", color: CB.blue, cursor: "pointer", fontSize: 12, padding: 0, fontFamily: "inherit", fontWeight: 600 }}>Lost receipt</button>}
+                                {!t.reverses_id && !reversed && <button onClick={() => setModal({ kind: "txn", id: t.id, isNew: false, reason: "", f: {
+                                  type: t.type, account_id: t.account_id, to_account_id: t.to_account_id || "", entry_date: t.entry_date, amount: String(t.amount), payee: t.payee || "",
+                                  category: t.category || "", beneficiary: t.beneficiary, beneficiary_name: t.beneficiary_name || "", beneficiary_relationship: t.beneficiary_relationship || "",
+                                  purchased_by: t.purchased_by || "", purchased_by_staff_id: t.purchased_by_staff_id || "", handed_to: t.handed_to || "", handed_to_staff_id: t.handed_to_staff_id || "",
+                                  handed_to_name: t.handed_to_name || "", purpose: t.purpose || "", request_id: t.request_id || "", notes: t.notes || "" } })}
+                                  style={{ background: "none", border: "none", color: CB.blue, cursor: "pointer", fontSize: 12, padding: 0, fontFamily: "inherit" }}>Edit</button>}
+                                <button onClick={() => setModal({ kind: "void", txn: t.id, reason: "" })} style={{ background: "none", border: "none", color: CB.red, cursor: "pointer", fontSize: 12, padding: 0, fontFamily: "inherit" }}>Void</button>
+                                {!t.reverses_id && !reversed && <button onClick={() => setModal({ kind: "reverse", txn: t.id, newId: newId(), reason: "" })} style={{ background: "none", border: "none", color: CB.amber, cursor: "pointer", fontSize: 12, padding: 0, fontFamily: "inherit" }}>Reverse</button>}
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </PbaCard>
+
+          {/* ── modals ── */}
+          <Modal open={!!modal && modal.kind !== "start"} onClose={() => setModal(null)} width={modal?.kind === "txn" ? 640 : 540}
+            title={{ formA: "Natural Support Determination (Form A)", sign: "Sign", role: "Assign a PBA Role", account: modal?.isNew ? "Add Account" : "Edit Account",
+                     request: "New Purchase Request", decide: "Decide the Request", txn: modal?.isNew ? "Add Ledger Entry" : "Edit Ledger Entry",
+                     affidavit: "Lost Receipt Affidavit (Form F)", void: "Void Entry", reverse: "Reverse Entry", resolve: "Resolve Flag" }[modal?.kind] || ""}
+            subtitle={modal?.kind === "txn" && !modal?.isNew ? "Editable until the month closes. Every change is logged with your reason." : modal?.kind === "sign" ? "Your signature locks this form." : ""}>
+            {modal && (() => {
+              const f = modal.f || {};
+              const setF = (k, v) => setM({ f: { ...f, [k]: v } });
+              const footer = (onSave, label = "Save", danger = false) => (
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 10 }}>
+                  <SecondaryButton onClick={() => setModal(null)}>Cancel</SecondaryButton>
+                  <PrimaryButton loading={busy} color={danger ? CB.red : undefined} onClick={onSave}>{label}</PrimaryButton>
+                </div>
+              );
+              const done = async (fn, args, msg) => { if (await run(fn, args, msg)) setModal(null); };
+              const staffOptions = d.staff.map(s => <option key={s.id} value={s.id}>{s.first_name} {s.last_name}</option>);
+              const reasonField = (label = "Reason") => (
+                <FormField label={label} required><textarea style={{ ...fieldStyle, minHeight: 70 }} value={modal.reason || ""} onChange={ev => setM({ reason: ev.target.value })} /></FormField>
+              );
+
+              if (modal.kind === "formA") return (
+                <>
+                  <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 10 }}>Each natural support or guardian, and why they are not the payee (SOW 15.4(1)). Saving creates a new version that must be signed.</div>
+                  {modal.rows.map((r, i) => (
+                    <div key={i} style={{ padding: 10, border: `1px solid ${CB.border}`, borderRadius: 10, marginBottom: 8 }}>
+                      <FormRow>
+                        <FormField label="Name" required half><input style={fieldStyle} value={r.name} onChange={ev => setM({ rows: modal.rows.map((x, j) => j === i ? { ...x, name: ev.target.value } : x) })} /></FormField>
+                        <FormField label="Relationship" half><input style={fieldStyle} value={r.relationship || ""} onChange={ev => setM({ rows: modal.rows.map((x, j) => j === i ? { ...x, relationship: ev.target.value } : x) })} /></FormField>
+                      </FormRow>
+                      <FormField label="Why they are not the payee" required><input style={fieldStyle} value={r.reason} onChange={ev => setM({ rows: modal.rows.map((x, j) => j === i ? { ...x, reason: ev.target.value } : x) })} /></FormField>
+                      {modal.rows.length > 1 && <button onClick={() => setM({ rows: modal.rows.filter((_, j) => j !== i) })} style={{ background: "none", border: "none", color: CB.red, cursor: "pointer", fontSize: 12, fontFamily: "inherit" }}>Remove</button>}
+                    </div>
+                  ))}
+                  <SecondaryButton onClick={() => setM({ rows: [...modal.rows, { name: "", relationship: "", reason: "" }] })}>{icons.plus({ size: 13 })} Add another</SecondaryButton>
+                  {footer(() => done("pba_save_form_a", { p_person: clientId, p_entries: modal.rows.map(r => ({ name: r.name.trim(), relationship: (r.relationship || "").trim(), reason: r.reason.trim() })) }, "Form A saved — sign it to complete enrollment"))}
+                </>
+              );
+
+              if (modal.kind === "sign") {
+                const staffSigner = modal.signer === "staff";
+                return (
+                  <>
+                    <div style={{ fontSize: 13, padding: "10px 12px", borderRadius: 10, background: CB.cream, marginBottom: 12 }}>{modal.attestation}</div>
+                    {!staffSigner && (
+                      <FormField label="Who is signing">
+                        <select style={fieldStyle} value={modal.signer} onChange={ev => setM({ signer: ev.target.value })}>
+                          <option value="guardian">Guardian</option><option value="person">The Person</option>
+                        </select>
+                      </FormField>
+                    )}
+                    <FormField label={staffSigner ? "Type your full name" : "Signer's full name"} required>
+                      <input style={fieldStyle} value={modal.name} onChange={ev => setM({ name: ev.target.value })} />
+                    </FormField>
+                    {!staffSigner && (
+                      <>
+                        <div style={{ fontSize: 12, color: CB.textLight, marginBottom: 4 }}>Sign below (finger or mouse) — or attach a signed scan instead.</div>
+                        <SignaturePad padRef={padRef} />
+                        <div style={{ marginTop: 8 }}><input type="file" accept="application/pdf,image/*" onChange={ev => setM({ scan: ev.target.files?.[0] || null })} /></div>
+                      </>
+                    )}
+                    <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, marginTop: 10, cursor: "pointer" }}>
+                      <input type="checkbox" checked={!!modal.agree} onChange={ev => setM({ agree: ev.target.checked })} />
+                      <span>{staffSigner ? "I am signing as myself, and I attest to the statement above." : "I witnessed this signature."}</span>
+                    </label>
+                    {footer(async () => {
+                      if (!modal.name.trim()) return addToast("Type the signer's name", "error");
+                      if (!modal.agree) return addToast(staffSigner ? "Tick the attestation to sign" : "Confirm you witnessed the signature", "error");
+                      let drawn = null, scan = null;
+                      if (!staffSigner) {
+                        if (modal.scan) { const up = await upload("form_scan", modal.scan); if (!up) return; scan = up.id; }
+                        else {
+                          if (!padRef.current || padRef.current.isEmpty()) return addToast("Draw the signature or attach a scan", "error");
+                          const blob = await padRef.current.toBlob();
+                          const up = await upload("signature", new File([blob], "signature.png", { type: "image/png" })); if (!up) return; drawn = up.id;
+                        }
+                      }
+                      done("pba_sign", { p_form_type: modal.form, p_form_id: modal.formId, p_signer_kind: modal.signer, p_signer_name: modal.name.trim(),
+                                         p_attestation: modal.attestation, p_drawn_file: drawn, p_scan_file: scan }, "Signed");
+                    }, "Sign")}
+                  </>
+                );
+              }
+
+              if (modal.kind === "role") return (
+                <>
+                  <FormField label="Role" required>
+                    <select style={fieldStyle} value={modal.role} onChange={ev => setM({ role: ev.target.value })}>
+                      {PBA_ROLES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
+                    </select>
+                  </FormField>
+                  <FormField label="Staff member" required>
+                    <select style={fieldStyle} value={modal.staff} onChange={ev => setM({ staff: ev.target.value })}>
+                      <option value="">Select…</option>{staffOptions}
+                    </select>
+                  </FormField>
+                  {footer(() => modal.staff ? done("pba_assign_role", { p_person: clientId, p_staff: modal.staff, p_role: modal.role }, "Role assigned") : addToast("Choose a staff member", "error"), "Assign")}
+                </>
+              );
+
+              if (modal.kind === "account") return (
+                <>
+                  <FormRow>
+                    <FormField label="Kind" required half>
+                      <select style={fieldStyle} value={f.kind} onChange={ev => setF("kind", ev.target.value)}>{PBA_ACCOUNT_KINDS.map(k => <option key={k.value} value={k.value}>{k.label}</option>)}</select>
+                    </FormField>
+                    <FormField label="Institution" half><input style={fieldStyle} value={f.institution} onChange={ev => setF("institution", ev.target.value)} placeholder="e.g. Zions Bank" /></FormField>
+                  </FormRow>
+                  <FormRow>
+                    <FormField label="Last 4 digits" half><input style={fieldStyle} value={f.last4} maxLength={4} inputMode="numeric" onChange={ev => setF("last4", ev.target.value.replace(/\D/g, ""))} /></FormField>
+                    <FormField label="Titled in the name of" required half><input style={fieldStyle} value={f.titling} onChange={ev => setF("titling", ev.target.value)} /></FormField>
+                  </FormRow>
+                  {f.kind === "pay_card" && <FormField label="Supervising financial institution" required><input style={fieldStyle} value={f.supervising_institution} onChange={ev => setF("supervising_institution", ev.target.value)} /></FormField>}
+                  <FormRow>
+                    <FormField label="Opening balance (from the first statement)" half><input style={fieldStyle} type="number" step="0.01" value={f.opening_balance} onChange={ev => setF("opening_balance", ev.target.value)} /></FormField>
+                    <FormField label="As of" half><input style={fieldStyle} type="date" value={f.opening_date} onChange={ev => setF("opening_date", ev.target.value)} /></FormField>
+                  </FormRow>
+                  {!modal.isNew && <FormField label="Closed on"><input style={fieldStyle} type="date" value={f.closed_on || ""} onChange={ev => setF("closed_on", ev.target.value)} /></FormField>}
+                  <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, cursor: "pointer" }}>
+                    <input type="checkbox" checked={!!f.attest} onChange={ev => setF("attest", ev.target.checked)} />
+                    <span>This account holds only {clientName}'s money and is not linked to the provider's operating funds (SOW 15.2(8), 15.4(5)).</span>
+                  </label>
+                  {footer(() => {
+                    if (!f.titling.trim()) return addToast("Enter the name the account is titled in", "error");
+                    if (!f.attest) return addToast("The account must be attested as the Person's own money", "error");
+                    if (f.last4 && !/^\d{4}$/.test(f.last4)) return addToast("Last 4 digits must be four numbers", "error");
+                    const data = { kind: f.kind, institution: f.institution, last4: f.last4, titling: f.titling.trim(), supervising_institution: f.supervising_institution,
+                                   opening_date: f.opening_date || "", not_provider_funds_attested: true };
+                    if (String(f.opening_balance).trim() !== "") data.opening_balance = Number(f.opening_balance);
+                    if (!modal.isNew) data.closed_on = f.closed_on || "";
+                    done("pba_save_account", { p_id: modal.id, p_person: clientId, p_data: data }, "Account saved");
+                  })}
+                </>
+              );
+
+              if (modal.kind === "request") return (
+                <>
+                  <FormRow>
+                    <FormField label="Amount" required half><input style={fieldStyle} type="number" step="0.01" min="0" value={f.amount} onChange={ev => setF("amount", ev.target.value)} /></FormField>
+                    <FormField label="Payee / store" half><input style={fieldStyle} value={f.payee} onChange={ev => setF("payee", ev.target.value)} /></FormField>
+                  </FormRow>
+                  <FormRow>
+                    <FormField label="Category" half><select style={fieldStyle} value={f.category} onChange={ev => setF("category", ev.target.value)}>{PBA_CATEGORIES.map(c => <option key={c[0]} value={c[0]}>{c[1]}</option>)}</select></FormField>
+                    <FormField label="Who benefits" half><select style={fieldStyle} value={f.beneficiary} onChange={ev => setF("beneficiary", ev.target.value)}>
+                      <option value="person">{clientName}</option><option value="other">Another person</option></select></FormField>
+                  </FormRow>
+                  {f.beneficiary === "other" && <FormRow>
+                    <FormField label="Their name" required half><input style={fieldStyle} value={f.beneficiary_name} onChange={ev => setF("beneficiary_name", ev.target.value)} /></FormField>
+                    <FormField label="Relationship" half><input style={fieldStyle} value={f.beneficiary_relationship} onChange={ev => setF("beneficiary_relationship", ev.target.value)} /></FormField>
+                  </FormRow>}
+                  <FormField label="The Person's choice, in their own words">
+                    <textarea style={{ ...fieldStyle, minHeight: 60 }} value={f.person_choice} onChange={ev => setF("person_choice", ev.target.value)} placeholder="e.g. Tony asked to buy cold medicine for his girlfriend" />
+                  </FormField>
+                  {footer(() => {
+                    if (!(Number(f.amount) > 0)) return addToast("Enter the amount", "error");
+                    if (f.beneficiary === "other" && !f.beneficiary_name.trim()) return addToast("Name the person who benefits", "error");
+                    done("pba_request", { p_id: modal.id, p_person: clientId, p_data: { ...f, amount: Number(f.amount) } }, "Request entered");
+                  }, "Enter Request")}
+                </>
+              );
+
+              if (modal.kind === "decide") return (
+                <>
+                  <div style={{ fontSize: 13, marginBottom: 8 }}>Are this month's needs already met? (SOW 15.2(4))</div>
+                  {["food", "shelter", "clothing", "medical"].map(k => (
+                    <label key={k} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, marginBottom: 6, cursor: "pointer" }}>
+                      <input type="checkbox" checked={!!modal.needs[k]} onChange={ev => setM({ needs: { ...modal.needs, [k]: ev.target.checked } })} />
+                      {{ food: "Food", shelter: "Shelter (room & board paid)", clothing: "Clothing", medical: "Medical care" }[k]}
+                    </label>
+                  ))}
+                  <FormField label="Reason (needed to decline)"><input style={fieldStyle} value={modal.reason} onChange={ev => setM({ reason: ev.target.value })} /></FormField>
+                  <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 10 }}>
+                    <SecondaryButton onClick={() => setModal(null)}>Cancel</SecondaryButton>
+                    <SecondaryButton color={CB.red} onClick={() => modal.reason.trim() ? done("pba_decide", { p_id: modal.id, p_approve: false, p_needs_met: modal.needs, p_reason: modal.reason.trim() }, "Request declined") : addToast("Give a reason for declining", "error")}>Decline</SecondaryButton>
+                    <PrimaryButton loading={busy} onClick={() => done("pba_decide", { p_id: modal.id, p_approve: true, p_needs_met: modal.needs, p_reason: null }, "Request approved")}>Approve</PrimaryButton>
+                  </div>
+                </>
+              );
+
+              if (modal.kind === "txn") {
+                const acct = d.accounts.find(a => a.id === f.account_id);
+                const isCashHand = f.type === "cash_out" || (acct?.kind === "cash" && (f.type === "withdrawal" || f.type === "transfer"));
+                const save = () => {
+                  if (!f.account_id) return addToast("Choose the account", "error");
+                  if (!(Number(f.amount) > 0)) return addToast("Enter an amount above zero", "error");
+                  if (!f.entry_date) return addToast("Enter the date", "error");
+                  if (f.type === "transfer" && (!f.to_account_id || f.to_account_id === f.account_id)) return addToast("Choose the receiving account", "error");
+                  if (f.type === "withdrawal" && f.beneficiary === "other" && !f.beneficiary_name.trim()) return addToast("Name the person who benefits", "error");
+                  if (isCashHand && (!f.handed_to || !f.purpose.trim())) return addToast("Cash needs who received it and what it was for", "error");
+                  if (!modal.isNew && !(modal.reason || "").trim()) return addToast("Give a reason for the change", "error");
+                  const nz = (v) => (v === "" || v == null ? null : v);
+                  const data = {
+                    type: f.type, account_id: f.account_id, to_account_id: f.type === "transfer" ? f.to_account_id : null, entry_date: f.entry_date,
+                    amount: Number(f.amount), payee: nz(f.payee.trim()), category: nz(f.category),
+                    beneficiary: f.type === "withdrawal" ? f.beneficiary : "person",
+                    beneficiary_name: f.type === "withdrawal" && f.beneficiary === "other" ? f.beneficiary_name.trim() : null,
+                    beneficiary_relationship: f.type === "withdrawal" && f.beneficiary === "other" ? nz(f.beneficiary_relationship.trim()) : null,
+                    purchased_by: f.type === "withdrawal" ? nz(f.purchased_by) : null,
+                    purchased_by_staff_id: f.type === "withdrawal" && (f.purchased_by === "staff" || f.purchased_by === "host") ? nz(f.purchased_by_staff_id) : null,
+                    handed_to: isCashHand ? nz(f.handed_to) : null,
+                    handed_to_staff_id: isCashHand && (f.handed_to === "staff" || f.handed_to === "host") ? nz(f.handed_to_staff_id) : null,
+                    handed_to_name: isCashHand && (f.handed_to === "staff" || f.handed_to === "host") && !f.handed_to_staff_id ? nz(f.handed_to_name.trim()) : null,
+                    purpose: isCashHand ? f.purpose.trim() : nz(f.purpose.trim()),
+                    request_id: f.type === "withdrawal" ? nz(f.request_id) : null, notes: nz(f.notes.trim()),
+                  };
+                  if (modal.isNew) done("pba_record_txn", { p_id: modal.id, p_person: clientId, p_data: data }, "Entry recorded");
+                  else done("pba_edit_txn", { p_id: modal.id, p_changes: data, p_reason: modal.reason.trim() }, "Entry updated");
+                };
+                return (
+                  <>
+                    <FormRow>
+                      <FormField label="Entry" required half><select style={fieldStyle} value={f.type} onChange={ev => setF("type", ev.target.value)}>{PBA_TXN_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></FormField>
+                      <FormField label="Account" required half><select style={fieldStyle} value={f.account_id} onChange={ev => setF("account_id", ev.target.value)}>
+                        {d.accounts.map(a => <option key={a.id} value={a.id}>{accountName(a.id)}{a.closed_on ? " (closed)" : ""}</option>)}</select></FormField>
+                    </FormRow>
+                    {f.type === "transfer" && <FormField label="To account" required><select style={fieldStyle} value={f.to_account_id} onChange={ev => setF("to_account_id", ev.target.value)}>
+                      <option value="">Select…</option>{d.accounts.filter(a => a.id !== f.account_id).map(a => <option key={a.id} value={a.id}>{accountName(a.id)}</option>)}</select></FormField>}
+                    <FormRow>
+                      <FormField label="Date" required half><input style={fieldStyle} type="date" value={f.entry_date} onChange={ev => setF("entry_date", ev.target.value)} /></FormField>
+                      <FormField label="Amount" required half><input style={fieldStyle} type="number" step="0.01" min="0" value={f.amount} onChange={ev => setF("amount", ev.target.value)} /></FormField>
+                    </FormRow>
+                    <FormRow>
+                      <FormField label="Payee / source" half><input style={fieldStyle} value={f.payee} onChange={ev => setF("payee", ev.target.value)} /></FormField>
+                      <FormField label="Category" half><select style={fieldStyle} value={f.category} onChange={ev => setF("category", ev.target.value)}>
+                        <option value="">—</option>{PBA_CATEGORIES.map(c => <option key={c[0]} value={c[0]}>{c[1]}</option>)}</select></FormField>
+                    </FormRow>
+                    {f.type === "withdrawal" && <>
+                      <FormRow>
+                        <FormField label="Who benefits" half><select style={fieldStyle} value={f.beneficiary} onChange={ev => setF("beneficiary", ev.target.value)}>
+                          <option value="person">{clientName}</option><option value="other">Another person</option></select></FormField>
+                        <FormField label="Bought by" half><select style={fieldStyle} value={f.purchased_by} onChange={ev => setF("purchased_by", ev.target.value)}>
+                          <option value="">—</option><option value="person">{clientName}</option><option value="staff">Staff</option><option value="host">Host</option></select></FormField>
+                      </FormRow>
+                      {f.beneficiary === "other" && <FormRow>
+                        <FormField label="Their name" required half><input style={fieldStyle} value={f.beneficiary_name} onChange={ev => setF("beneficiary_name", ev.target.value)} /></FormField>
+                        <FormField label="Relationship" half><input style={fieldStyle} value={f.beneficiary_relationship} onChange={ev => setF("beneficiary_relationship", ev.target.value)} /></FormField>
+                      </FormRow>}
+                      {(f.purchased_by === "staff" || f.purchased_by === "host") && <FormField label="Who made the purchase"><select style={fieldStyle} value={f.purchased_by_staff_id} onChange={ev => setF("purchased_by_staff_id", ev.target.value)}>
+                        <option value="">Select…</option>{staffOptions}</select></FormField>}
+                      {approvedReqs.length > 0 && <FormField label="Approved request this spends"><select style={fieldStyle} value={f.request_id} onChange={ev => setF("request_id", ev.target.value)}>
+                        <option value="">None</option>{approvedReqs.map(q => <option key={q.id} value={q.id}>{pbaMoney(q.amount)} · {q.payee || "—"}{q.beneficiary === "other" ? ` · for ${q.beneficiary_name}` : ""}</option>)}</select></FormField>}
+                      {(f.beneficiary === "other" || ["gift", "savings", "debt_repayment"].includes(f.category)) && !f.request_id && (
+                        <div style={{ fontSize: 12, color: CB.amber, marginBottom: 8 }}>No approved request: this saves, and is flagged for the Compliance Director.</div>
+                      )}
+                    </>}
+                    {isCashHand && <>
+                      <FormRow>
+                        <FormField label="Cash handed to" required half><select style={fieldStyle} value={f.handed_to} onChange={ev => setF("handed_to", ev.target.value)}>
+                          <option value="">Select…</option><option value="person">{clientName}</option><option value="staff">Staff</option><option value="host">Host</option></select></FormField>
+                        {(f.handed_to === "staff" || f.handed_to === "host") && <FormField label="Who" half><select style={fieldStyle} value={f.handed_to_staff_id} onChange={ev => setF("handed_to_staff_id", ev.target.value)}>
+                          <option value="">Select…</option>{staffOptions}</select></FormField>}
+                      </FormRow>
+                      <FormField label="What it was for" required><input style={fieldStyle} value={f.purpose} onChange={ev => setF("purpose", ev.target.value)} /></FormField>
+                    </>}
+                    <FormField label="Notes"><input style={fieldStyle} value={f.notes} onChange={ev => setF("notes", ev.target.value)} /></FormField>
+                    {!modal.isNew && reasonField("Reason for the change")}
+                    {footer(save, modal.isNew ? "Record" : "Save Change")}
+                  </>
+                );
+              }
+
+              if (modal.kind === "affidavit") return (
+                <>
+                  <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 10 }}>Signed by the staff member who made the purchase, then countersigned by the Compliance Director (the owner when the Compliance Director made the purchase or manages this Person's money).</div>
+                  <FormField label="Who made the purchase" required><select style={fieldStyle} value={f.purchaser_staff_id} onChange={ev => setF("purchaser_staff_id", ev.target.value)}>
+                    <option value="">Select…</option>{staffOptions}</select></FormField>
+                  <FormRow>
+                    <FormField label="Store" required half><input style={fieldStyle} value={f.store} onChange={ev => setF("store", ev.target.value)} /></FormField>
+                    <FormField label="Matching bank statement line" half><input style={fieldStyle} value={f.statement_line_ref} onChange={ev => setF("statement_line_ref", ev.target.value)} placeholder="e.g. 10/12 WALGREENS 63.40" /></FormField>
+                  </FormRow>
+                  <FormField label="What happened to the receipt" required><textarea style={{ ...fieldStyle, minHeight: 60 }} value={f.reason} onChange={ev => setF("reason", ev.target.value)} /></FormField>
+                  {footer(() => (!f.purchaser_staff_id || !f.store.trim() || !f.reason.trim()) ? addToast("Purchaser, store and reason are required", "error")
+                    : done("pba_file_affidavit", { p_id: modal.id, p_txn: modal.txn, p_data: { purchaser_staff_id: f.purchaser_staff_id, store: f.store.trim(),
+                        statement_line_ref: f.statement_line_ref.trim(), reason: f.reason.trim() } }, "Affidavit filed — it needs two signatures"), "File Affidavit")}
+                </>
+              );
+
+              if (modal.kind === "void") return (
+                <>
+                  <div style={{ fontSize: 13, marginBottom: 10 }}>The entry stays visible, struck through, with your reason. Only possible before the month closes.</div>
+                  {reasonField()}
+                  {footer(() => (modal.reason || "").trim() ? done("pba_void_txn", { p_id: modal.txn, p_reason: modal.reason.trim() }, "Entry voided") : addToast("Give a reason", "error"), "Void", true)}
+                </>
+              );
+              if (modal.kind === "reverse") return (
+                <>
+                  <div style={{ fontSize: 13, marginBottom: 10 }}>Adds a reversing entry dated today that cancels this one; both stay on the record. Use this when the entry's month is closed.</div>
+                  {reasonField()}
+                  {footer(() => (modal.reason || "").trim() ? done("pba_reverse_txn", { p_new_id: modal.newId, p_id: modal.txn, p_reason: modal.reason.trim() }, "Reversing entry recorded") : addToast("Give a reason", "error"), "Reverse")}
+                </>
+              );
+              if (modal.kind === "resolve") return (
+                <>
+                  <div style={{ fontSize: 13, marginBottom: 10 }}>This entry was recorded without an approved request. Record why it stands (e.g. the Person's choice was confirmed and their needs were met).</div>
+                  {reasonField()}
+                  {footer(() => (modal.reason || "").trim() ? done("pba_resolve_flag", { p_txn: modal.txn, p_reason: modal.reason.trim() }, "Flag resolved") : addToast("Give a reason", "error"), "Resolve")}
+                </>
+              );
+              return null;
+            })()}
+          </Modal>
+        </div>
+      );
+    }
+
+    // Compliance → PBA: every Person's open PBA flags (owner and Compliance Director)
+    function CompliancePbaPanel({ onNavigate }) {
+      const [rows, setRows] = useState(null);
+      const [staffFlags, setStaffFlags] = useState([]);              // r1 — about a staff member, not a Person
+      const [error, setError] = useState(null);
+      const load = async () => {
+        setError(null);
+        const [{ data, error: e }, sf] = await Promise.all([supabase.rpc("pba_org_flags"), supabase.rpc("pba_staff_flags")]);
+        if (!sf.error) setStaffFlags(sf.data || []);
+        if (e) { setError(e.message); setRows(r => r || []); return; }
+        setRows(data || []);
+      };
+      useEffect(() => { load(); }, []);
+      const people = [];
+      (rows || []).forEach(r => { let p = people.find(x => x.id === r.o_person_id); if (!p) { p = { id: r.o_person_id, name: r.o_person_name, status: r.o_status, flags: [] }; people.push(p); } p.flags.push(r); });
+      return (
+        <div style={{ background: CB.white, borderRadius: 16, padding: 24, border: `1px solid ${CB.border}` }}>
+          <h3 style={{ fontSize: 16, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Personal Budget Assistance</h3>
+          <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 14 }}>Open PBA flags for every Person — visible to the owner and the Compliance Director.</div>
+          {error && <div role="alert" style={{ color: CB.red, fontSize: 13, marginBottom: 10 }}>Couldn't load ({error}). <SecondaryButton onClick={load}>Retry</SecondaryButton></div>}
+          {staffFlags.length > 0 && (
+            <div style={{ padding: "12px 14px", borderRadius: 10, border: `1px solid ${CB.amber}60`, background: `${CB.amber}08`, marginBottom: 12 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>Staff</div>
+              {staffFlags.map((f, i) => <div key={i} style={{ fontSize: 13, marginTop: 2 }}><strong>{f.o_staff_name}</strong> <span style={{ color: CB.textMid }}>· {f.o_detail}</span></div>)}
+            </div>
+          )}
+          {rows === null ? <div style={{ display: "flex", justifyContent: "center", padding: 24 }}><Spinner size={20} /></div>
+          : people.length === 0 ? <div style={{ fontSize: 13, color: CB.textLight }}>No open PBA flags for any Person.</div>
+          : people.map(p => (
+            <div key={p.id} style={{ padding: "12px 14px", borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.cream, marginBottom: 8 }}>
+              <button onClick={() => onNavigate && onNavigate("client-profile", { type: "client", id: p.id, profileTab: "pba" })}
+                style={{ background: "none", border: "none", padding: 0, cursor: onNavigate ? "pointer" : "default", fontFamily: "inherit", fontSize: 14, fontWeight: 700, color: CB.text }}>
+                {p.name}
+              </button>
+              <span style={{ fontSize: 12, color: p.status === "enrolled" ? CB.green : CB.red }}> · {p.status === "enrolled" ? "Enrolled" : "Pending enrollment"}</span>
+              {p.flags.map((f, i) => <div key={i} style={{ fontSize: 13, marginTop: 4 }}><strong>{PBA_FLAG_LABELS[f.o_flag] || f.o_flag}</strong> <span style={{ color: CB.textMid }}>· {f.o_detail}</span></div>)}
+            </div>
+          ))}
+        </div>
+      );
+    }
+
     // v20.0.26 — the client's 1056 rows: the one place authorizations are added and edited
     function ClientAuthorizationsTab({ clientId, onChanged }) {
       const { addToast } = useToast();
@@ -18896,7 +19782,7 @@
           return readPendingAdd(cid) === (id || null);
         } catch (_) { return false; }
       };
-      const openAdd = () => setEditor({ mode: "add", id: readPendingAdd(clientId) || crypto.randomUUID(), row: { ...blank1056Row(), start_date: today } });
+      const openAdd = () => setEditor({ mode: "add", id: readPendingAdd(clientId) || newId(), row: { ...blank1056Row(), start_date: today } });
       const openEdit = (a) => setEditor({ mode: "edit", id: a.id, row: rowOf(a), stored: storedOf(a) });
       const setEditorRow = (fn) => setEditor(cur => cur ? { ...cur, row: typeof fn === "function" ? fn(cur.row) : fn } : cur);
       // r2 — an earlier add committed with other values: the entered values stay, and the operator decides
@@ -18905,7 +19791,7 @@
       const applyToSavedRow = () => setEditor(cur => cur?.conflict
         ? { mode: "edit", id: cur.conflict.id, row: { ...cur.row, status: cur.row.status || cur.conflict.status || "approved" }, stored: storedOf(cur.conflict) } : cur); // Save then sends the differences
       const addAsSeparateRow = () => setEditor(cur => cur?.conflict
-        ? { mode: "add", id: crypto.randomUUID(), row: cur.row } : cur);                                       // a new identity for a new intent
+        ? { mode: "add", id: newId(), row: cur.row } : cur);                                       // a new identity for a new intent
       const describeRow = (a) => [
         codeOf(a), a.approval_id ? `Approval ${a.approval_id}` : null, `${fmtD(a.start_date)} – ${fmtD(a.end_date)}`,
         `Kind ${a.unit_kind || a.unit_kind_effective || "—"}`,
@@ -19146,6 +20032,13 @@
       const [editOpen, setEditOpen] = useState(false);
       const [counts, setCounts] = useState({ notes: null, incidents: null, goals: null, meds: null });
       const { orgId } = useAuth();
+      const [pbaAccess, setPbaAccess] = useState(null);              // v20.0.29 — the database decides who sees the PBA tab
+      useEffect(() => {
+        let alive = true;
+        setPbaAccess(null);
+        supabase.rpc("pba_access", { p_person: clientId }).then(({ data, error }) => { if (alive && !error) setPbaAccess(data || null); });
+        return () => { alive = false; };
+      }, [clientId]);
 
       const loadClient = async () => {
         setLoading(true);
@@ -19172,6 +20065,7 @@
       const tabs = [
         { key: "overview", label: "Overview", icon: icons.users, content: <ClientOverviewTab client={client} /> },
         { key: "authorizations", label: "Authorizations", icon: icons.fileText, count: (client.person_service_authorizations || []).length, content: <ClientAuthorizationsTab clientId={clientId} onChanged={loadClient} /> }, // v20.0.26 — the 1056 rows
+        ...(pbaAccess?.read ? [{ key: "pba", label: "PBA", icon: icons.dollar, content: <ClientPbaTab clientId={clientId} client={client} access={pbaAccess} /> }] : []), // v20.0.29
         { key: "residence", label: "Residence", icon: icons.heart, content: <ClientResidenceTab clientId={clientId} orgId={orgId} /> }, // v20.0.4
         { key: "absences", label: "Absences", icon: icons.calendar, content: <ClientAbsencesTab clientId={clientId} /> }, // v20.0.23 (e520 D7)
         { key: "goals", label: "PCSP Goals", icon: icons.crosshair, count: counts.goals, content: <ClientGoalsTab clientId={clientId} onChanged={loadClient} /> },
