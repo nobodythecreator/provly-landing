@@ -14,6 +14,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.27 r1 (Greptile r1): a client profile's open tab lives in the URL (#/client-profile/<id>/<tab>) — a warning link, a reload and the Back button all return to the same tab; Overview keeps the short URL. Database side: sql/v20.0.27r1_runout.sql (a run-out with units left is never shown as used up). -->
+  <!-- v20.0.27 (renewals — docs/authorizations-design.md D2, D3, D4): each client gets a review list on the Authorizations tab (Medicaid, DWS, PCSP meeting, Other with a name; due date, last completed, note; "Mark Completed" records the date and takes the next due date in one write). A "Renewals & Budgets" card on the Dashboard and a Compliance tab, manage tier only, list budget ends (no later row entered), reviews due, and run-outs — at the actual pace after 30 days of history, plus rows whose units are all used — at 60 / 30 / 14 days. Each entry opens the client's Authorizations tab. Database side: sql/v20.0.27.sql (person_reviews, renewal_warnings). -->
   <!-- v20.0.26 r3 (Greptile r3): "Use these values on the saved row" keeps the saved row's status (pending / rejected stays as it is) unless the operator picked one in the add form; only a new row ever derives its status from the end date. -->
   <!-- v20.0.26 r2 (Greptile r2): when a retried Add 1056 Row finds its earlier request already on file, the form never closes on an assumption and never loses what the operator typed — if the saved row can't be read back the form stays open and says so; if it differs, the form keeps the entered values and shows the saved row beside them, and the operator chooses: apply these values to the saved row, or add them as a separate row. -->
   <!-- v20.0.26 r1 (Greptile r1): an unconfirmed Add 1056 Row keeps its request identity (per client, on disk) until its outcome is known — the next add for that client reuses it, so a late commit can't become a second row; an earlier save found with different values opens for correction. Finance claims never price a note from a row that starts after it (no covering row → the latest earlier row, else no rate). The face sheet prints Approval ID and Rate. Database side: sql/v20.0.26r1_reservations.sql (an S note is reserved on a payment line only when it billed). -->
@@ -1808,7 +1810,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.26</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.27</span>
               </div>
             </div>
             {isMobile && (
@@ -2100,7 +2102,7 @@
       const [upcomingAlerts, setUpcomingAlerts] = useState([]);
       const [loading, setLoading] = useState(true);
       const { isMobile, isTablet } = useMobile();
-      const { brand } = useAuth();
+      const { brand, accessTier } = useAuth();                     // v20.0.27 — the renewals card is manage tier
 
       useEffect(() => { loadDashboard(); }, []);
 
@@ -2190,6 +2192,7 @@
                 <StatCard label="Overdue Trainings" value={stats.trainings} icon={icons.alertTriangle} color={stats.trainings > 0 ? CB.red : CB.green} delay={0.1} onClick={onNavigate ? () => onNavigate("training") : undefined} />
                 <StatCard label="Authorizations" value={stats.auths} icon={icons.fileText} color={CB.navy} delay={0.15} onClick={onNavigate ? () => onNavigate("clients") : undefined} />
               </div>
+              {accessTier === "manage" && <RenewalsCard onNavigate={onNavigate} compact />} {/* v20.0.27 (D3) */}
               <div style={{
                 background: CB.white, borderRadius: 16, padding: 24,
                 border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow,
@@ -10089,13 +10092,13 @@
     // ═══════════════════════════════════════════════════════════════
     // MODULE 7: COMPLIANCE DASHBOARD — Real-time audit readiness
     // ═══════════════════════════════════════════════════════════════
-    function CompliancePage() {
+    function CompliancePage({ onNavigate }) {
       const [loading, setLoading] = useState(true);
       const [scores, setScores] = useState(null);
       const [issues, setIssues] = useState([]);
       const [tab, setTab] = useState("audit");
       const perms = usePermissions();
-      const { brand } = useAuth();
+      const { brand, accessTier } = useAuth();                     // v20.0.27 — Renewals & Budgets is manage tier
 
       useEffect(() => { runAudit(); }, []);
 
@@ -10295,7 +10298,10 @@
           <div style={{ display: "flex", gap: 4, marginBottom: 20, background: CB.cream, padding: 4, borderRadius: 10, width: "fit-content" }}>
             <CompTab value="audit" label="Audit Scores" />
             <CompTab value="deadlines" label={`SOW Deadlines (${SOW_DEADLINES.length})`} />
+            {accessTier === "manage" && <CompTab value="renewals" label="Renewals & Budgets" />}
           </div>
+
+          {tab === "renewals" && accessTier === "manage" && <RenewalsCard onNavigate={onNavigate} />} {/* v20.0.27 (D3) */}
 
           {tab === "audit" && (
             <>
@@ -18460,6 +18466,293 @@
       );
     }
 
+
+    // ═══════════════════════════════════════════════════════════════
+    // v20.0.27 — RENEWALS (docs/authorizations-design.md D2, D3, D4)
+    // renewal_warnings() in the database is the one source: budget ends, reviews
+    // due, and run-outs at the actual pace, 60 / 30 / 14 days ahead. Manage tier
+    // only (the database answers nothing below it).
+    // ═══════════════════════════════════════════════════════════════
+    const REVIEW_TYPES = [
+      { value: "medicaid", label: "Medicaid" },
+      { value: "dws", label: "DWS" },
+      { value: "pcsp", label: "PCSP meeting" },
+      { value: "other", label: "Other" },
+    ];
+    const reviewLabel = (r) => r.review_type === "other" ? (r.other_name || "Other") : (REVIEW_TYPES.find(t => t.value === r.review_type)?.label || r.review_type);
+    const WARNING_GROUPS = [
+      { kind: "budget_end", title: "Budgets ending" },
+      { kind: "review_due", title: "Reviews due" },
+      { kind: "run_out", title: "Units running out" },
+    ];
+    // level → chip: 0 = ended / overdue / used up · 14 · 30 · 60 · 999 = a run-out further out
+    const warningChip = (w) => {
+      if (w.o_level === 0) return { text: w.o_kind === "review_due" ? "Overdue" : w.o_kind === "run_out" ? "Used up" : "Ended", color: CB.red };
+      if (w.o_level === 14) return { text: w.o_days === 0 ? "Today" : `${w.o_days} day${w.o_days === 1 ? "" : "s"}`, color: CB.red };
+      if (w.o_level === 30) return { text: `${w.o_days} days`, color: CB.amber };
+      if (w.o_level === 60) return { text: `${w.o_days} days`, color: CB.textMid };
+      return { text: `${w.o_days} days`, color: CB.textLight };
+    };
+
+    function RenewalsCard({ onNavigate, compact }) {
+      const [rows, setRows] = useState(null);                       // null = loading
+      const [error, setError] = useState(null);
+      const seq = useRef(0);
+      const load = async () => {
+        const mine = ++seq.current;
+        setError(null);
+        const { data, error: e } = await supabase.rpc("renewal_warnings");
+        if (mine !== seq.current) return;
+        if (e) { setError(e.message || "request failed"); setRows(r => r || []); return; }
+        setRows(data || []);
+      };
+      useEffect(() => { load(); }, []);
+      const open = (w) => onNavigate && onNavigate("client-profile", { type: "client", id: w.o_person_id, profileTab: "authorizations" });
+      const urgent = (rows || []).filter(w => w.o_level === 0 || w.o_level === 14).length;
+      return (
+        <div style={{ background: CB.white, borderRadius: 16, padding: 24, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, marginBottom: compact ? 20 : 0 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              {icons.calendar({ size: 16, color: urgent > 0 ? CB.red : CB.navy })}
+              <h3 style={{ fontSize: 16, fontWeight: 700, color: CB.navy }}>Renewals &amp; Budgets</h3>
+              {urgent > 0 && <Badge text={`${urgent} within 14 days or past`} color={CB.red} />}
+            </div>
+            <span style={{ fontSize: 12, color: CB.textLight, fontWeight: 600 }}>Next 60 days · run-outs at the actual pace</span>
+          </div>
+          {error && (
+            <div role="alert" style={{ padding: "10px 12px", borderRadius: 10, border: `1px solid ${CB.red}`, color: CB.red, fontSize: 13, marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+              <span>Couldn't load renewals ({error}).</span>
+              <SecondaryButton onClick={load}>Retry</SecondaryButton>
+            </div>
+          )}
+          {rows === null ? (
+            <div style={{ display: "flex", justifyContent: "center", padding: 24 }}><Spinner size={20} /></div>
+          ) : rows.length === 0 && !error ? (
+            <div style={{ fontSize: 13, color: CB.textLight }}>Nothing due: no budget ends, reviews or run-outs in the next 60 days.</div>
+          ) : (
+            <div style={{ display: "grid", gap: 16 }}>
+              {WARNING_GROUPS.map(g => {
+                const list = rows.filter(w => w.o_kind === g.kind);
+                if (list.length === 0) return null;
+                const shown = compact ? list.slice(0, 6) : list;
+                return (
+                  <div key={g.kind}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: CB.textMid, marginBottom: 6 }}>{g.title} ({list.length})</div>
+                    {shown.map(w => {
+                      const chip = warningChip(w);
+                      return (
+                        <button key={`${w.o_kind}-${w.o_ref_id}`} onClick={() => open(w)} style={{
+                          display: "flex", alignItems: "center", gap: 12, width: "100%", textAlign: "left",
+                          padding: "10px 12px", borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.cream,
+                          marginBottom: 6, cursor: onNavigate ? "pointer" : "default", fontFamily: "inherit",
+                        }}>
+                          <span style={{ minWidth: 74, fontSize: 11, fontWeight: 700, color: chip.color, background: `${chip.color}12`, padding: "3px 8px", borderRadius: 6, textAlign: "center", whiteSpace: "nowrap" }}>{chip.text}</span>
+                          <span style={{ flex: 1, minWidth: 0 }}>
+                            <span style={{ fontSize: 13, fontWeight: 700, color: CB.text }}>{w.o_person_name || "Client"}</span>
+                            <span style={{ fontSize: 13, color: CB.textMid }}> · {w.o_label}</span>
+                            <span style={{ display: "block", fontSize: 12, color: CB.textMid, marginTop: 2 }}>{w.o_detail}</span>
+                          </span>
+                        </button>
+                      );
+                    })}
+                    {shown.length < list.length && <div style={{ fontSize: 12, color: CB.textLight }}>and {list.length - shown.length} more on Compliance → Renewals &amp; Budgets</div>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // D2 — a client's review list (Medicaid, DWS, PCSP meeting, other), on the Authorizations tab, manage tier
+    function ClientReviewsSection({ clientId }) {
+      const { addToast } = useToast();
+      const { orgId } = useAuth();
+      const [rows, setRows] = useState(null);
+      const [error, setError] = useState(null);
+      const [editor, setEditor] = useState(null);                  // { mode: "add" | "edit" | "complete", id, form, stored }
+      const [saving, setSaving] = useState(false);
+      const seq = useRef(0);
+      const today = ymd();
+      const fmtD = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString() : "—";
+
+      const load = async () => {
+        const mine = ++seq.current;
+        setError(null);
+        const { data, error: e } = await supabase.from("person_reviews").select("*").eq("person_id", clientId).order("due_date");
+        if (mine !== seq.current) return;
+        if (e) { setError(e.message || "request failed"); setRows(r => r || []); return; }
+        setRows(data || []);
+      };
+      useEffect(() => { setRows(null); setEditor(null); load(); }, [clientId]);
+
+      const openAdd = () => setEditor({ mode: "add", form: { review_type: "medicaid", other_name: "", due_date: "", last_completed_date: "", note: "" } });
+      const openEdit = (r) => {
+        const form = { review_type: r.review_type, other_name: r.other_name || "", due_date: r.due_date || "", last_completed_date: r.last_completed_date || "", note: r.note || "" };
+        setEditor({ mode: "edit", id: r.id, form, stored: form });
+      };
+      // completing: the date it happened, and the next one due (a year later unless changed)
+      const openComplete = (r) => setEditor({ mode: "complete", id: r.id, label: reviewLabel(r),
+        form: { last_completed_date: today, due_date: ymdAddMonths(today, 12) } });
+      const setField = (k, v) => setEditor(cur => cur ? { ...cur, form: { ...cur.form, [k]: v } } : cur);
+
+      const explain = (e) => {
+        const m = e?.message || "";
+        if (e?.code === "23505") return "This client already has that review on the list — edit it, or mark it completed.";
+        if (/person_reviews_due_after_done_chk/.test(m)) return "The next due date has to be after the date it was completed.";
+        if (/person_reviews_other_name_chk/.test(m)) return "Give the Other review a name.";
+        return m || "Not saved";
+      };
+
+      const save = async () => {
+        if (!editor || saving) return;
+        const f = editor.form;
+        if (editor.mode !== "complete" && f.review_type === "other" && !String(f.other_name || "").trim()) return addToast("Give the Other review a name", "error");
+        if (!f.due_date) return addToast(editor.mode === "complete" ? "Enter the next due date" : "Enter the due date", "error");
+        if (editor.mode === "complete" && !f.last_completed_date) return addToast("Enter the date it was completed", "error");
+        if (f.last_completed_date && f.last_completed_date > today) return addToast("A review can't be completed on a future date", "error");
+        if (f.last_completed_date && f.due_date <= f.last_completed_date) return addToast("The next due date has to be after the date it was completed", "error");
+        let request;
+        if (editor.mode === "add") {
+          request = () => supabase.from("person_reviews").insert({
+            org_id: orgId, person_id: clientId, review_type: f.review_type,
+            other_name: f.review_type === "other" ? String(f.other_name).trim() : null,
+            due_date: f.due_date, last_completed_date: f.last_completed_date || null, note: String(f.note || "").trim() || null,
+          }).select("id");
+        } else if (editor.mode === "complete") {
+          // one UPDATE: the completion and the next due date land together
+          request = () => supabase.from("person_reviews").update({ last_completed_date: f.last_completed_date, due_date: f.due_date }).eq("id", editor.id).select("id");
+        } else {
+          const next = {
+            review_type: f.review_type, other_name: f.review_type === "other" ? String(f.other_name).trim() : null,
+            due_date: f.due_date, last_completed_date: f.last_completed_date || null, note: String(f.note || "").trim() || null,
+          };
+          const prev = {
+            review_type: editor.stored.review_type, other_name: editor.stored.review_type === "other" ? String(editor.stored.other_name).trim() : null,
+            due_date: editor.stored.due_date, last_completed_date: editor.stored.last_completed_date || null, note: String(editor.stored.note || "").trim() || null,
+          };
+          const changes = {};
+          Object.keys(next).forEach(k => { if ((next[k] ?? null) !== (prev[k] ?? null)) changes[k] = next[k]; });
+          if (Object.keys(changes).length === 0) { setEditor(null); return addToast("No changes to save", "info"); }
+          request = () => supabase.from("person_reviews").update(changes).eq("id", editor.id).select("id");
+        }
+        const target = editor;
+        setSaving(true);
+        let res;
+        try { res = await request(); } catch (e) { res = { error: { message: e?.message || "network error" } }; }
+        setSaving(false);
+        if (res.error) {
+          // a lost response on an add is safe to retry: the database allows one entry per review type
+          if (target.mode === "add" && res.error.code === "23505") { setEditor(cur => (cur && cur.mode === "add") ? null : cur); load(); return addToast("That review is already on the list", "info"); }
+          return addToast(explain(res.error), "error");
+        }
+        if (!res.data || res.data.length === 0) return addToast("Not saved — only owners, admins and compliance directors can change reviews", "error");
+        setEditor(cur => (cur && cur.mode === target.mode && cur.id === target.id) ? null : cur);
+        addToast(target.mode === "complete" ? `${target.label} marked completed` : target.mode === "add" ? "Review added" : "Review saved", "success");
+        load();
+      };
+
+      const remove = async (r) => {
+        if (!confirm(`Delete the ${reviewLabel(r)} review from this client's list? The deletion is written to the audit log.`)) return;
+        const { data, error: e } = await supabase.from("person_reviews").delete().eq("id", r.id).select("id");
+        if (e) return addToast(e.message, "error");
+        if (!data || data.length === 0) return addToast("Not deleted — only owners, admins and compliance directors can change reviews", "error");
+        addToast("Review deleted", "success"); load();
+      };
+
+      const dueTone = (d) => { const days = Math.round((new Date(d + "T00:00:00") - new Date(today + "T00:00:00")) / 86400000);
+        return days < 0 ? { text: `Overdue ${-days}d`, color: CB.red } : days <= 14 ? { text: days === 0 ? "Due today" : `In ${days}d`, color: CB.red }
+             : days <= 30 ? { text: `In ${days}d`, color: CB.amber } : days <= 60 ? { text: `In ${days}d`, color: CB.textMid } : null; };
+
+      return (
+        <div style={{ marginTop: 28, paddingTop: 20, borderTop: `1px solid ${CB.border}` }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 6, flexWrap: "wrap" }}>
+            <h4 style={{ fontSize: 15, fontWeight: 700, color: CB.navy }}>Reviews</h4>
+            <SecondaryButton onClick={openAdd}>{icons.plus({ size: 14 })} Add Review</SecondaryButton>
+          </div>
+          <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 12 }}>
+            Medicaid, DWS, PCSP meetings and any other recurring review. The Dashboard warns 60, 30 and 14 days ahead.
+          </div>
+          {error && (
+            <div role="alert" style={{ padding: "10px 12px", borderRadius: 10, border: `1px solid ${CB.red}`, color: CB.red, fontSize: 13, marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+              <span>Couldn't load reviews ({error}).</span>
+              <SecondaryButton onClick={load}>Retry</SecondaryButton>
+            </div>
+          )}
+          {rows === null ? <div style={{ display: "flex", justifyContent: "center", padding: 20 }}><Spinner size={20} /></div>
+          : rows.length === 0 && !error ? (
+            <div style={{ padding: "12px 14px", borderRadius: 12, border: `1px dashed ${CB.border}`, color: CB.textLight, fontSize: 13 }}>No reviews on the list yet.</div>
+          ) : rows.map(r => {
+            const tone = dueTone(r.due_date);
+            return (
+              <div key={r.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", padding: "10px 14px", borderRadius: 10, background: CB.cream, border: `1px solid ${CB.border}`, marginBottom: 6 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <strong style={{ fontSize: 13, color: CB.text }}>{reviewLabel(r)}</strong>
+                  <span style={{ fontSize: 12, color: CB.textMid }}>Due {fmtD(r.due_date)}</span>
+                  {tone && <span style={{ fontSize: 11, fontWeight: 700, color: tone.color, background: `${tone.color}12`, padding: "2px 8px", borderRadius: 6 }}>{tone.text}</span>}
+                  <span style={{ fontSize: 12, color: CB.textLight }}>Last completed {fmtD(r.last_completed_date)}</span>
+                  {r.note && <span style={{ fontSize: 12, color: CB.textMid }}>· {r.note}</span>}
+                </div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <SecondaryButton onClick={() => openComplete(r)}>Mark Completed</SecondaryButton>
+                  <SecondaryButton onClick={() => openEdit(r)}>Edit</SecondaryButton>
+                  <SecondaryButton onClick={() => remove(r)} color={CB.red}>Delete</SecondaryButton>
+                </div>
+              </div>
+            );
+          })}
+
+          <Modal open={!!editor} onClose={() => setEditor(null)} width={520}
+            title={editor?.mode === "complete" ? `Mark ${editor.label} Completed` : editor?.mode === "edit" ? "Edit Review" : "Add Review"}
+            subtitle={editor?.mode === "complete" ? "Records the date it happened and sets the next one due." : "Changes are written to the audit log."}>
+            {editor && (
+              <>
+                {editor.mode !== "complete" && (
+                  <FormRow>
+                    <FormField label="Review" required half>
+                      <select style={fieldStyle} value={editor.form.review_type} onChange={e => setField("review_type", e.target.value)}>
+                        {REVIEW_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                      </select>
+                    </FormField>
+                    {editor.form.review_type === "other" && (
+                      <FormField label="Name" required half>
+                        <input style={fieldStyle} value={editor.form.other_name} onChange={e => setField("other_name", e.target.value)} placeholder="e.g. Guardianship review" />
+                      </FormField>
+                    )}
+                  </FormRow>
+                )}
+                <FormRow>
+                  <FormField label={editor.mode === "complete" ? "Completed On" : "Last Completed"} required={editor.mode === "complete"} half>
+                    <input style={fieldStyle} type="date" max={today} value={editor.form.last_completed_date}
+                      onChange={e => setEditor(cur => {
+                        if (!cur) return cur;
+                        const v = e.target.value;
+                        // completing: the next due date follows the completion a year later, until the operator changes it
+                        const follow = cur.mode === "complete" && cur.form.due_date === ymdAddMonths(cur.form.last_completed_date || today, 12);
+                        return { ...cur, form: { ...cur.form, last_completed_date: v, due_date: follow && v ? ymdAddMonths(v, 12) : cur.form.due_date } };
+                      })} />
+                  </FormField>
+                  <FormField label={editor.mode === "complete" ? "Next Due" : "Due Date"} required half>
+                    <input style={fieldStyle} type="date" value={editor.form.due_date} onChange={e => setField("due_date", e.target.value)} />
+                  </FormField>
+                </FormRow>
+                {editor.mode !== "complete" && (
+                  <FormField label="Note">
+                    <input style={fieldStyle} value={editor.form.note} onChange={e => setField("note", e.target.value)} placeholder="Optional" />
+                  </FormField>
+                )}
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 8 }}>
+                  <SecondaryButton onClick={() => setEditor(null)}>Cancel</SecondaryButton>
+                  <PrimaryButton onClick={save} loading={saving}>{icons.save({ size: 15 })} Save</PrimaryButton>
+                </div>
+              </>
+            )}
+          </Modal>
+        </div>
+      );
+    }
+
     // v20.0.26 — the client's 1056 rows: the one place authorizations are added and edited
     function ClientAuthorizationsTab({ clientId, onChanged }) {
       const { addToast } = useToast();
@@ -18746,6 +19039,8 @@
             </div>
           )}
 
+          {canEdit && <ClientReviewsSection clientId={clientId} />} {/* v20.0.27 (D2) */}
+
           <Modal open={!!editor} onClose={() => setEditor(null)} width={640}
             title={editor?.mode === "edit" ? "Edit 1056 Row" : "Add 1056 Row"}
             subtitle="Enter the row as it appears on the client's 1056. Changes are written to the audit log.">
@@ -18783,10 +19078,10 @@
       );
     }
 
-    function ClientProfilePage({ clientId, onNavigate, onBack }) {
+    function ClientProfilePage({ clientId, onNavigate, onBack, initialTab }) { // v20.0.27 — initialTab: a warning opens the Authorizations tab
       const [client, setClient] = useState(null);
       const [loading, setLoading] = useState(true);
-      const [activeTab, setActiveTab] = useState("overview");
+      const [activeTab, setActiveTab] = useState(initialTab || "overview");
       const [editOpen, setEditOpen] = useState(false);
       const [counts, setCounts] = useState({ notes: null, incidents: null, goals: null, meds: null });
       const { orgId } = useAuth();
@@ -18831,19 +19126,28 @@
         )},
       ];
 
+      // v20.0.27 r1 — the open tab lives in the URL, so a reload or Back returns to it
+      // (replaceState: switching tabs doesn't add history entries; Overview keeps the short URL)
+      const changeTab = (key) => {
+        setActiveTab(key);
+        const next = "#/client-profile/" + clientId + (key && key !== "overview" ? "/" + key : "");
+        if (window.location.hash !== next) { try { window.history.replaceState(null, "", next); } catch (_) {} }
+      };
+      const shownTab = tabs.some(t => t.key === activeTab) ? activeTab : "overview"; // an unknown tab in the URL opens Overview
+
       return (
         <>
           <ProfilePageShell
             entity={client}
             entityType="client"
             tabs={tabs}
-            activeTab={activeTab}
-            onTabChange={setActiveTab}
+            activeTab={shownTab}
+            onTabChange={changeTab}
             onBack={onBack}
             onEdit={() => setEditOpen(true)}
           />
           <ClientForm open={editOpen} onClose={() => { setEditOpen(false); loadClient(); }} onSaved={loadClient} editing={client}
-            onOpenAuthorizations={() => { setEditOpen(false); setActiveTab("authorizations"); }} />
+            onOpenAuthorizations={() => { setEditOpen(false); changeTab("authorizations"); }} />
         </>
       );
     }
@@ -21210,9 +21514,12 @@
     const PAGE_KEYS = ["dashboard", "staff", "clients", "intake", "schedule", "contexts", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "billing", "finance", "docs", "ai", "messages", "migration", "settings", "staff-profile", "client-profile"];
     const parseHash = () => {
       const raw = (window.location.hash || "").replace(/^#\/?/, "");
-      const [p, id] = raw.split("/");
+      const [p, id, sub] = raw.split("/");
       if (!PAGE_KEYS.includes(p)) return { page: "dashboard", context: null };
-      if ((p === "staff-profile" || p === "client-profile") && id) {
+      if (p === "client-profile" && id) {
+        return { page: p, context: sub ? { id, profileTab: sub } : { id } }; // v20.0.27 r1 — #/client-profile/<id>/<tab>
+      }
+      if (p === "staff-profile" && id) {
         return { page: p, context: { id } };
       }
       if (p === "settings" && id) {
@@ -21221,7 +21528,7 @@
       return { page: p, context: null };
     };
     const writeHash = (target, context) => {
-      const next = "#/" + target + (context?.id ? "/" + context.id : context?.tab ? "/" + context.tab : ""); // v20.0.5r1
+      const next = "#/" + target + (context?.id ? "/" + context.id + (context.profileTab ? "/" + context.profileTab : "") : context?.tab ? "/" + context.tab : ""); // v20.0.5r1; v20.0.27 r1 — a client profile's tab
       if (window.location.hash !== next) {
         // pushState: the back button walks your page history like a real app
         try { window.history.pushState(null, "", next); } catch { window.location.hash = next; }
@@ -21349,7 +21656,7 @@
           case "training": return <TrainingPage />;
           case "notes": return <ServiceNotesPage />;
           case "evv": return <EVVPage />;
-          case "compliance": return <CompliancePage />;
+          case "compliance": return <CompliancePage onNavigate={navigate} />;
           case "incidents": return <IncidentsPage />;
           case "alerts": return <AlertsPage />;
           case "medications": return <MedicationsPage />;
@@ -21367,7 +21674,7 @@
               : <StaffPage onNavigate={navigate} />;
           case "client-profile":
             return pageContext?.id
-              ? <ClientProfilePage clientId={pageContext.id} onNavigate={navigate} onBack={() => navigate("clients")} />
+              ? <ClientProfilePage key={`${pageContext.id}:${pageContext.profileTab || ""}`} clientId={pageContext.id} initialTab={pageContext.profileTab} onNavigate={navigate} onBack={() => navigate("clients")} />
               : <ClientsPage onNavigate={navigate} />;
           default: return <DashboardPage onNavigate={navigate} />;
         }
