@@ -40,6 +40,7 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.30 r2 (Greptile r2): confirming unreadable bank rows is tied to the exact rows and mapping it was given for — change a column or the date format and it must be confirmed again; spend-downs show paid only while their payment still stands (from the database), with a prompt to link another when it doesn't; the asset response answers the close the alert is about (or this month's live warning). Database side: sql/v20.0.30r2_benefits.sql. -->
   <!-- v20.0.30 r1 (Greptile r1): a bank row that can't be read is never dropped — every non-blank row is counted and blocks the import until fixed; the close card shows only the accounts open in that month (as the database does) and refreshes when accounts change; "Accept all exact matches" reports what actually matched and stops on the first failure. Database side: sql/v20.0.30r1_close.sql (the seal enforced by triggers under the close's lock, the opening-balance chain, manager-only Form C witnesses, spend-down payments that cover it, asset responses dated after the close). -->
   <!-- v20.0.30 (PBA Release 2 — the monthly close; docs/pba-design.md v1.2, R2-1 … R2-7): the PBA tab gains a Monthly Close card for the month in view — per account: import the bank's CSV (columns mapped once per account and remembered; asked again if the layout changes) or enter the statement by hand; suggested matches with Accept all exact; make an entry from an unmatched bank line; explain an entry not on the statement; count cash on hand. Form B signs the reconciliation and seals the month (refused until everything reconciles, receipts are covered and enrollment is complete); Form C records the review with the Person (their words, their on-screen signature or a scan, or a recorded exception); Form D is the reviewer's pre-checked checklist with findings for the Compliance Director; Form G builds the report PDF (Forms B, C, D enclosed), stores it, and records when, to whom and how it was sent. Step chips show due day 5 / 10 / 15 / 30 in green / amber / red. A Benefits card: countable assets now, the asset alert's notices and plan, Medicaid spend-down, SSA payee-accounting reminders. Dashboard and Compliance → PBA list every Person's open close steps. Database side: sql/v20.0.30.sql. -->
   <!-- v20.0.29 r1 (Greptile r1): new ids come from newId() — crypto.randomUUID where the browser has it, else a v4 UUID from crypto.getRandomValues — so every form opens on the stated minimum browsers (iOS 12 has no randomUUID). A purchaser signs their own Lost Receipt Affidavits from a Dashboard card, PBA role or not. Compliance → PBA lists staff-level flags (the affidavit pattern) apart from each Person's. The ledger's request picker offers only open approvals (plus the one an entry already spends). Database side: sql/v20.0.29r1_pba.sql. -->
@@ -19347,6 +19348,9 @@
         const mp = modal.map;
         const lines = pbaLinesFromRows(modal.rows, mp);
         const bad = lines.filter(l => !l.date || l.amount == null || l.amount === 0).length;
+        // r2: a confirmation covers exactly these unreadable rows under exactly this mapping; any change asks again
+        const badKey = JSON.stringify([mp, lines.map((l, i) => (!l.date || !l.amount) ? i : null).filter(i => i !== null)]);
+        const skipConfirmed = modal.skipBadFor === badKey;
         const sel = (k) => (
           <select style={fieldStyle} value={mp[k]} onChange={e => setMd({ map: { ...mp, [k]: e.target.value } })}>
             <option value="">—</option>{modal.headers.map((h, i) => <option key={i} value={String(i)}>{h || `Column ${i + 1}`}</option>)}
@@ -19354,7 +19358,7 @@
         );
         const save = async () => {
           if (mp.amount_col === "" && (mp.debit_col === "" || mp.credit_col === "")) return addToast("Choose the amount column, or both the debit and credit columns", "error");
-          if (bad > 0 && !modal.skipBad) return addToast(`${bad} row(s) couldn't be read — check the date format and columns, or confirm they aren't transactions`, "error");
+          if (bad > 0 && !skipConfirmed) return addToast(`${bad} row(s) couldn't be read — check the date format and columns, or confirm they aren't transactions`, "error");
           if (modal.opening === "" || modal.closing === "") return addToast("Enter the statement's beginning and ending balances", "error");
           const mapping = { headers: modal.headers, date_col: Number(mp.date_col), desc_col: mp.desc_col === "" ? null : Number(mp.desc_col),
             amount_col: mp.amount_col === "" ? null : Number(mp.amount_col), debit_col: mp.amount_col !== "" || mp.debit_col === "" ? null : Number(mp.debit_col),
@@ -19393,7 +19397,7 @@
                 {modal.rows.map((r, i) => ({ r, l: lines[i] })).filter(x => !x.l.date || !x.l.amount).slice(0, 6).map((x, i) =>
                   <div key={i} style={{ fontSize: 11, color: CB.textMid, fontFamily: "monospace" }}>{x.r.join(" | ").slice(0, 120)}</div>)}
                 <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12, marginTop: 6, cursor: "pointer" }}>
-                  <input type="checkbox" checked={!!modal.skipBad} onChange={e => setMd({ skipBad: e.target.checked })} />
+                  <input type="checkbox" checked={skipConfirmed} onChange={e => setMd({ skipBadFor: e.target.checked ? badKey : null })} />
                   I checked these rows — they aren't transactions (e.g. balance or summary rows). Skip them.
                 </label>
               </div>
@@ -19701,13 +19705,17 @@
       const [busy, setBusy] = useState(false);
       const canWrite = access?.role === "manager" || access?.owner || access?.compliance;
       const load = async () => {
-        const [sd, pr, ar, ct] = await Promise.all([
+        const [sd, pr, ar, ct, st, lc] = await Promise.all([
           supabase.from("pba_spenddowns").select("*").eq("person_id", clientId).order("month", { ascending: false }).limit(24),
           supabase.from("pba_payee_reports").select("*").eq("person_id", clientId).order("requested_on", { ascending: false }).limit(24),
-          supabase.from("pba_asset_responses").select("*").eq("person_id", clientId).order("month", { ascending: false }).limit(12),
+          supabase.from("pba_asset_responses").select("*").eq("person_id", clientId).order("created_at", { ascending: false }).limit(12),
           supabase.rpc("pba_countable", { p_person: clientId }),
+          supabase.rpc("pba_spenddown_status", { p_person: clientId }),                         // r2: paid is derived
+          supabase.from("pba_form_b").select("month").eq("person_id", clientId).order("month", { ascending: false }).limit(1),
         ]);
-        setRows({ sd: sd.data || [], pr: pr.data || [], ar: ar.data || [] }); if (!ct.error) setCountable(ct.data);
+        const paid = Object.fromEntries((st.data || []).map(x => [x.o_id, x.o_paid]));
+        setRows({ sd: (sd.data || []).map(x => ({ ...x, paid: !!paid[x.id] })), pr: pr.data || [], ar: ar.data || [], lastClose: lc.data?.[0]?.month || null });
+        if (!ct.error) setCountable(ct.data);
       };
       useEffect(() => { load(); }, [clientId, d.txns.length]);
       const run = async (fn, args, ok) => {
@@ -19718,7 +19726,8 @@
       const setMd = (p) => setModal(c => c ? { ...c, ...p } : c);
       const fmtD = (x) => x ? new Date(x + "T00:00:00").toLocaleDateString() : "—";
       const assetFlag = flags.find(f => f.o_flag === "asset_alert" || f.o_flag === "asset_warning");
-      const payments = d.txns.filter(t => t.status === "active" && (t.type === "withdrawal" || t.type === "transfer"));
+      const payments = d.txns.filter(t => t.status === "active" && t.type === "withdrawal" && !t.reverses_id
+        && !d.txns.some(r => r.reverses_id === t.id && r.status === "active"));   // r2: withdrawals that still stand
       if (!rows) return null;
       return (
         <PbaCard title="Benefits" actions={canWrite ? <>
@@ -19729,15 +19738,18 @@
           {assetFlag && canWrite && (
             <div style={{ padding: "10px 12px", borderRadius: 10, background: `${CB.red}08`, border: `1px solid ${CB.red}40`, marginBottom: 10 }}>
               <div style={{ fontSize: 13, color: CB.red, marginBottom: 6 }}>{assetFlag.o_detail}</div>
-              <SecondaryButton onClick={() => setModal({ kind: "ar", month: (d.lastClose || ymd().slice(0, 7)), person: "", residential: "", sc: "", plan_type: "planned_purchase", plan_detail: "", target: "" })}>Record notices &amp; plan</SecondaryButton>
+              <SecondaryButton onClick={() => setModal({ kind: "ar",
+                // r2: the official alert is answered for the close it's about; the live warning for this month
+                month: assetFlag.o_flag === "asset_alert" && rows.lastClose ? rows.lastClose.slice(0, 7) : ymd().slice(0, 7),
+                person: "", residential: "", sc: "", plan_type: "planned_purchase", plan_detail: "", target: "" })}>Record notices &amp; plan</SecondaryButton>
             </div>
           )}
           {rows.ar.slice(0, 2).map(r => <div key={r.id} style={{ fontSize: 12, color: CB.textMid }}>Asset plan ({new Date(r.month + "T00:00:00").toLocaleDateString(undefined, { month: "short", year: "numeric" })}): {r.plan_detail} · by {fmtD(r.target_date)} · notices {fmtD(r.notices.person)}, {fmtD(r.notices.residential)}, {fmtD(r.notices.sc)}</div>)}
           {rows.sd.map(s => (
             <div key={s.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "6px 0", borderTop: `1px solid ${CB.border}`, flexWrap: "wrap" }}>
               <div style={{ fontSize: 13 }}>Spend-down {new Date(s.month + "T00:00:00").toLocaleDateString(undefined, { month: "short", year: "numeric" })}: {pbaMoney(s.amount)} due {fmtD(s.due_date)}
-                <span style={{ color: s.paid_txn_id ? CB.green : s.due_date < ymd() ? CB.red : CB.textLight }}> · {s.paid_txn_id ? "paid" : s.due_date < ymd() ? "overdue" : "unpaid"}</span></div>
-              {!s.paid_txn_id && access?.role === "manager" && <SecondaryButton onClick={() => setModal({ kind: "pay", sd: s, txn: "" })}>Link payment</SecondaryButton>}
+                <span style={{ color: s.paid ? CB.green : s.due_date < ymd() ? CB.red : CB.textLight }}> · {s.paid ? "paid" : s.paid_txn_id ? "its payment no longer stands — link another" : s.due_date < ymd() ? "overdue" : "unpaid"}</span></div>
+              {!s.paid && access?.role === "manager" && <SecondaryButton onClick={() => setModal({ kind: "pay", sd: s, txn: "" })}>Link payment</SecondaryButton>}
             </div>
           ))}
           {rows.pr.map(r => (
@@ -19763,7 +19775,8 @@
             </>}
             {modal?.kind === "pay" && <>
               <FormField label="The payment"><select style={fieldStyle} value={modal.txn} onChange={e => setMd({ txn: e.target.value })}><option value="">Select…</option>
-                {payments.map(t => <option key={t.id} value={t.id}>{fmtD(t.entry_date)} · {t.payee || pbaTypeLabel(t.type)} · {pbaMoney(t.amount)}</option>)}</select></FormField>
+                {payments.filter(t => Number(t.amount) >= Number(modal.sd.amount) && t.entry_date >= modal.sd.month)
+                  .map(t => <option key={t.id} value={t.id}>{fmtD(t.entry_date)} · {t.payee || pbaTypeLabel(t.type)} · {pbaMoney(t.amount)}</option>)}</select></FormField>
               <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}><SecondaryButton onClick={() => setModal(null)}>Cancel</SecondaryButton>
                 <PrimaryButton loading={busy} onClick={() => !modal.txn ? addToast("Choose the payment", "error") : run("pba_pay_spenddown", { p_spenddown: modal.sd.id, p_txn: modal.txn }, "Payment linked")}>Link</PrimaryButton></div>
             </>}
