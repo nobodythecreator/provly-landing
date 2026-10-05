@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.26 r2 (Greptile r2): when a retried Add 1056 Row finds its earlier request already on file, the form never closes on an assumption and never loses what the operator typed — if the saved row can't be read back the form stays open and says so; if it differs, the form keeps the entered values and shows the saved row beside them, and the operator chooses: apply these values to the saved row, or add them as a separate row. -->
   <!-- v20.0.26 r1 (Greptile r1): an unconfirmed Add 1056 Row keeps its request identity (per client, on disk) until its outcome is known — the next add for that client reuses it, so a late commit can't become a second row; an earlier save found with different values opens for correction. Finance claims never price a note from a row that starts after it (no covering row → the latest earlier row, else no rate). The face sheet prints Approval ID and Rate. Database side: sql/v20.0.26r1_reservations.sql (an S note is reserved on a payment line only when it billed). -->
   <!-- v20.0.26 (authorizations become 1056 rows — docs/authorizations-design.md v1.0, Decisions A and D1): an authorization is one row of the client's DSPD 1056 budget — service, Approval ID, start, end, Kind (D daily · Q quarter hour · S per session · M monthly), rate, max billable units per month, and units for the period (the 1056's Annual Units). The client profile's new Authorizations tab is the one place rows are added, edited and deleted (manage tier; every change audited in the database); Edit Client shows them read-only, and the intake wizard's rows carry the same fields. Every row shows two counters in its own Kind: this month against the monthly max, and the period against the units for the period. D1: a note dated during a budget lapse (the client has had the code, no row covers the date) saves — the note form offers the lapsed code with a warning — and managers see it flagged NO CURRENT AUTHORIZATION on the notes list, the client's notes, and the Authorizations tab until the covering row is entered. PBA is per session. Database side: sql/v20.0.26.sql (1056 columns, Kind-aware counters, the relaxed front-line rule, notes_without_authorization, audit trigger, S lines in the payment file). -->
   <!-- v20.0.25b r1 (Greptile r1): a client edit sends only the fields the user changed; unchanged fields stay out of the update, so a row loaded before someone else's edit can't write its old values back over theirs. Nothing changed on the client (e.g. only an authorization added) → the client row isn't written at all. -->
@@ -18543,11 +18544,23 @@
       const openAdd = () => setEditor({ mode: "add", id: readPendingAdd(clientId) || crypto.randomUUID(), row: { ...blank1056Row(), start_date: today } });
       const openEdit = (a) => setEditor({ mode: "edit", id: a.id, row: rowOf(a), stored: storedOf(a) });
       const setEditorRow = (fn) => setEditor(cur => cur ? { ...cur, row: typeof fn === "function" ? fn(cur.row) : fn } : cur);
+      // r2 — an earlier add committed with other values: the entered values stay, and the operator decides
+      const applyToSavedRow = () => setEditor(cur => cur?.conflict
+        ? { mode: "edit", id: cur.conflict.id, row: cur.row, stored: storedOf(cur.conflict) } : cur);       // Save then sends the differences
+      const addAsSeparateRow = () => setEditor(cur => cur?.conflict
+        ? { mode: "add", id: crypto.randomUUID(), row: cur.row } : cur);                                       // a new identity for a new intent
+      const describeRow = (a) => [
+        codeOf(a), a.approval_id ? `Approval ${a.approval_id}` : null, `${fmtD(a.start_date)} – ${fmtD(a.end_date)}`,
+        `Kind ${a.unit_kind || a.unit_kind_effective || "—"}`,
+        a.rate_per_unit != null ? `$${Number(a.rate_per_unit).toFixed(2)}` : null,
+        `max ${a.max_units_per_month ?? "—"}/month`, `${a.authorized_units ?? "—"} for the period`,
+      ].filter(Boolean).join(" · ");
       const closeEditorFor = (target) => setEditor(cur => (cur && cur.id === target.id && cur.mode === target.mode) ? null : cur);
 
       const noWriteMsg = "Not saved — only owners, admins and compliance directors can change authorizations";
       const save = async () => {
         if (!editor || saving) return;
+        if (editor.conflict) return addToast("Choose first: use these values on the saved row, or add them as a separate row", "error");
         const target = editor;                                      // the form this click belongs to
         const code = serviceCodes.find(s => s.id === target.row.service_code_id)?.code;
         const err = validate1056Row(target.row, code, perms);
@@ -18582,13 +18595,20 @@
           if (isAdd && error.code === "23505" && /_pkey/i.test(msg)) {
             // the earlier request with this identity is on file — proof; compare it with what's on screen
             setPendingAdd(clientId, null);
-            const { data: got } = await supabase.from(AUTH_VIEW).select(AUTH_SELECT).eq("id", target.id).limit(1);
-            const storedRow = got && got[0];
+            let got = null, lookupError = null;
+            try { ({ data: got, error: lookupError } = await supabase.from(AUTH_VIEW).select(AUTH_SELECT).eq("id", target.id).limit(1)); }
+            catch (e) { lookupError = e; }
+            const storedRow = !lookupError && got && got[0];
             load(); onChanged?.();
-            const same = storedRow && Object.keys(payload).every(k => (payload[k] ?? null) === (storedOf(storedRow)[k] ?? null));
-            if (storedRow && !same) {
-              setEditor(cur => (cur && cur.id === target.id && cur.mode === "add") ? { mode: "edit", id: storedRow.id, row: rowOf(storedRow), stored: storedOf(storedRow) } : cur);
-              return addToast("Your earlier save went through with different values. It's open here as saved — correct it and press Save. If you meant a separate row, close this and add it again.", "warning");
+            if (!storedRow) {
+              // r2 — on file, but unreadable right now: never report success on an assumption; the form stays as typed
+              return addToast("Your earlier save is on file, but it couldn't be loaded to compare with this form. Your entries are still here — press Save again in a moment.", "error");
+            }
+            const same = Object.keys(payload).every(k => (payload[k] ?? null) === (storedOf(storedRow)[k] ?? null));
+            if (!same) {
+              // r2 — keep what the operator typed, show the saved row beside it, and let them choose
+              setEditor(cur => (cur && cur.id === target.id && cur.mode === "add") ? { ...cur, conflict: storedRow } : cur);
+              return addToast("Your earlier save went through with different values. Choose what to do with the values on screen.", "warning");
             }
             closeEditorFor(target);
             return addToast("1056 row added — your earlier attempt had already gone through", "success");
@@ -18727,6 +18747,17 @@
             subtitle="Enter the row as it appears on the client's 1056. Changes are written to the audit log.">
             {editor && (
               <>
+                {editor.conflict && (
+                  <div role="alert" style={{ padding: "12px 14px", borderRadius: 10, background: `${CB.amber}10`, border: `1px solid ${CB.amber}60`, fontSize: 13, color: CB.text, marginBottom: 14 }}>
+                    <div style={{ fontWeight: 700, marginBottom: 4 }}>Your earlier save is already on file, with different values</div>
+                    <div style={{ color: CB.textMid, marginBottom: 4 }}>Saved: {describeRow(editor.conflict)}</div>
+                    <div style={{ color: CB.textMid, marginBottom: 10 }}>The form below still shows what you entered. Choose what to do with it.</div>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      <SecondaryButton onClick={applyToSavedRow}>Use these values on the saved row</SecondaryButton>
+                      <SecondaryButton onClick={addAsSeparateRow}>Add these as a separate row</SecondaryButton>
+                    </div>
+                  </div>
+                )}
                 <Auth1056Fields row={editor.row} setRow={setEditorRow} serviceCodes={serviceCodes} perms={perms} />
                 <FormField label="Status">
                   <select style={fieldStyle} value={editor.row.status} onChange={e => setEditorRow(p => ({ ...p, status: e.target.value }))}>
@@ -18739,7 +18770,7 @@
                 </FormField>
                 <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 8 }}>
                   <SecondaryButton onClick={() => setEditor(null)}>Cancel</SecondaryButton>
-                  <PrimaryButton onClick={save} loading={saving}>{icons.save({ size: 15 })} Save</PrimaryButton>
+                  <PrimaryButton onClick={save} loading={saving} disabled={!!editor.conflict}>{icons.save({ size: 15 })} Save</PrimaryButton>
                 </div>
               </>
             )}
