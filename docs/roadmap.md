@@ -2,7 +2,7 @@
 
 **How to read this:** ✅ merged and verified · 🔄 in progress (branch open) · ⬜ not started · 🧑 Tombé's task (no code).
 **Rule:** the PR that completes an item flips its box in the same commit, so this file is only ever as stale as the last merge.
-Updated: Sep 30 2026.
+Updated: Oct 4 2026.
 
 ## Done this cycle
 - ✅ v20.0.10 — client-form integrity + EVV edit-with-reason (Sep 7)
@@ -41,6 +41,7 @@ Updated: Sep 30 2026.
 - ✅ v20.0.25c — DSI is a daily code in the code table; DSI authorizations recounted by the day (Sep 28)
 - ✅ Authorizations design v1.0 approved — `docs/authorizations-design.md`, decisions A, D1–D4 (Sep 28)
 - ✅ v20.0.26 — authorizations become 1056 rows: Approval ID, Kind (D / Q / S / M), max billable units per month, units for the period; the client profile's Authorizations tab is the one place rows are added and edited (Edit Client read-only; intake rows carry the same fields); every change audited; two counters per row in its Kind (this month, the period); D1 — a note during a budget lapse saves and managers see it flagged until the row is entered; PBA per session; the payment file fills S lines (Sep 30)
+- ✅ v20.0.27 — renewals: a review list per client (Medicaid, DWS, PCSP meeting, Other; Mark Completed takes the next due date); the "Renewals & Budgets" card on the Dashboard and a Compliance tab, manage tier — budget ends, reviews due, and run-outs at the actual pace, 60 / 30 / 14 days (Oct 4)
 
 ## Tier 1 — finish Item 4 (security)
 - 🔄 **Go live with identities.** Operator invites sent Sep 22 (Elena, Kujang, Ethan); Asunta once her email is on file; Siale and Asia held until they have someone to support (no assignment = empty login); assignments kept current as a security control.
@@ -53,8 +54,8 @@ Updated: Sep 30 2026.
 
 ## Tier 3 — arcs Item 4 unlocks
 - 🔄 **Billing: UPI e520 payment-file export.** Design v1.0 approved Sep 25 (`docs/e520-design.md`). PR 1 v20.0.23 recording pieces ✅ → v20.0.23a bulk approve ✅ → PR 2 v20.0.24 engine + billed lock ✅ → v20.0.24a HAP + used units ✅ → PR 3 v20.0.25 Payment Files tab ✅ → v20.0.25a Compare with my file ✅. Next: the October shadow run. October is the shadow run and the gate: Provly's October file is compared line by line with the hand-made one, and Provly's is uploaded (early November) only if every difference is explained — September's notes are still in Google Drive. October needs every billable day documented and approved in Provly: host home operators' daily notes, SLN notes with EVV, absences as they happen. The contract questions are answered (Sep 26): nearest quarter hour, no MTP trip log, a one-way ride bills the day, HAP per the placement.
-- 🔄 **Authorizations as 1056 rows.** Design v1.0 approved Sep 28 (`docs/authorizations-design.md`). v20.0.26 1056 rows + counters + lapse notes ✅ → v20.0.27 renewals (review list per client; budget-end, reviews-due and run-out warnings) ⬜.
-- 🧑 **Re-enter every active client's 1056 rows** on the Authorizations tab (the current rows were entered as monthly maxes with approximate rates and dates). Known: one client's code is SLN, not SLH; one client needs PBA and HAP rows; one budget period ends Sep 30 — enter its renewal when approved. Needed before the early-November payment file.
+- ✅ **Authorizations as 1056 rows.** Design v1.0 approved Sep 28 (`docs/authorizations-design.md`). v20.0.26 1056 rows + counters + lapse notes ✅ → v20.0.27 renewals ✅. The weekly email digest of the same card waits for the email arc.
+- ✅ **Every active client's 1056 rows re-entered** on the Authorizations tab (Oct 4).
 - ⬜ **Payment reconciliation.** Import the E520 Payment File Report's detail XLSX per status → UPI status on every batch line; then payment reports and deposits → expected (rate × units) vs received. Needs one masked "Paid by CAPS" detail XLSX.
 - ⬜ **Email + team messaging.** Real outbound email and Slack-style team messaging; needs per-user identities (unblocked after (c)). Last two "coming soon" rows on the landing page.
 - ⬜ **HIPAA posture.** BAA inventory (Supabase, Vercel, Anthropic, email sender); close gaps; then restore the badge on the landing page with substance behind it.

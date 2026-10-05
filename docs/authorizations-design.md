@@ -2,7 +2,7 @@
 
 **Design v1.0 · decided Sep 28, 2026 · delivery v20.0.26 → v20.0.27**
 
-Status: v20.0.26 built Sep 30, 2026 (`sql/v20.0.26.sql` + app). v20.0.27 not started.
+Status: v20.0.26 merged Sep 30, 2026 (with r1–r3). v20.0.27 built Oct 4, 2026 (`sql/v20.0.27.sql` + app). The weekly email digest waits for the email arc.
 
 ## Why
 
@@ -45,6 +45,15 @@ Implementation readings, stated in the PR:
 - **"Had the code before"** (D1) = a row that isn't rejected, starting on or before the note's date. A code whose only row starts later is still refused for front-line staff.
 - **The D1 check**: the note-authorization rule *was* enforced in the database (v20.0.21 trigger); v20.0.26 relaxes it there. The flag is computed on read (`notes_without_authorization`), so it clears on its own.
 - **Existing rows**: max billable units per month is copied from the old units value on the first run (those values were entered as monthly maxes); units for the period stay as they are until re-entered.
+
+## Decided while building v20.0.27 (Oct 4)
+
+Implementation readings, stated in the PR:
+- **One source.** `renewal_warnings()` in the database computes every warning; the Dashboard card, the Compliance tab and (later) the email digest all read it. Manage tier only; a signed-in caller can't choose the org or move "today".
+- **Budget ends** also lists a client + code whose latest row ended within the last 60 days with no renewal entered. After 60 days the service is treated as ended; a longer lapse with ongoing service still shows through the D1 note flags.
+- **Run-outs**: a row inside its dates with 30+ days of history; pace = used ÷ days elapsed; projected run-out = today + remaining ÷ pace; listed when it lands before the row's end, at any distance (beyond 60 days it shows as "later"). A row whose units are all used is listed too, as the backstop.
+- **Review list** is read and written by the manage tier only, one entry per review type per client (Other: one per name). Completing one is a single write of the completion date and the next due date; the completion can't be in the future and the next due must follow it.
+- Only active, not-discharged clients produce warnings.
 
 ## Warnings (v20.0.27)
 
