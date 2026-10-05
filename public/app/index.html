@@ -40,6 +40,7 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.30 r1 (Greptile r1): a bank row that can't be read is never dropped — every non-blank row is counted and blocks the import until fixed; the close card shows only the accounts open in that month (as the database does) and refreshes when accounts change; "Accept all exact matches" reports what actually matched and stops on the first failure. Database side: sql/v20.0.30r1_close.sql (the seal enforced by triggers under the close's lock, the opening-balance chain, manager-only Form C witnesses, spend-down payments that cover it, asset responses dated after the close). -->
   <!-- v20.0.30 (PBA Release 2 — the monthly close; docs/pba-design.md v1.2, R2-1 … R2-7): the PBA tab gains a Monthly Close card for the month in view — per account: import the bank's CSV (columns mapped once per account and remembered; asked again if the layout changes) or enter the statement by hand; suggested matches with Accept all exact; make an entry from an unmatched bank line; explain an entry not on the statement; count cash on hand. Form B signs the reconciliation and seals the month (refused until everything reconciles, receipts are covered and enrollment is complete); Form C records the review with the Person (their words, their on-screen signature or a scan, or a recorded exception); Form D is the reviewer's pre-checked checklist with findings for the Compliance Director; Form G builds the report PDF (Forms B, C, D enclosed), stores it, and records when, to whom and how it was sent. Step chips show due day 5 / 10 / 15 / 30 in green / amber / red. A Benefits card: countable assets now, the asset alert's notices and plan, Medicaid spend-down, SSA payee-accounting reminders. Dashboard and Compliance → PBA list every Person's open close steps. Database side: sql/v20.0.30.sql. -->
   <!-- v20.0.29 r1 (Greptile r1): new ids come from newId() — crypto.randomUUID where the browser has it, else a v4 UUID from crypto.getRandomValues — so every form opens on the stated minimum browsers (iOS 12 has no randomUUID). A purchaser signs their own Lost Receipt Affidavits from a Dashboard card, PBA role or not. Compliance → PBA lists staff-level flags (the affidavit pattern) apart from each Person's. The ledger's request picker offers only open approvals (plus the one an entry already spends). Database side: sql/v20.0.29r1_pba.sql. -->
   <!-- v20.0.29 (PBA Release 1 — the record; docs/pba-design.md v1.1, requirements docs/pba-module-spec-v1.md): a PBA tab on the client profile, shown only to the Person's assigned PBA Manager, Administrative Reviewer and Quarterly Auditor, the Compliance Director and the owner. Start a PBA record (it opens as Pending enrollment until the fiduciary proof and a signed Natural Support Determination — Form A — are filed); assign the three roles (the database refuses one person in two roles and the Person's host in any); accounts with titling and the not-provider-funds attestation; the ledger (deposits, purchases, transfers, cash with who received it and why; receipts by camera into a private add-only bucket, fingerprinted; the Lost Receipt Affidavit signed by the purchaser and countersigned; entries editable with a reason until the month closes, voids instead of deletes, reversing entries after); purchase requests where the blocks live (the Person's own words, this month's needs met, PBA Manager approval); signatures in Provly (staff attest; the Person or guardian signs on screen or by scan); open flags on the tab and on Compliance → PBA. Database side: sql/v20.0.29.sql. -->
@@ -19062,7 +19063,7 @@
         : ((pbaParseAmount(r[map.credit_col]) || 0) - Math.abs(pbaParseAmount(r[map.debit_col]) || 0));
       if (amount != null) amount = Math.round(amount * 100) / 100;
       return { date, description: map.desc_col !== "" && map.desc_col != null ? String(r[map.desc_col] || "").trim() : "", amount };
-    }).filter(l => l.date || l.amount);
+    });                                                              // r1: no filtering here — an unreadable row is counted, never dropped
 
     function PbaMonthlyClose({ clientId, client, access, d, month, onChanged }) {
       const { addToast } = useToast();
@@ -19084,7 +19085,8 @@
         setLoadError(null);
         const q = (p) => p.then(r => { if (r.error) throw new Error(r.error.message); return r.data; });
         try {
-          const accts = d.accounts.filter(a => !a.closed_on || a.closed_on >= ms);
+          // r1: the accounts open during this month — the same rule as the database's _pba_month_accounts
+          const accts = d.accounts.filter(a => (!a.closed_on || a.closed_on >= ms) && (!a.opened_on || a.opened_on <= me) && (!a.opening_date || a.opening_date <= me));
           const [stmts, maps, counts, fb, fc, fd, fg, finds, cyc, sugg, ...recons] = await Promise.all([
             q(supabase.from("pba_statements").select("*, pba_statement_lines(*)").eq("person_id", clientId).eq("month", ms)),
             q(supabase.from("pba_statement_mappings").select("*").eq("person_id", clientId)),
@@ -19105,7 +19107,8 @@
                  recon: Object.fromEntries(accts.map((a, i) => [a.id, recons[i]])) });
         } catch (e) { if (mine === seq.current) setLoadError(e.message || "request failed"); }
       };
-      useEffect(() => { setM(null); setModal(null); load(); }, [clientId, month, d.txns.length, d.sigs.length]);
+      const acctKey = d.accounts.map(a => `${a.id}:${a.opened_on || ""}:${a.opening_date || ""}:${a.closed_on || ""}:${a.opening_balance}`).join("|"); // r1
+      useEffect(() => { setM(null); setModal(null); load(); }, [clientId, month, d.txns.length, d.sigs.length, acctKey]);
 
       const run = async (fn, args, ok) => {
         if (busy) return false;
@@ -19223,8 +19226,16 @@
                       {Number(r.outstanding || 0) !== 0 && ` · outstanding ${pbaMoney(r.outstanding)}`}
                     </div>
                     {isManager && !sealed && exact.length > 0 && <div style={{ marginTop: 8 }}><SecondaryButton onClick={async () => {
-                      for (const s of exact) { const { error } = await supabase.rpc("pba_match", { p_line: s.o_line_id, p_txn: s.o_txn_id }); if (error) { addToast(error.message, "error"); break; } }
-                      addToast(`${exact.length} exact match${exact.length === 1 ? "" : "es"} accepted`, "success"); load();
+                      // r1: report what actually matched; stop at the first failure and say so
+                      let okCount = 0, failMsg = null;
+                      for (const s of exact) {
+                        let res; try { res = await supabase.rpc("pba_match", { p_line: s.o_line_id, p_txn: s.o_txn_id }); } catch (e) { res = { error: { message: e?.message || "network error" } }; }
+                        if (res.error) { failMsg = res.error.message; break; }
+                        okCount++;
+                      }
+                      if (failMsg) addToast(`${okCount} of ${exact.length} matched; stopped: ${failMsg}`, "error");
+                      else addToast(`${okCount} exact match${okCount === 1 ? "" : "es"} accepted`, "success");
+                      load();
                     }}>Accept all exact matches ({exact.length})</SecondaryButton></div>}
                     {unmatched.map(l => {
                       const sg = m.sugg.filter(s => s.o_line_id === l.id);
@@ -19343,16 +19354,17 @@
         );
         const save = async () => {
           if (mp.amount_col === "" && (mp.debit_col === "" || mp.credit_col === "")) return addToast("Choose the amount column, or both the debit and credit columns", "error");
-          if (bad > 0) return addToast(`${bad} line(s) couldn't be read — check the date format and columns`, "error");
+          if (bad > 0 && !modal.skipBad) return addToast(`${bad} row(s) couldn't be read — check the date format and columns, or confirm they aren't transactions`, "error");
           if (modal.opening === "" || modal.closing === "") return addToast("Enter the statement's beginning and ending balances", "error");
           const mapping = { headers: modal.headers, date_col: Number(mp.date_col), desc_col: mp.desc_col === "" ? null : Number(mp.desc_col),
             amount_col: mp.amount_col === "" ? null : Number(mp.amount_col), debit_col: mp.amount_col !== "" || mp.debit_col === "" ? null : Number(mp.debit_col),
             credit_col: mp.amount_col !== "" || mp.credit_col === "" ? null : Number(mp.credit_col), date_format: mp.date_format };
           const okMap = await run("pba_save_mapping", { p_account: modal.acc.id, p_map: mapping }); if (!okMap) return;
           const up = await upload("statement", modal.file); if (!up) return;
+          const good = lines.filter(l => l.date && l.amount);         // r1: only after the unreadable rows were confirmed as non-transactions
           done("pba_import_statement", { p_id: modal.id, p_account: modal.acc.id, p_month: ms, p_data: { source: "import", file_id: up.id,
-            period_start: modal.period_start, period_end: modal.period_end, opening_balance: Number(modal.opening), closing_balance: Number(modal.closing), lines } },
-            `${lines.length} statement lines imported`);
+            period_start: modal.period_start, period_end: modal.period_end, opening_balance: Number(modal.opening), closing_balance: Number(modal.closing), lines: good } },
+            `${good.length} statement lines imported${bad ? ` (${bad} non-transaction row${bad === 1 ? "" : "s"} skipped, as confirmed)` : ""}`);
         };
         body = (
           <>
@@ -19374,7 +19386,18 @@
               <FormField label="Beginning balance (from the statement)" required half><input type="number" step="0.01" style={fieldStyle} value={modal.opening} onChange={e => setMd({ opening: e.target.value })} /></FormField>
               <FormField label="Ending balance (from the statement)" required half><input type="number" step="0.01" style={fieldStyle} value={modal.closing} onChange={e => setMd({ closing: e.target.value })} /></FormField>
             </FormRow>
-            <div style={{ fontSize: 12, color: CB.textLight, margin: "6px 0" }}>{lines.length} lines read{bad ? ` · ${bad} unreadable` : ""}. First lines:</div>
+            <div style={{ fontSize: 12, color: CB.textLight, margin: "6px 0" }}>{lines.length} rows read{bad ? ` · ${bad} unreadable` : ""}. First lines:</div>
+            {bad > 0 && (
+              <div style={{ padding: "8px 10px", borderRadius: 8, border: `1px solid ${CB.red}50`, background: `${CB.red}08`, marginBottom: 6 }}>
+                <div style={{ fontSize: 12, color: CB.red, fontWeight: 700, marginBottom: 4 }}>{bad} row{bad === 1 ? "" : "s"} couldn't be read:</div>
+                {modal.rows.map((r, i) => ({ r, l: lines[i] })).filter(x => !x.l.date || !x.l.amount).slice(0, 6).map((x, i) =>
+                  <div key={i} style={{ fontSize: 11, color: CB.textMid, fontFamily: "monospace" }}>{x.r.join(" | ").slice(0, 120)}</div>)}
+                <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12, marginTop: 6, cursor: "pointer" }}>
+                  <input type="checkbox" checked={!!modal.skipBad} onChange={e => setMd({ skipBad: e.target.checked })} />
+                  I checked these rows — they aren't transactions (e.g. balance or summary rows). Skip them.
+                </label>
+              </div>
+            )}
             {lines.slice(0, 5).map((l, i) => <div key={i} style={{ fontSize: 12, color: !l.date || !l.amount ? CB.red : CB.text }}>{l.date || "bad date"} · {l.description || "—"} · {l.amount == null ? "bad amount" : (l.amount > 0 ? "+" : "") + l.amount.toFixed(2)}</div>)}
             {footer(save, "Import")}
           </>
