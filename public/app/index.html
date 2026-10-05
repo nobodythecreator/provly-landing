@@ -40,6 +40,7 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.29 r1 (Greptile r1): new ids come from newId() — crypto.randomUUID where the browser has it, else a v4 UUID from crypto.getRandomValues — so every form opens on the stated minimum browsers (iOS 12 has no randomUUID). A purchaser signs their own Lost Receipt Affidavits from a Dashboard card, PBA role or not. Compliance → PBA lists staff-level flags (the affidavit pattern) apart from each Person's. The ledger's request picker offers only open approvals (plus the one an entry already spends). Database side: sql/v20.0.29r1_pba.sql. -->
   <!-- v20.0.29 (PBA Release 1 — the record; docs/pba-design.md v1.1, requirements docs/pba-module-spec-v1.md): a PBA tab on the client profile, shown only to the Person's assigned PBA Manager, Administrative Reviewer and Quarterly Auditor, the Compliance Director and the owner. Start a PBA record (it opens as Pending enrollment until the fiduciary proof and a signed Natural Support Determination — Form A — are filed); assign the three roles (the database refuses one person in two roles and the Person's host in any); accounts with titling and the not-provider-funds attestation; the ledger (deposits, purchases, transfers, cash with who received it and why; receipts by camera into a private add-only bucket, fingerprinted; the Lost Receipt Affidavit signed by the purchaser and countersigned; entries editable with a reason until the month closes, voids instead of deletes, reversing entries after); purchase requests where the blocks live (the Person's own words, this month's needs met, PBA Manager approval); signatures in Provly (staff attest; the Person or guardian signs on screen or by scan); open flags on the tab and on Compliance → PBA. Database side: sql/v20.0.29.sql. -->
   <!-- v20.0.28 r3 (Greptile on the hotfix): the startup-failure screen covers every way the app can fail to appear — its guard is the first script in <head>, the started flag is set only after the first render succeeds, and if the app never runs at all (Babel or React didn't load) a check after page load shows the screen instead of a blank page. -->
   <!-- v20.0.28 r2 (hotfix — the blank page): the app's code runs inside its own function scope. v20.0.28 left let/const native, so the app's top-level `const supabase` collided with the `supabase` global the Supabase library declares, and the browser refused the whole script. Inside the function the names shadow instead of collide (only `supabase` overlapped; the app reads the library as window.supabase). If anything ever fails before the app first renders, a "Provly couldn't start — Reload" screen shows instead of a blank page. -->
@@ -185,6 +186,15 @@
     // the app's names shadow the globals instead of colliding with them.
     (function () {
     const { useState, useEffect, useContext, createContext, useCallback, useRef, useMemo } = React;
+    // v20.0.29 r1 — client-generated ids on every supported browser: crypto.randomUUID (Chrome 92+,
+    // Safari 15.4+, Firefox 95+) when present, else an RFC 4122 v4 UUID from crypto.getRandomValues
+    const newId = () => {
+      if (window.crypto && typeof window.crypto.randomUUID === "function") return window.crypto.randomUUID();
+      const b = window.crypto.getRandomValues(new Uint8Array(16));
+      b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+      const h = Array.from(b, x => x.toString(16).padStart(2, "0")).join("");
+      return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+    };
 
     // v20.0.14 / r1 — BUSINESS calendar dates. Provly's records are Utah
     // records: the service date, the EVV day, the MAR day are the date in
@@ -2254,6 +2264,7 @@
                 <StatCard label="Overdue Trainings" value={stats.trainings} icon={icons.alertTriangle} color={stats.trainings > 0 ? CB.red : CB.green} delay={0.1} onClick={onNavigate ? () => onNavigate("training") : undefined} />
                 <StatCard label="Authorizations" value={stats.auths} icon={icons.fileText} color={CB.navy} delay={0.15} onClick={onNavigate ? () => onNavigate("clients") : undefined} />
               </div>
+              <PbaAffidavitsToSignCard /> {/* v20.0.29 r1 — shows only when you have affidavits to sign */}
               {accessTier === "manage" && <RenewalsCard onNavigate={onNavigate} compact />} {/* v20.0.27 (D3) */}
               <div style={{
                 background: CB.white, borderRadius: 16, padding: 24,
@@ -18880,7 +18891,7 @@
     }
     // upload to {org}/{person}/{folder}/{uuid}.{ext}, then register it (the database checks the object exists)
     async function uploadPbaFile({ orgId, personId, purpose, file }) {
-      const id = crypto.randomUUID();
+      const id = newId();
       const folder = purpose === "receipt" ? "receipts" : purpose === "signature" ? "signatures" : purpose === "statement" ? "statements" : "documents";
       const fromName = file.name && file.name.includes(".") ? file.name.split(".").pop() : "";
       const ext = (fromName || (file.type || "").split("/")[1] || "bin").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 5) || "bin";
@@ -18917,12 +18928,18 @@
         };
       }, []);
       const pos = (e) => { const r = canvasRef.current.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
-      const down = (e) => { e.preventDefault(); drawing.current = true; const ctx = canvasRef.current.getContext("2d"); const [x, y] = pos(e); ctx.beginPath(); ctx.moveTo(x, y); canvasRef.current.setPointerCapture?.(e.pointerId); };
+      const down = (e) => { e.preventDefault(); drawing.current = true; const ctx = canvasRef.current.getContext("2d"); const [x, y] = pos(e); ctx.beginPath(); ctx.moveTo(x, y); if (e.pointerId != null && canvasRef.current.setPointerCapture) canvasRef.current.setPointerCapture(e.pointerId); };
       const move = (e) => { if (!drawing.current) return; e.preventDefault(); const ctx = canvasRef.current.getContext("2d"); const [x, y] = pos(e); ctx.lineTo(x, y); ctx.stroke(); inked.current = true; };
       const up = () => { drawing.current = false; };
       return (
         <div>
-          <canvas ref={canvasRef} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerLeave={up}
+          <canvas ref={canvasRef}
+            {...(window.PointerEvent
+              ? { onPointerDown: down, onPointerMove: move, onPointerUp: up, onPointerLeave: up }
+              // r1 — iOS 12 has no Pointer Events: the same strokes from touch (and mouse)
+              : { onTouchStart: ev => down({ preventDefault: () => ev.preventDefault(), clientX: ev.touches[0].clientX, clientY: ev.touches[0].clientY }),
+                  onTouchMove: ev => move({ preventDefault: () => ev.preventDefault(), clientX: ev.touches[0].clientX, clientY: ev.touches[0].clientY }),
+                  onTouchEnd: up, onMouseDown: down, onMouseMove: move, onMouseUp: up, onMouseLeave: up })}
             style={{ width: "100%", height, border: `1px dashed ${CB.border}`, borderRadius: 10, background: CB.white, touchAction: "none", display: "block" }} />
           <button type="button" onClick={() => padRef.current?.clear()} style={{ marginTop: 6, background: "none", border: "none", color: CB.textMid, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Clear signature</button>
         </div>
@@ -18939,6 +18956,61 @@
         {children}
       </div>
     );
+
+    // v20.0.29 r1 — a purchaser signs their own Lost Receipt Affidavits here, PBA role or not
+    function PbaAffidavitsToSignCard() {
+      const { addToast } = useToast();
+      const [rows, setRows] = useState([]);
+      const [signing, setSigning] = useState(null);                  // { id, name, agree }
+      const [busy, setBusy] = useState(false);
+      const load = async () => {
+        const { data, error } = await supabase.rpc("pba_affidavits_to_sign");
+        if (!error) setRows(data || []);
+      };
+      useEffect(() => { load(); }, []);
+      if (rows.length === 0) return null;
+      const sign = async () => {
+        if (!signing.name.trim()) return addToast("Type your full name", "error");
+        if (!signing.agree) return addToast("Tick the attestation to sign", "error");
+        setBusy(true);
+        const { error } = await supabase.rpc("pba_sign", { p_form_type: "form_f", p_form_id: signing.id, p_signer_kind: "staff", p_signer_name: signing.name.trim(),
+          p_attestation: "I made this purchase. The receipt is lost; the details above are true.", p_drawn_file: null, p_scan_file: null });
+        setBusy(false);
+        if (error) return addToast(error.message, "error");
+        addToast("Affidavit signed", "success"); setSigning(null); load();
+      };
+      const cur = signing && rows.find(r => r.o_affidavit_id === signing.id);
+      return (
+        <div style={{ background: CB.white, borderRadius: 16, padding: 20, border: `1px solid ${CB.amber}60`, marginBottom: 20 }}>
+          <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Lost Receipt Affidavits to sign ({rows.length})</h3>
+          <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 10 }}>You made these purchases and the receipts are lost. Check the details and sign.</div>
+          {rows.map(r => (
+            <div key={r.o_affidavit_id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "8px 0", borderTop: `1px solid ${CB.border}`, flexWrap: "wrap" }}>
+              <div style={{ fontSize: 13 }}><strong>{r.o_person_name}</strong> · {r.o_store} · ${Number(r.o_amount).toFixed(2)} · {new Date(r.o_purchase_date + "T00:00:00").toLocaleDateString()}
+                <div style={{ fontSize: 12, color: CB.textMid }}>{r.o_reason}</div></div>
+              <SecondaryButton onClick={() => setSigning({ id: r.o_affidavit_id, name: "", agree: false })}>Sign</SecondaryButton>
+            </div>
+          ))}
+          <Modal open={!!cur} onClose={() => setSigning(null)} width={500} title="Sign the Lost Receipt Affidavit" subtitle="Your signature locks the affidavit.">
+            {cur && <>
+              <div style={{ fontSize: 13, padding: "10px 12px", borderRadius: 10, background: CB.cream, marginBottom: 12 }}>
+                {cur.o_store} · ${Number(cur.o_amount).toFixed(2)} · {new Date(cur.o_purchase_date + "T00:00:00").toLocaleDateString()}{cur.o_statement_line_ref ? ` · statement: ${cur.o_statement_line_ref}` : ""}
+                <div style={{ marginTop: 6 }}>I made this purchase. The receipt is lost; the details above are true.</div>
+              </div>
+              <FormField label="Type your full name" required><input style={fieldStyle} value={signing.name} onChange={ev => setSigning(s => ({ ...s, name: ev.target.value }))} /></FormField>
+              <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, cursor: "pointer" }}>
+                <input type="checkbox" checked={signing.agree} onChange={ev => setSigning(s => ({ ...s, agree: ev.target.checked }))} />
+                <span>I am signing as myself, and I attest to the statement above.</span>
+              </label>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 10 }}>
+                <SecondaryButton onClick={() => setSigning(null)}>Cancel</SecondaryButton>
+                <PrimaryButton loading={busy} onClick={sign}>Sign</PrimaryButton>
+              </div>
+            </>}
+          </Modal>
+        </div>
+      );
+    }
 
     function ClientPbaTab({ clientId, client, access, onChanged }) {
       const { addToast } = useToast();
@@ -19042,7 +19114,7 @@
       const affSigs = (affId) => d.sigs.filter(s => s.form_type === "form_f" && s.form_id === affId);
       const monthTxns = d.txns.filter(t => (t.entry_date || "").slice(0, 7) === month);
       const accountName = (id) => { const a = d.accounts.find(x => x.id === id); return a ? `${PBA_ACCOUNT_KINDS.find(k => k.value === a.kind)?.label || a.kind}${a.last4 ? ` ··${a.last4}` : ""}` : "—"; };
-      const approvedReqs = d.reqs.filter(q => q.status === "approved");
+      const approvedReqs = d.reqs.filter(q => q.status === "approved" || (modal?.kind === "txn" && !modal.isNew && q.id === modal.f?.request_id)); // r1
 
       // ── upload helper bound to this Person ───────────────────────
       const upload = async (purpose, file) => {
@@ -19155,7 +19227,7 @@
           </PbaCard>
 
           {/* ── accounts (Gap 17) ── */}
-          <PbaCard title="Accounts" actions={canAccounts ? <SecondaryButton onClick={() => setModal({ kind: "account", id: crypto.randomUUID(), isNew: true,
+          <PbaCard title="Accounts" actions={canAccounts ? <SecondaryButton onClick={() => setModal({ kind: "account", id: newId(), isNew: true,
               f: { kind: "bank", institution: "", last4: "", titling: clientName, supervising_institution: "", opening_balance: "", opening_date: "", attest: false } })}>{icons.plus({ size: 13 })} Add Account</SecondaryButton> : null}>
             {d.accounts.length === 0 ? <div style={{ fontSize: 13, color: CB.textLight }}>No accounts yet.</div> : d.accounts.map(a => (
               <div key={a.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "8px 0", borderTop: `1px solid ${CB.border}`, opacity: a.closed_on ? 0.6 : 1 }}>
@@ -19173,7 +19245,7 @@
           </PbaCard>
 
           {/* ── purchase requests (Decision 2: the blocks apply here) ── */}
-          <PbaCard title="Purchase Requests" actions={isManager ? <SecondaryButton onClick={() => setModal({ kind: "request", id: crypto.randomUUID(),
+          <PbaCard title="Purchase Requests" actions={isManager ? <SecondaryButton onClick={() => setModal({ kind: "request", id: newId(),
               f: { amount: "", payee: "", category: "personal", beneficiary: "person", beneficiary_name: "", beneficiary_relationship: "", person_choice: "" } })}>{icons.plus({ size: 13 })} New Request</SecondaryButton> : null}>
             <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 8 }}>Gifts, savings, debt payments and anything for another person need the Person's choice in their own words and this month's needs met (food, shelter, clothing, medical care) before approval.</div>
             {d.reqs.length === 0 ? <div style={{ fontSize: 13, color: CB.textLight }}>No requests.</div> : d.reqs.slice(0, 20).map(q => (
@@ -19197,7 +19269,7 @@
           {/* ── the ledger (Gap 18) ── */}
           <PbaCard title="Ledger" actions={<>
               <input type="month" value={month} onChange={ev => setMonth(ev.target.value || ymd().slice(0, 7))} style={{ ...fieldStyle, width: 170, padding: "6px 10px" }} />
-              {isManager && d.accounts.length > 0 && <PrimaryButton onClick={() => setModal({ kind: "txn", id: crypto.randomUUID(), isNew: true,
+              {isManager && d.accounts.length > 0 && <PrimaryButton onClick={() => setModal({ kind: "txn", id: newId(), isNew: true,
                 f: { type: "withdrawal", account_id: d.accounts.find(a => !a.closed_on)?.id || d.accounts[0].id, to_account_id: "", entry_date: ymd(), amount: "", payee: "", category: "personal",
                      beneficiary: "person", beneficiary_name: "", beneficiary_relationship: "", purchased_by: "", purchased_by_staff_id: "", handed_to: "", handed_to_staff_id: "",
                      handed_to_name: "", purpose: "", request_id: "", notes: "" } })}>{icons.plus({ size: 14 })} Add Entry</PrimaryButton>}
@@ -19258,7 +19330,7 @@
                                     }} />
                                   </label>
                                 )}
-                                {needs && !hasReceipt && !aff && <button onClick={() => setModal({ kind: "affidavit", id: crypto.randomUUID(), txn: t.id,
+                                {needs && !hasReceipt && !aff && <button onClick={() => setModal({ kind: "affidavit", id: newId(), txn: t.id,
                                   f: { purchaser_staff_id: t.purchased_by_staff_id || "", store: t.payee || "", statement_line_ref: "", reason: "" } })}
                                   style={{ background: "none", border: "none", color: CB.blue, cursor: "pointer", fontSize: 12, padding: 0, fontFamily: "inherit", fontWeight: 600 }}>Lost receipt</button>}
                                 {!t.reverses_id && !reversed && <button onClick={() => setModal({ kind: "txn", id: t.id, isNew: false, reason: "", f: {
@@ -19268,7 +19340,7 @@
                                   handed_to_name: t.handed_to_name || "", purpose: t.purpose || "", request_id: t.request_id || "", notes: t.notes || "" } })}
                                   style={{ background: "none", border: "none", color: CB.blue, cursor: "pointer", fontSize: 12, padding: 0, fontFamily: "inherit" }}>Edit</button>}
                                 <button onClick={() => setModal({ kind: "void", txn: t.id, reason: "" })} style={{ background: "none", border: "none", color: CB.red, cursor: "pointer", fontSize: 12, padding: 0, fontFamily: "inherit" }}>Void</button>
-                                {!t.reverses_id && !reversed && <button onClick={() => setModal({ kind: "reverse", txn: t.id, newId: crypto.randomUUID(), reason: "" })} style={{ background: "none", border: "none", color: CB.amber, cursor: "pointer", fontSize: 12, padding: 0, fontFamily: "inherit" }}>Reverse</button>}
+                                {!t.reverses_id && !reversed && <button onClick={() => setModal({ kind: "reverse", txn: t.id, newId: newId(), reason: "" })} style={{ background: "none", border: "none", color: CB.amber, cursor: "pointer", fontSize: 12, padding: 0, fontFamily: "inherit" }}>Reverse</button>}
                               </div>
                             )}
                           </td>
@@ -19589,10 +19661,12 @@
     // Compliance → PBA: every Person's open PBA flags (owner and Compliance Director)
     function CompliancePbaPanel({ onNavigate }) {
       const [rows, setRows] = useState(null);
+      const [staffFlags, setStaffFlags] = useState([]);              // r1 — about a staff member, not a Person
       const [error, setError] = useState(null);
       const load = async () => {
         setError(null);
-        const { data, error: e } = await supabase.rpc("pba_org_flags");
+        const [{ data, error: e }, sf] = await Promise.all([supabase.rpc("pba_org_flags"), supabase.rpc("pba_staff_flags")]);
+        if (!sf.error) setStaffFlags(sf.data || []);
         if (e) { setError(e.message); setRows(r => r || []); return; }
         setRows(data || []);
       };
@@ -19604,8 +19678,14 @@
           <h3 style={{ fontSize: 16, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Personal Budget Assistance</h3>
           <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 14 }}>Open PBA flags for every Person — visible to the owner and the Compliance Director.</div>
           {error && <div role="alert" style={{ color: CB.red, fontSize: 13, marginBottom: 10 }}>Couldn't load ({error}). <SecondaryButton onClick={load}>Retry</SecondaryButton></div>}
+          {staffFlags.length > 0 && (
+            <div style={{ padding: "12px 14px", borderRadius: 10, border: `1px solid ${CB.amber}60`, background: `${CB.amber}08`, marginBottom: 12 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>Staff</div>
+              {staffFlags.map((f, i) => <div key={i} style={{ fontSize: 13, marginTop: 2 }}><strong>{f.o_staff_name}</strong> <span style={{ color: CB.textMid }}>· {f.o_detail}</span></div>)}
+            </div>
+          )}
           {rows === null ? <div style={{ display: "flex", justifyContent: "center", padding: 24 }}><Spinner size={20} /></div>
-          : people.length === 0 ? <div style={{ fontSize: 13, color: CB.textLight }}>No open PBA flags.</div>
+          : people.length === 0 ? <div style={{ fontSize: 13, color: CB.textLight }}>No open PBA flags for any Person.</div>
           : people.map(p => (
             <div key={p.id} style={{ padding: "12px 14px", borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.cream, marginBottom: 8 }}>
               <button onClick={() => onNavigate && onNavigate("client-profile", { type: "client", id: p.id, profileTab: "pba" })}
@@ -19702,7 +19782,7 @@
           return readPendingAdd(cid) === (id || null);
         } catch (_) { return false; }
       };
-      const openAdd = () => setEditor({ mode: "add", id: readPendingAdd(clientId) || crypto.randomUUID(), row: { ...blank1056Row(), start_date: today } });
+      const openAdd = () => setEditor({ mode: "add", id: readPendingAdd(clientId) || newId(), row: { ...blank1056Row(), start_date: today } });
       const openEdit = (a) => setEditor({ mode: "edit", id: a.id, row: rowOf(a), stored: storedOf(a) });
       const setEditorRow = (fn) => setEditor(cur => cur ? { ...cur, row: typeof fn === "function" ? fn(cur.row) : fn } : cur);
       // r2 — an earlier add committed with other values: the entered values stay, and the operator decides
@@ -19711,7 +19791,7 @@
       const applyToSavedRow = () => setEditor(cur => cur?.conflict
         ? { mode: "edit", id: cur.conflict.id, row: { ...cur.row, status: cur.row.status || cur.conflict.status || "approved" }, stored: storedOf(cur.conflict) } : cur); // Save then sends the differences
       const addAsSeparateRow = () => setEditor(cur => cur?.conflict
-        ? { mode: "add", id: crypto.randomUUID(), row: cur.row } : cur);                                       // a new identity for a new intent
+        ? { mode: "add", id: newId(), row: cur.row } : cur);                                       // a new identity for a new intent
       const describeRow = (a) => [
         codeOf(a), a.approval_id ? `Approval ${a.approval_id}` : null, `${fmtD(a.start_date)} – ${fmtD(a.end_date)}`,
         `Kind ${a.unit_kind || a.unit_kind_effective || "—"}`,
