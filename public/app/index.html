@@ -40,6 +40,7 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.30 r3 (Greptile r3): if the spend-down status can't be loaded, the Benefits card says so (with Retry) instead of showing valid payments as no longer standing. Database side: sql/v20.0.30r3_benefits.sql. -->
   <!-- v20.0.30 r2 (Greptile r2): confirming unreadable bank rows is tied to the exact rows and mapping it was given for — change a column or the date format and it must be confirmed again; spend-downs show paid only while their payment still stands (from the database), with a prompt to link another when it doesn't; the asset response answers the close the alert is about (or this month's live warning). Database side: sql/v20.0.30r2_benefits.sql. -->
   <!-- v20.0.30 r1 (Greptile r1): a bank row that can't be read is never dropped — every non-blank row is counted and blocks the import until fixed; the close card shows only the accounts open in that month (as the database does) and refreshes when accounts change; "Accept all exact matches" reports what actually matched and stops on the first failure. Database side: sql/v20.0.30r1_close.sql (the seal enforced by triggers under the close's lock, the opening-balance chain, manager-only Form C witnesses, spend-down payments that cover it, asset responses dated after the close). -->
   <!-- v20.0.30 (PBA Release 2 — the monthly close; docs/pba-design.md v1.2, R2-1 … R2-7): the PBA tab gains a Monthly Close card for the month in view — per account: import the bank's CSV (columns mapped once per account and remembered; asked again if the layout changes) or enter the statement by hand; suggested matches with Accept all exact; make an entry from an unmatched bank line; explain an entry not on the statement; count cash on hand. Form B signs the reconciliation and seals the month (refused until everything reconciles, receipts are covered and enrollment is complete); Form C records the review with the Person (their words, their on-screen signature or a scan, or a recorded exception); Form D is the reviewer's pre-checked checklist with findings for the Compliance Director; Form G builds the report PDF (Forms B, C, D enclosed), stores it, and records when, to whom and how it was sent. Step chips show due day 5 / 10 / 15 / 30 in green / amber / red. A Benefits card: countable assets now, the asset alert's notices and plan, Medicaid spend-down, SSA payee-accounting reminders. Dashboard and Compliance → PBA list every Person's open close steps. Database side: sql/v20.0.30.sql. -->
@@ -19713,8 +19714,11 @@
           supabase.rpc("pba_spenddown_status", { p_person: clientId }),                         // r2: paid is derived
           supabase.from("pba_form_b").select("month").eq("person_id", clientId).order("month", { ascending: false }).limit(1),
         ]);
+        // r3: a failed status lookup is shown as a failure — never read as "the payment no longer stands"
+        const statusOk = !st.error && !sd.error;
         const paid = Object.fromEntries((st.data || []).map(x => [x.o_id, x.o_paid]));
-        setRows({ sd: (sd.data || []).map(x => ({ ...x, paid: !!paid[x.id] })), pr: pr.data || [], ar: ar.data || [], lastClose: lc.data?.[0]?.month || null });
+        setRows({ sd: (sd.data || []).map(x => ({ ...x, paid: statusOk ? !!paid[x.id] : null })), statusError: statusOk ? null : ((st.error || sd.error).message || "request failed"),
+                  pr: pr.data || [], ar: ar.data || [], lastClose: lc.data?.[0]?.month || null });
         if (!ct.error) setCountable(ct.data);
       };
       useEffect(() => { load(); }, [clientId, d.txns.length]);
@@ -19745,11 +19749,16 @@
             </div>
           )}
           {rows.ar.slice(0, 2).map(r => <div key={r.id} style={{ fontSize: 12, color: CB.textMid }}>Asset plan ({new Date(r.month + "T00:00:00").toLocaleDateString(undefined, { month: "short", year: "numeric" })}): {r.plan_detail} · by {fmtD(r.target_date)} · notices {fmtD(r.notices.person)}, {fmtD(r.notices.residential)}, {fmtD(r.notices.sc)}</div>)}
+          {rows.statusError && (
+            <div role="alert" style={{ fontSize: 12, color: CB.red, padding: "6px 0", display: "flex", gap: 10, alignItems: "center" }}>
+              Couldn't check spend-down payments ({rows.statusError}). <SecondaryButton onClick={load}>Retry</SecondaryButton>
+            </div>
+          )}
           {rows.sd.map(s => (
             <div key={s.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "6px 0", borderTop: `1px solid ${CB.border}`, flexWrap: "wrap" }}>
               <div style={{ fontSize: 13 }}>Spend-down {new Date(s.month + "T00:00:00").toLocaleDateString(undefined, { month: "short", year: "numeric" })}: {pbaMoney(s.amount)} due {fmtD(s.due_date)}
-                <span style={{ color: s.paid ? CB.green : s.due_date < ymd() ? CB.red : CB.textLight }}> · {s.paid ? "paid" : s.paid_txn_id ? "its payment no longer stands — link another" : s.due_date < ymd() ? "overdue" : "unpaid"}</span></div>
-              {!s.paid && access?.role === "manager" && <SecondaryButton onClick={() => setModal({ kind: "pay", sd: s, txn: "" })}>Link payment</SecondaryButton>}
+                <span style={{ color: s.paid === null ? CB.textLight : s.paid ? CB.green : s.due_date < ymd() ? CB.red : CB.textLight }}> · {s.paid === null ? "status unavailable" : s.paid ? "paid" : s.paid_txn_id ? "its payment no longer stands — link another" : s.due_date < ymd() ? "overdue" : "unpaid"}</span></div>
+              {s.paid === false && access?.role === "manager" && <SecondaryButton onClick={() => setModal({ kind: "pay", sd: s, txn: "" })}>Link payment</SecondaryButton>}
             </div>
           ))}
           {rows.pr.map(r => (
