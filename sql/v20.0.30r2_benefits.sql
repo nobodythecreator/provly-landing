@@ -391,6 +391,8 @@ BEGIN
     s_mgr   := pg_temp.v20030r2_test_insert('staff', jsonb_build_object('org_id', v_org, 'first_name', 'R32test', 'last_name', 'Manager'));
     PERFORM public._pba_start(v_person, 'voluntary', s_owner, 'owner');
     PERFORM public._pba_assign_role(v_person, s_mgr, 'manager', s_cd, 'compliance_director');
+    -- the test pins its own threshold (inside the rolled-back block), so a provider's setting can't change the expected result
+    PERFORM public._set_org_setting('pba.asset_alert_amount', '1500'::jsonb, s_owner, 'owner', v_org);
     PERFORM public._pba_save_account(v_bank, v_person, jsonb_build_object('kind', 'bank', 'titling', 'V20030R2 Selftest', 'opening_balance', 1900,
               'opening_date', '2001-01-01', 'not_provider_funds_attested', true), s_mgr, 'dsp');
 

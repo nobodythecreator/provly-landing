@@ -608,6 +608,8 @@ BEGIN
     UPDATE pba_enrollments SET started_on = v_jan WHERE person_id = v_person;
     PERFORM public._pba_assign_role(v_person, s_mgr, 'manager', s_cd, 'compliance_director');
     PERFORM public._pba_assign_role(v_person, s_rev, 'reviewer', s_cd, 'compliance_director');
+    -- the test pins its own threshold (inside the rolled-back block), so a provider's setting can't change the expected result
+    PERFORM public._set_org_setting('pba.asset_alert_amount', '1500'::jsonb, s_owner, 'owner', v_org);
     PERFORM public._pba_save_account(v_bank, v_person, jsonb_build_object('kind', 'bank', 'titling', 'V20030R1 Selftest', 'opening_balance', 1800,
               'opening_date', '2001-01-01', 'not_provider_funds_attested', true), s_mgr, 'dsp');
     PERFORM public._pba_save_account(v_bank2, v_person, jsonb_build_object('kind', 'bank', 'titling', 'V20030R1 Selftest savings',
