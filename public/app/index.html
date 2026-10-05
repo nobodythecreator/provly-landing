@@ -14,6 +14,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.27 r1 (Greptile r1): a client profile's open tab lives in the URL (#/client-profile/<id>/<tab>) — a warning link, a reload and the Back button all return to the same tab; Overview keeps the short URL. Database side: sql/v20.0.27r1_runout.sql (a run-out with units left is never shown as used up). -->
   <!-- v20.0.27 (renewals — docs/authorizations-design.md D2, D3, D4): each client gets a review list on the Authorizations tab (Medicaid, DWS, PCSP meeting, Other with a name; due date, last completed, note; "Mark Completed" records the date and takes the next due date in one write). A "Renewals & Budgets" card on the Dashboard and a Compliance tab, manage tier only, list budget ends (no later row entered), reviews due, and run-outs — at the actual pace after 30 days of history, plus rows whose units are all used — at 60 / 30 / 14 days. Each entry opens the client's Authorizations tab. Database side: sql/v20.0.27.sql (person_reviews, renewal_warnings). -->
   <!-- v20.0.26 r3 (Greptile r3): "Use these values on the saved row" keeps the saved row's status (pending / rejected stays as it is) unless the operator picked one in the add form; only a new row ever derives its status from the end date. -->
   <!-- v20.0.26 r2 (Greptile r2): when a retried Add 1056 Row finds its earlier request already on file, the form never closes on an assumption and never loses what the operator typed — if the saved row can't be read back the form stays open and says so; if it differs, the form keeps the entered values and shows the saved row beside them, and the operator chooses: apply these values to the saved row, or add them as a separate row. -->
@@ -19125,19 +19126,28 @@
         )},
       ];
 
+      // v20.0.27 r1 — the open tab lives in the URL, so a reload or Back returns to it
+      // (replaceState: switching tabs doesn't add history entries; Overview keeps the short URL)
+      const changeTab = (key) => {
+        setActiveTab(key);
+        const next = "#/client-profile/" + clientId + (key && key !== "overview" ? "/" + key : "");
+        if (window.location.hash !== next) { try { window.history.replaceState(null, "", next); } catch (_) {} }
+      };
+      const shownTab = tabs.some(t => t.key === activeTab) ? activeTab : "overview"; // an unknown tab in the URL opens Overview
+
       return (
         <>
           <ProfilePageShell
             entity={client}
             entityType="client"
             tabs={tabs}
-            activeTab={activeTab}
-            onTabChange={setActiveTab}
+            activeTab={shownTab}
+            onTabChange={changeTab}
             onBack={onBack}
             onEdit={() => setEditOpen(true)}
           />
           <ClientForm open={editOpen} onClose={() => { setEditOpen(false); loadClient(); }} onSaved={loadClient} editing={client}
-            onOpenAuthorizations={() => { setEditOpen(false); setActiveTab("authorizations"); }} />
+            onOpenAuthorizations={() => { setEditOpen(false); changeTab("authorizations"); }} />
         </>
       );
     }
@@ -21504,9 +21514,12 @@
     const PAGE_KEYS = ["dashboard", "staff", "clients", "intake", "schedule", "contexts", "training", "notes", "evv", "compliance", "incidents", "alerts", "medications", "goals", "billing", "finance", "docs", "ai", "messages", "migration", "settings", "staff-profile", "client-profile"];
     const parseHash = () => {
       const raw = (window.location.hash || "").replace(/^#\/?/, "");
-      const [p, id] = raw.split("/");
+      const [p, id, sub] = raw.split("/");
       if (!PAGE_KEYS.includes(p)) return { page: "dashboard", context: null };
-      if ((p === "staff-profile" || p === "client-profile") && id) {
+      if (p === "client-profile" && id) {
+        return { page: p, context: sub ? { id, profileTab: sub } : { id } }; // v20.0.27 r1 — #/client-profile/<id>/<tab>
+      }
+      if (p === "staff-profile" && id) {
         return { page: p, context: { id } };
       }
       if (p === "settings" && id) {
@@ -21515,7 +21528,7 @@
       return { page: p, context: null };
     };
     const writeHash = (target, context) => {
-      const next = "#/" + target + (context?.id ? "/" + context.id : context?.tab ? "/" + context.tab : ""); // v20.0.5r1
+      const next = "#/" + target + (context?.id ? "/" + context.id + (context.profileTab ? "/" + context.profileTab : "") : context?.tab ? "/" + context.tab : ""); // v20.0.5r1; v20.0.27 r1 — a client profile's tab
       if (window.location.hash !== next) {
         // pushState: the back button walks your page history like a real app
         try { window.history.pushState(null, "", next); } catch { window.location.hash = next; }
