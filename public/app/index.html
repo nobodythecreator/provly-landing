@@ -1,6 +1,31 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <script>
+    // v20.0.28 r3 — never a blank page. Installed before anything else loads.
+    //  · a script error before the first render (a library's, or the app's own) shows the screen at once;
+    //  · if the app never runs at all (Babel or React didn't load), nothing throws — so once the page
+    //    has loaded (by then the app has normally compiled, run and rendered) plus a few seconds,
+    //    a missing first render shows the screen too.
+    // A later successful render replaces the screen; __provlyStarted is set only after it.
+    (function () {
+      function showStartFailure() {
+        if (window.__provlyStarted) return;
+        var root = document.getElementById("root");
+        if (!root || root.getAttribute("data-start-failed")) return;
+        root.setAttribute("data-start-failed", "1");
+        root.innerHTML = '<div style="font-family:system-ui,-apple-system,sans-serif;max-width:520px;margin:15vh auto;padding:24px;text-align:center;color:#111">'
+          + '<div style="font-size:20px;font-weight:700;margin-bottom:8px">Provly couldn\u2019t start</div>'
+          + '<div style="font-size:14px;color:#555;margin-bottom:16px">Reload the page. If it keeps happening, update your browser or contact support.</div>'
+          + '<button onclick="location.reload()" style="padding:10px 18px;border-radius:8px;border:none;background:#000;color:#fff;font-size:14px;cursor:pointer">Reload</button></div>';
+      }
+      window.addEventListener("error", function (e) {
+        if (e && e.target && e.target !== window) return;   // a file that failed to load: the load check catches its effect
+        showStartFailure();                                 // before <body> exists this is a no-op; the load check covers it
+      });
+      window.addEventListener("load", function () { setTimeout(showStartFailure, 4000); });
+    })();
+  </script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Provly — DSPD Compliance Platform</title>
@@ -15,6 +40,8 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.28 r3 (Greptile on the hotfix): the startup-failure screen covers every way the app can fail to appear — its guard is the first script in <head>, the started flag is set only after the first render succeeds, and if the app never runs at all (Babel or React didn't load) a check after page load shows the screen instead of a blank page. -->
+  <!-- v20.0.28 r2 (hotfix — the blank page): the app's code runs inside its own function scope. v20.0.28 left let/const native, so the app's top-level `const supabase` collided with the `supabase` global the Supabase library declares, and the browser refused the whole script. Inside the function the names shadow instead of collide (only `supabase` overlapped; the app reads the library as window.supabase). If anything ever fails before the app first renders, a "Provly couldn't start — Reload" screen shows instead of a blank page. -->
   <!-- v20.0.28 r1 (Greptile r1): minimum browsers stated and compiled for — Chrome / Edge 79+, Firefox 60+, Safari / iOS 12+. Babel's env preset now targets exactly those (a custom "provly" preset), so older iPhones that can't parse ?. or ?? get them transformed, while everything those browsers run natively stays native. -->
   <!-- v20.0.28 (snappier): the Provly logo is a Home button (sidebar and mobile bar) — it opens the Dashboard, or the first page your role can see. Faster start: the app's code is compiled for modern browsers only (Babel's react preset, not the ES5 down-compile), which is less work on every load and runs async code natively; the PDF and CSV libraries load in parallel without blocking the page (defer); the browser opens its connection to the database while the app loads (preconnect). Faster feel: entrance animations finish in 0.16s with no staggered delays, and modals open in 0.14s. -->
   <!-- v20.0.27 r1 (Greptile r1): a client profile's open tab lives in the URL (#/client-profile/<id>/<tab>) — a warning link, a reload and the Back button all return to the same tab; Overview keeps the short URL. Database side: sql/v20.0.27r1_runout.sql (a run-out with units left is never shown as used up). -->
@@ -151,6 +178,11 @@
     })();
   </script>
   <script type="text/babel" data-presets="provly">
+    // v20.0.28 r2 (hotfix) — the app runs inside its own function scope. With let/const left
+    // native, a top-level `const supabase` collides with the `supabase` global the Supabase
+    // library declares, and the whole script is refused (the blank page). Inside the function
+    // the app's names shadow the globals instead of colliding with them.
+    (function () {
     const { useState, useEffect, useContext, createContext, useCallback, useRef, useMemo } = React;
 
     // v20.0.14 / r1 — BUSINESS calendar dates. Provly's records are Utah
@@ -21920,6 +21952,8 @@
       <AuthProvider><ToastProvider><App /></ToastProvider></AuthProvider>,
       document.getElementById("root")
     );
+    window.__provlyStarted = true;                                  // v20.0.28 r3 — only after the first render succeeded
+    })(); // v20.0.28 r2 — end of the app's function scope
   </script>
 </body>
 </html>
