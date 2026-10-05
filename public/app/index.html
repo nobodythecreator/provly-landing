@@ -40,6 +40,7 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.30 (PBA Release 2 — the monthly close; docs/pba-design.md v1.2, R2-1 … R2-7): the PBA tab gains a Monthly Close card for the month in view — per account: import the bank's CSV (columns mapped once per account and remembered; asked again if the layout changes) or enter the statement by hand; suggested matches with Accept all exact; make an entry from an unmatched bank line; explain an entry not on the statement; count cash on hand. Form B signs the reconciliation and seals the month (refused until everything reconciles, receipts are covered and enrollment is complete); Form C records the review with the Person (their words, their on-screen signature or a scan, or a recorded exception); Form D is the reviewer's pre-checked checklist with findings for the Compliance Director; Form G builds the report PDF (Forms B, C, D enclosed), stores it, and records when, to whom and how it was sent. Step chips show due day 5 / 10 / 15 / 30 in green / amber / red. A Benefits card: countable assets now, the asset alert's notices and plan, Medicaid spend-down, SSA payee-accounting reminders. Dashboard and Compliance → PBA list every Person's open close steps. Database side: sql/v20.0.30.sql. -->
   <!-- v20.0.29 r1 (Greptile r1): new ids come from newId() — crypto.randomUUID where the browser has it, else a v4 UUID from crypto.getRandomValues — so every form opens on the stated minimum browsers (iOS 12 has no randomUUID). A purchaser signs their own Lost Receipt Affidavits from a Dashboard card, PBA role or not. Compliance → PBA lists staff-level flags (the affidavit pattern) apart from each Person's. The ledger's request picker offers only open approvals (plus the one an entry already spends). Database side: sql/v20.0.29r1_pba.sql. -->
   <!-- v20.0.29 (PBA Release 1 — the record; docs/pba-design.md v1.1, requirements docs/pba-module-spec-v1.md): a PBA tab on the client profile, shown only to the Person's assigned PBA Manager, Administrative Reviewer and Quarterly Auditor, the Compliance Director and the owner. Start a PBA record (it opens as Pending enrollment until the fiduciary proof and a signed Natural Support Determination — Form A — are filed); assign the three roles (the database refuses one person in two roles and the Person's host in any); accounts with titling and the not-provider-funds attestation; the ledger (deposits, purchases, transfers, cash with who received it and why; receipts by camera into a private add-only bucket, fingerprinted; the Lost Receipt Affidavit signed by the purchaser and countersigned; entries editable with a reason until the month closes, voids instead of deletes, reversing entries after); purchase requests where the blocks live (the Person's own words, this month's needs met, PBA Manager approval); signatures in Provly (staff attest; the Person or guardian signs on screen or by scan); open flags on the tab and on Compliance → PBA. Database side: sql/v20.0.29.sql. -->
   <!-- v20.0.28 r3 (Greptile on the hotfix): the startup-failure screen covers every way the app can fail to appear — its guard is the first script in <head>, the started flag is set only after the first render succeeds, and if the app never runs at all (Babel or React didn't load) a check after page load shows the screen instead of a blank page. -->
@@ -1882,7 +1883,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.29</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.30</span>
               </div>
             </button>
             {isMobile && (
@@ -2174,7 +2175,7 @@
       const [upcomingAlerts, setUpcomingAlerts] = useState([]);
       const [loading, setLoading] = useState(true);
       const { isMobile, isTablet } = useMobile();
-      const { brand, accessTier } = useAuth();                     // v20.0.27 — the renewals card is manage tier
+      const { brand, accessTier, role } = useAuth();               // v20.0.27 — the renewals card is manage tier; v20.0.30 — PBA close for owner / CD
 
       useEffect(() => { loadDashboard(); }, []);
 
@@ -2265,6 +2266,7 @@
                 <StatCard label="Authorizations" value={stats.auths} icon={icons.fileText} color={CB.navy} delay={0.15} onClick={onNavigate ? () => onNavigate("clients") : undefined} />
               </div>
               <PbaAffidavitsToSignCard /> {/* v20.0.29 r1 — shows only when you have affidavits to sign */}
+              {(role === "owner" || role === "compliance_director") && <PbaCyclesCard onNavigate={onNavigate} compact />} {/* v20.0.30 — shows only when a close step is due soon or overdue */}
               {accessTier === "manage" && <RenewalsCard onNavigate={onNavigate} compact />} {/* v20.0.27 (D3) */}
               <div style={{
                 background: CB.white, borderRadius: 16, padding: 24,
@@ -18870,6 +18872,9 @@
       pending_enrollment: "Pending enrollment", missing_receipt: "Missing receipt", third_party_pattern: "Third-party pattern",
       affidavit_pattern: "Affidavit pattern", roles_incomplete: "Roles incomplete", host_conflict: "Host conflict",
       recorded_over_block: "Recorded over a block",
+      step_overdue: "Close step overdue", asset_alert: "Asset alert", asset_warning: "Asset warning", person_did_not_sign: "Person did not sign",
+      finding_open: "Review finding open", spenddown_overdue: "Spend-down overdue", payee_report_overdue: "SSA payee report overdue",
+      reviewer_billed: "Reviewer billed PBA time",
     };
     const pbaMoney = (n) => `$${Number(n || 0).toFixed(2)}`;
     const pbaRoleLabel = (r) => PBA_ROLES.find(x => x.value === r)?.label || r;
@@ -19008,6 +19013,773 @@
               </div>
             </>}
           </Modal>
+        </div>
+      );
+    }
+
+
+    // ═══════════════════════════════════════════════════════════════
+    // v20.0.30 — PBA RELEASE 2: THE MONTHLY CLOSE (docs/pba-design.md v1.2, R2-1 … R2-7)
+    // Statements (column mapping per account), matching, Form B (signing seals the month),
+    // Form C (the Person's review), Form D (the reviewer's checklist + findings), Form G (the
+    // SC report PDF + how it was sent), and the benefits checks. The database decides; this asks.
+    // ═══════════════════════════════════════════════════════════════
+    const PBA_STEPS = [
+      { key: "B", label: "Reconciliation (Form B)", day: 5 },
+      { key: "C", label: "Review with the Person (Form C)", day: 10 },
+      { key: "D", label: "Administrative review (Form D)", day: 15 },
+      { key: "G", label: "SC report (Form G)", day: 30 },
+    ];
+    const PBA_DATE_FORMATS = ["MM/DD/YYYY", "YYYY-MM-DD", "DD/MM/YYYY"];
+    const pbaStepColor = (st) => st === "done" ? CB.green : st === "overdue" ? CB.red : st === "due_soon" ? CB.amber : CB.textLight;
+    const pbaMonthStart = (ym) => `${ym}-01`;
+    const pbaMonthEnd = (ym) => { const [y, m] = ym.split("-").map(Number); return ymdAdd(`${ym}-01`, new Date(Date.UTC(y, m, 0)).getUTCDate() - 1); };
+    const pbaMonthLabel = (ym) => new Date(`${ym}-01T00:00:00`).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+    // a bank file's amount text → a number (handles $, commas, (parentheses) and trailing minus)
+    const pbaParseAmount = (v) => {
+      if (v == null) return null;
+      let t = String(v).trim(); if (!t) return null;
+      let neg = false;
+      if (/^\(.*\)$/.test(t)) { neg = true; t = t.slice(1, -1); }
+      if (/-$/.test(t)) { neg = true; t = t.slice(0, -1); }
+      t = t.replace(/[$,\s]/g, "");
+      if (t.startsWith("-")) { neg = !neg; t = t.slice(1); }
+      if (t.startsWith("+")) t = t.slice(1);
+      if (!/^\d*\.?\d+$/.test(t)) return null;
+      const n = Math.round(parseFloat(t) * 100) / 100;
+      return neg ? -n : n;
+    };
+    const pbaParseDate = (v, fmt) => {
+      const t = String(v || "").trim(); let y, m, d;
+      if (fmt === "YYYY-MM-DD") { const x = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); if (!x) return null; [y, m, d] = [x[1], x[2], x[3]]; }
+      else { const x = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/); if (!x) return null; [m, d, y] = fmt === "DD/MM/YYYY" ? [x[2], x[1], x[3]] : [x[1], x[2], x[3]]; if (y.length === 2) y = "20" + y; }
+      const iso = `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+      return /^\d{4}-\d{2}-\d{2}$/.test(iso) && !isNaN(new Date(iso + "T00:00:00")) ? iso : null;
+    };
+    const pbaLinesFromRows = (rows, map) => rows.map(r => {
+      const date = pbaParseDate(r[map.date_col], map.date_format);
+      let amount = map.amount_col !== "" && map.amount_col != null ? pbaParseAmount(r[map.amount_col])
+        : ((pbaParseAmount(r[map.credit_col]) || 0) - Math.abs(pbaParseAmount(r[map.debit_col]) || 0));
+      if (amount != null) amount = Math.round(amount * 100) / 100;
+      return { date, description: map.desc_col !== "" && map.desc_col != null ? String(r[map.desc_col] || "").trim() : "", amount };
+    }).filter(l => l.date || l.amount);
+
+    function PbaMonthlyClose({ clientId, client, access, d, month, onChanged }) {
+      const { addToast } = useToast();
+      const { orgId } = useAuth();
+      const [m, setM] = useState(null);                              // this month's close data
+      const [loadError, setLoadError] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const [modal, setModal] = useState(null);
+      const padRef = useRef(null);
+      const seq = useRef(0);
+      const isManager = access?.role === "manager";
+      const isReviewer = access?.role === "reviewer";
+      const canAnswer = !!(access?.owner || (access?.compliance && !isManager));
+      const ms = pbaMonthStart(month), me = pbaMonthEnd(month);
+      const isPast = month < ymd().slice(0, 7);
+
+      const load = async () => {
+        const mine = ++seq.current;
+        setLoadError(null);
+        const q = (p) => p.then(r => { if (r.error) throw new Error(r.error.message); return r.data; });
+        try {
+          const accts = d.accounts.filter(a => !a.closed_on || a.closed_on >= ms);
+          const [stmts, maps, counts, fb, fc, fd, fg, finds, cyc, sugg, ...recons] = await Promise.all([
+            q(supabase.from("pba_statements").select("*, pba_statement_lines(*)").eq("person_id", clientId).eq("month", ms)),
+            q(supabase.from("pba_statement_mappings").select("*").eq("person_id", clientId)),
+            q(supabase.from("pba_cash_counts").select("*").eq("person_id", clientId).eq("month", ms)),
+            q(supabase.from("pba_form_b").select("*").eq("person_id", clientId).eq("month", ms).limit(1)),
+            q(supabase.from("pba_form_c").select("*").eq("person_id", clientId).eq("month", ms).limit(1)),
+            q(supabase.from("pba_form_d").select("*").eq("person_id", clientId).eq("month", ms).limit(1)),
+            q(supabase.from("pba_form_g").select("*").eq("person_id", clientId).eq("month", ms).limit(1)),
+            q(supabase.from("pba_findings").select("*").eq("person_id", clientId).eq("month", ms).order("created_at")),
+            q(supabase.rpc("pba_cycle", { p_person: clientId })),
+            q(supabase.rpc("pba_match_suggestions", { p_person: clientId, p_month: ms })),
+            ...accts.map(a => q(supabase.rpc("pba_recon", { p_account: a.id, p_month: ms }))),
+          ]);
+          if (mine !== seq.current) return;
+          setM({ accts, stmts: stmts || [], maps: Object.fromEntries((maps || []).map(x => [x.account_id, x])), counts: counts || [],
+                 fb: fb?.[0] || null, fc: fc?.[0] || null, fd: fd?.[0] || null, fg: fg?.[0] || null, finds: finds || [],
+                 cycle: (cyc || []).filter(c => c.o_month === ms), sugg: sugg || [],
+                 recon: Object.fromEntries(accts.map((a, i) => [a.id, recons[i]])) });
+        } catch (e) { if (mine === seq.current) setLoadError(e.message || "request failed"); }
+      };
+      useEffect(() => { setM(null); setModal(null); load(); }, [clientId, month, d.txns.length, d.sigs.length]);
+
+      const run = async (fn, args, ok) => {
+        if (busy) return false;
+        setBusy(true);
+        let res;
+        try { res = await supabase.rpc(fn, args); } catch (e) { res = { error: { message: e?.message || "network error" } }; }
+        setBusy(false);
+        if (res.error) { addToast(res.error.message || "Not saved", "error"); return false; }
+        if (ok) addToast(ok, "success");
+        load(); onChanged?.();
+        return true;
+      };
+      const upload = async (purpose, file) => {
+        setBusy(true);
+        try { return await uploadPbaFile({ orgId, personId: clientId, purpose, file }); }
+        catch (e) { addToast(e.message || "Upload failed", "error"); return null; }
+        finally { setBusy(false); }
+      };
+      const setMd = (patch) => setModal(cur => cur ? { ...cur, ...patch } : cur);
+      const fmtD = (x) => x ? new Date(x + "T00:00:00").toLocaleDateString() : "—";
+      const acctName = (id) => { const a = d.accounts.find(x => x.id === id); return a ? `${PBA_ACCOUNT_KINDS.find(k => k.value === a.kind)?.label || a.kind}${a.last4 ? ` ··${a.last4}` : ""}${a.institution ? ` · ${a.institution}` : ""}` : "—"; };
+      const txnById = (id) => d.txns.find(t => t.id === id);
+      const txnLabel = (t) => t ? `${fmtD(t.entry_date)} · ${pbaTypeLabel(t.type)}${t.payee ? ` · ${t.payee}` : ""} · ${pbaMoney(t.amount)}` : "—";
+      const clientName = `${client?.first_name || ""} ${client?.last_name || ""}`.trim() || "the Person";
+
+      if (loadError) return <PbaCard title={`Monthly Close — ${pbaMonthLabel(month)}`}><div role="alert" style={{ color: CB.red, fontSize: 13 }}>Couldn't load the close ({loadError}). <SecondaryButton onClick={load}>Retry</SecondaryButton></div></PbaCard>;
+      if (!m) return <PbaCard title={`Monthly Close — ${pbaMonthLabel(month)}`}><div style={{ display: "flex", justifyContent: "center", padding: 20 }}><Spinner size={20} /></div></PbaCard>;
+
+      const sealed = !!m.fb;
+      const stmtFor = (accId) => m.stmts.find(s => s.account_id === accId);
+      const stepStatus = (k) => m.cycle.find(c => c.o_step === k);
+      const effectOn = (t, accId) => pbaSign(t, accId) * Number(t.amount);
+      const sigsOf = (type, id) => d.sigs.filter(s => s.form_type === type && s.form_id === id);
+      const fcPersonSigned = m.fc && sigsOf("form_c", m.fc.id).some(s => s.capacity === "person" || s.capacity === "guardian");
+
+      // ── statement import: read the CSV, map columns (once per account), preview, import ──
+      const startImport = (acc, file) => {
+        if (!file) return;
+        Papa.parse(file, { skipEmptyLines: "greedy", complete: (res) => {
+          const rows = (res.data || []).filter(r => Array.isArray(r) && r.some(c => String(c || "").trim()));
+          if (rows.length < 2) return addToast("That file has no rows", "error");
+          const headers = rows[0].map(h => String(h || "").trim());
+          const saved = m.maps[acc.id];
+          const same = saved && JSON.stringify(saved.headers) === JSON.stringify(headers);
+          const guess = (re) => { const i = headers.findIndex(h => re.test(h)); return i >= 0 ? String(i) : ""; };
+          const map = same ? { date_col: String(saved.date_col), desc_col: saved.desc_col == null ? "" : String(saved.desc_col), amount_col: saved.amount_col == null ? "" : String(saved.amount_col),
+                               debit_col: saved.debit_col == null ? "" : String(saved.debit_col), credit_col: saved.credit_col == null ? "" : String(saved.credit_col), date_format: saved.date_format }
+            : { date_col: guess(/date/i) || "0", desc_col: guess(/desc|memo|payee|name/i), amount_col: guess(/^amount$|amount/i), debit_col: guess(/debit|withdraw/i), credit_col: guess(/credit|deposit/i), date_format: "MM/DD/YYYY" };
+          setModal({ kind: "import", acc, file, headers, rows: rows.slice(1), map, remapped: !!saved && !same, mapNeeded: !same,
+                     period_start: ms, period_end: me, opening: "", closing: "", id: newId() });
+        }, error: (err) => addToast(err?.message || "Couldn't read the file", "error") });
+      };
+
+      return (
+        <PbaCard title={`Monthly Close — ${pbaMonthLabel(month)}`} actions={sealed ? <Badge text="Sealed" color={CB.green} /> : null}>
+          {/* the four steps */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 8, marginBottom: 14 }}>
+            {PBA_STEPS.map(s => {
+              const st = stepStatus(s.key);
+              const status = st?.o_status || (isPast ? "open" : "not yet");
+              return (
+                <div key={s.key} style={{ padding: "8px 10px", borderRadius: 10, border: `1px solid ${pbaStepColor(status)}50`, background: `${pbaStepColor(status)}0d` }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: pbaStepColor(status) }}>{status === "done" ? "✓ Done" : status === "overdue" ? "Overdue" : status === "due_soon" ? "Due soon" : status === "not yet" ? "After month end" : "Open"}</div>
+                  <div style={{ fontSize: 12, color: CB.text }}>{s.label}</div>
+                  {st?.o_due && <div style={{ fontSize: 11, color: CB.textLight }}>Due {fmtD(st.o_due)}</div>}
+                </div>
+              );
+            })}
+          </div>
+          {!isPast && <div style={{ fontSize: 13, color: CB.textMid, marginBottom: 10 }}>{pbaMonthLabel(month)} hasn't ended. Statements and the close open after the month ends — enter its ledger entries now.</div>}
+
+          {/* ── reconciliation, account by account ── */}
+          {isPast && m.accts.map(acc => {
+            const r = m.recon[acc.id] || {};
+            const st = stmtFor(acc.id);
+            if (acc.kind === "cash") {
+              const cnt = m.counts.find(c => c.account_id === acc.id);
+              return (
+                <div key={acc.id} style={{ padding: 12, borderRadius: 10, border: `1px solid ${CB.border}`, marginBottom: 10 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                    <strong style={{ fontSize: 13 }}>{acctName(acc.id)}</strong>
+                    <span style={{ fontSize: 12, color: r.ready ? CB.green : CB.red }}>{r.ready ? "Reconciled" : cnt ? `Count differs by ${pbaMoney(r.difference)}` : "Needs the month-end count"}</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: CB.textMid, marginTop: 4 }}>Ledger at month end {pbaMoney(r.ledger_closing)}{cnt ? ` · counted ${pbaMoney(cnt.counted)}${cnt.note ? ` (${cnt.note})` : ""}` : ""}</div>
+                  {isManager && !sealed && <div style={{ marginTop: 6 }}><SecondaryButton onClick={() => setModal({ kind: "count", acc, counted: cnt ? String(cnt.counted) : "", note: cnt?.note || "" })}>{cnt ? "Change count" : "Record count"}</SecondaryButton></div>}
+                </div>
+              );
+            }
+            const lines = (st?.pba_statement_lines || []).slice().sort((a, b) => a.line_no - b.line_no);
+            const unmatched = lines.filter(l => !l.matched_txn_id);
+            const exact = m.sugg.filter(s => s.o_exact && unmatched.some(l => l.id === s.o_line_id));
+            const matchedTxnIds = new Set(lines.filter(l => l.matched_txn_id).map(l => l.matched_txn_id));
+            const openEntries = d.txns.filter(t => t.status === "active" && (t.account_id === acc.id || t.to_account_id === acc.id)
+              && t.entry_date <= (st?.period_end || me) && !matchedTxnIds.has(t.id));
+            return (
+              <div key={acc.id} style={{ padding: 12, borderRadius: 10, border: `1px solid ${CB.border}`, marginBottom: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                  <strong style={{ fontSize: 13 }}>{acctName(acc.id)}</strong>
+                  {st ? <span style={{ fontSize: 12, color: r.ready ? CB.green : CB.amber }}>{r.ready ? "Reconciled" : `${r.unmatched_lines || 0} unmatched line(s) · ${r.unexplained_entries || 0} unexplained entr${r.unexplained_entries === 1 ? "y" : "ies"} · off by ${pbaMoney(r.difference)}`}</span>
+                       : <span style={{ fontSize: 12, color: CB.red }}>No statement yet</span>}
+                </div>
+                {!st && isManager && !sealed && (
+                  <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
+                    <label style={{ fontSize: 13, color: CB.blue, cursor: "pointer", fontWeight: 600 }}>
+                      {icons.upload({ size: 13 })} Import statement file (CSV)
+                      <input type="file" accept=".csv,text/csv" style={{ display: "none" }} onChange={ev => { startImport(acc, ev.target.files?.[0]); ev.target.value = ""; }} />
+                    </label>
+                    <SecondaryButton onClick={() => setModal({ kind: "manual", acc, id: newId(), period_start: ms, period_end: me, opening: "", closing: "", lines: [{ date: "", description: "", amount: "" }] })}>Enter manually</SecondaryButton>
+                  </div>
+                )}
+                {st && (
+                  <>
+                    <div style={{ fontSize: 12, color: CB.textMid, marginTop: 4 }}>
+                      Statement {fmtD(st.period_start)} – {fmtD(st.period_end)} · {pbaMoney(st.opening_balance)} → {pbaMoney(st.closing_balance)} · ledger {pbaMoney(r.ledger_closing)}
+                      {Number(r.outstanding || 0) !== 0 && ` · outstanding ${pbaMoney(r.outstanding)}`}
+                    </div>
+                    {isManager && !sealed && exact.length > 0 && <div style={{ marginTop: 8 }}><SecondaryButton onClick={async () => {
+                      for (const s of exact) { const { error } = await supabase.rpc("pba_match", { p_line: s.o_line_id, p_txn: s.o_txn_id }); if (error) { addToast(error.message, "error"); break; } }
+                      addToast(`${exact.length} exact match${exact.length === 1 ? "" : "es"} accepted`, "success"); load();
+                    }}>Accept all exact matches ({exact.length})</SecondaryButton></div>}
+                    {unmatched.map(l => {
+                      const sg = m.sugg.filter(s => s.o_line_id === l.id);
+                      return (
+                        <div key={l.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "6px 0", borderTop: `1px solid ${CB.border}`, flexWrap: "wrap" }}>
+                          <div style={{ fontSize: 13 }}>{fmtD(l.line_date)} · {l.description || "—"} · <strong style={{ color: l.amount > 0 ? CB.green : CB.text }}>{l.amount > 0 ? "+" : "−"}{pbaMoney(Math.abs(l.amount))}</strong>
+                            {sg.length > 0 && <span style={{ fontSize: 12, color: CB.textMid }}> · suggested: {txnLabel(txnById(sg[0].o_txn_id))}</span>}</div>
+                          {isManager && !sealed && <div style={{ display: "flex", gap: 6 }}>
+                            {sg.length > 0 && <SecondaryButton onClick={() => run("pba_match", { p_line: l.id, p_txn: sg[0].o_txn_id }, "Matched")}>Match</SecondaryButton>}
+                            <SecondaryButton onClick={() => setModal({ kind: "pick", line: l, acc, choice: "" })}>Pick entry</SecondaryButton>
+                            <SecondaryButton onClick={() => setModal({ kind: "fromLine", line: l, id: newId(), type: l.amount > 0 ? "deposit" : "withdrawal", category: "", payee: l.description || "", beneficiary: "person", beneficiary_name: "" })}>Make entry</SecondaryButton>
+                          </div>}
+                        </div>
+                      );
+                    })}
+                    {openEntries.filter(t => effectOn(t, acc.id) !== 0).map(t => (
+                      <div key={t.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "6px 0", borderTop: `1px solid ${CB.border}`, flexWrap: "wrap" }}>
+                        <div style={{ fontSize: 13 }}><span style={{ color: CB.amber, fontWeight: 700 }}>Not on the statement: </span>{txnLabel(t)}</div>
+                        {isManager && !sealed && <SecondaryButton onClick={() => setModal({ kind: "explain", txn: t, acc, text: "" })}>Explain</SecondaryButton>}
+                      </div>
+                    ))}
+                    {isManager && !sealed && <div style={{ display: "flex", gap: 10, marginTop: 8, flexWrap: "wrap" }}>
+                      <SecondaryButton onClick={() => setModal({ kind: "addLine", st, date: st.period_end, description: "", amount: "" })}>Add a line</SecondaryButton>
+                      <SecondaryButton color={CB.red} onClick={() => { if (confirm("Discard this statement and its matches? The uploaded file stays on file.")) run("pba_discard_statement", { p_statement: st.id }, "Statement discarded"); }}>Discard statement</SecondaryButton>
+                    </div>}
+                  </>
+                )}
+              </div>
+            );
+          })}
+
+          {/* ── the forms ── */}
+          {isPast && (
+            <div style={{ display: "grid", gap: 8, marginTop: 6 }}>
+              {/* Form B */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "8px 0", borderTop: `1px solid ${CB.border}` }}>
+                <div style={{ fontSize: 13 }}><strong>Form B · Reconciliation</strong>{m.fb ? ` — signed ${new Date(m.fb.created_at).toLocaleDateString()} · countable assets ${pbaMoney(m.fb.countable)}` : " — signing it seals the month"}</div>
+                {!m.fb && isManager && <PrimaryButton onClick={() => setModal({ kind: "signB", name: "", agree: false })}>Sign &amp; Close Month</PrimaryButton>}
+              </div>
+              {/* Form C */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "8px 0", borderTop: `1px solid ${CB.border}` }}>
+                <div style={{ fontSize: 13 }}><strong>Form C · Review with {clientName}</strong>
+                  {m.fc ? ` — ${fmtD(m.fc.review_date)} (${m.fc.mode === "virtual" ? "virtual" : "in person"})${fcPersonSigned ? " · signed by the Person" : m.fc.exception_reason ? ` · not signed: ${m.fc.exception_reason}` : ""}` : ""}
+                  {m.fc?.person_comments && <div style={{ fontSize: 12, color: CB.textMid, fontStyle: "italic" }}>“{m.fc.person_comments}”</div>}</div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  {!m.fc && m.fb && isManager && <PrimaryButton onClick={() => setModal({ kind: "formC", review_date: ymd(), mode: "in_person", attendees: "", comments: "", signer: "person", signerName: clientName, exception: "", useException: false, scan: null, name: "", agree: false })}>Complete Review</PrimaryButton>}
+                  {m.fc && !fcPersonSigned && <SecondaryButton onClick={() => setModal({ kind: "signC", signer: "person", name: clientName, agree: false, scan: null })}>Add Person's signature</SecondaryButton>}
+                </div>
+              </div>
+              {/* Form D */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "8px 0", borderTop: `1px solid ${CB.border}` }}>
+                <div style={{ fontSize: 13 }}><strong>Form D · Administrative review</strong>{m.fd ? ` — signed ${new Date(m.fd.created_at).toLocaleDateString()} · ${m.finds.length} finding${m.finds.length === 1 ? "" : "s"}` : ""}</div>
+                {!m.fd && m.fc && isReviewer && <PrimaryButton onClick={async () => {
+                  const { data, error } = await supabase.rpc("pba_form_d_prechecks", { p_person: clientId, p_month: ms });
+                  if (error) return addToast(error.message, "error");
+                  setModal({ kind: "formD", pre: data || {}, confirm: Object.fromEntries(Object.keys(data || {}).map(k => [k, !!data[k].ok])), notes: {}, findings: "", name: "", agree: false });
+                }}>Complete Review</PrimaryButton>}
+              </div>
+              {m.finds.map(f => (
+                <div key={f.id} style={{ fontSize: 13, padding: "6px 10px", borderRadius: 8, background: f.responded_at ? CB.cream : `${CB.amber}10`, marginLeft: 12 }}>
+                  <strong>Finding:</strong> {f.finding}
+                  {f.response ? <div style={{ fontSize: 12, color: CB.textMid }}>Response: {f.response}</div>
+                    : canAnswer ? <div style={{ marginTop: 4 }}><SecondaryButton onClick={() => setModal({ kind: "answer", finding: f, text: "" })}>Respond</SecondaryButton></div>
+                    : <div style={{ fontSize: 12, color: CB.amber }}>Awaiting the Compliance Director</div>}
+                </div>
+              ))}
+              {/* Form G */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "8px 0", borderTop: `1px solid ${CB.border}` }}>
+                <div style={{ fontSize: 13 }}><strong>Form G · SC report</strong>{m.fg ? ` — sent ${fmtD(m.fg.sent_on)} to ${m.fg.sent_to_name} (${m.fg.method})` : ""}
+                  {m.fg && d.files[m.fg.file_id] && <button onClick={() => openPbaFile(d.files[m.fg.file_id].storage_path, addToast)} style={{ background: "none", border: "none", color: CB.blue, cursor: "pointer", fontSize: 12, fontFamily: "inherit" }}>{icons.eye({ size: 12 })} View PDF</button>}</div>
+                {!m.fg && m.fd && isManager && <PrimaryButton onClick={() => setModal({ kind: "formG", step: "build", sent_on: ymd(), to_name: client?.support_coordinator || "", to_email: client?.support_coordinator_email || "", method: "Secure email", file: null })}>Build &amp; Record Report</PrimaryButton>}
+              </div>
+            </div>
+          )}
+
+          {modal && <PbaCloseModals modal={modal} setModal={setModal} setMd={setMd} busy={busy} run={run} upload={upload} padRef={padRef}
+            clientId={clientId} client={client} d={d} m={m} month={month} ms={ms} acctName={acctName} txnLabel={txnLabel} addToast={addToast} effectOn={effectOn} />}
+        </PbaCard>
+      );
+    }
+
+    function PbaCloseModals({ modal, setModal, setMd, busy, run, upload, padRef, clientId, client, d, m, month, ms, acctName, txnLabel, addToast, effectOn }) {
+      const close = () => setModal(null);
+      const done = async (fn, args, msg) => { if (await run(fn, args, msg)) setModal(null); };
+      const footer = (onSave, label = "Save") => (
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 12 }}>
+          <SecondaryButton onClick={close}>Cancel</SecondaryButton>
+          <PrimaryButton loading={busy} onClick={onSave}>{label}</PrimaryButton>
+        </div>
+      );
+      const attest = (text, who = "I am signing as myself, and I attest to the statement above.") => (
+        <>
+          <div style={{ fontSize: 13, padding: "10px 12px", borderRadius: 10, background: CB.cream, margin: "10px 0" }}>{text}</div>
+          <FormField label="Type your full name" required><input style={fieldStyle} value={modal.name || ""} onChange={e => setMd({ name: e.target.value })} /></FormField>
+          <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, cursor: "pointer" }}>
+            <input type="checkbox" checked={!!modal.agree} onChange={e => setMd({ agree: e.target.checked })} /><span>{who}</span>
+          </label>
+        </>
+      );
+      const signedOk = () => { if (!(modal.name || "").trim()) { addToast("Type your full name", "error"); return false; } if (!modal.agree) { addToast("Tick the attestation to sign", "error"); return false; } return true; };
+      const clientName = `${client?.first_name || ""} ${client?.last_name || ""}`.trim() || "the Person";
+      const fmtD = (x) => x ? new Date(x + "T00:00:00").toLocaleDateString() : "—";
+      const title = { import: "Import Statement", manual: "Enter Statement", count: "Cash Count", pick: "Match a Statement Line", fromLine: "Make an Entry from the Line",
+        explain: "Explain an Entry", addLine: "Add a Statement Line", signB: `Sign the ${pbaMonthLabel(month)} Reconciliation`, formC: "Monthly Review with the Person (Form C)",
+        signC: "The Person's Signature", formD: "Administrative Review (Form D)", answer: "Respond to the Finding", formG: "SC Report (Form G)" }[modal.kind];
+      let body = null;
+
+      if (modal.kind === "import") {
+        const mp = modal.map;
+        const lines = pbaLinesFromRows(modal.rows, mp);
+        const bad = lines.filter(l => !l.date || l.amount == null || l.amount === 0).length;
+        const sel = (k) => (
+          <select style={fieldStyle} value={mp[k]} onChange={e => setMd({ map: { ...mp, [k]: e.target.value } })}>
+            <option value="">—</option>{modal.headers.map((h, i) => <option key={i} value={String(i)}>{h || `Column ${i + 1}`}</option>)}
+          </select>
+        );
+        const save = async () => {
+          if (mp.amount_col === "" && (mp.debit_col === "" || mp.credit_col === "")) return addToast("Choose the amount column, or both the debit and credit columns", "error");
+          if (bad > 0) return addToast(`${bad} line(s) couldn't be read — check the date format and columns`, "error");
+          if (modal.opening === "" || modal.closing === "") return addToast("Enter the statement's beginning and ending balances", "error");
+          const mapping = { headers: modal.headers, date_col: Number(mp.date_col), desc_col: mp.desc_col === "" ? null : Number(mp.desc_col),
+            amount_col: mp.amount_col === "" ? null : Number(mp.amount_col), debit_col: mp.amount_col !== "" || mp.debit_col === "" ? null : Number(mp.debit_col),
+            credit_col: mp.amount_col !== "" || mp.credit_col === "" ? null : Number(mp.credit_col), date_format: mp.date_format };
+          const okMap = await run("pba_save_mapping", { p_account: modal.acc.id, p_map: mapping }); if (!okMap) return;
+          const up = await upload("statement", modal.file); if (!up) return;
+          done("pba_import_statement", { p_id: modal.id, p_account: modal.acc.id, p_month: ms, p_data: { source: "import", file_id: up.id,
+            period_start: modal.period_start, period_end: modal.period_end, opening_balance: Number(modal.opening), closing_balance: Number(modal.closing), lines } },
+            `${lines.length} statement lines imported`);
+        };
+        body = (
+          <>
+            {modal.remapped && <div style={{ fontSize: 12, color: CB.amber, marginBottom: 8 }}>This file's columns differ from the last import for this account — check the mapping.</div>}
+            {modal.mapNeeded ? (
+              <>
+                <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 8 }}>Tell Provly which column is which. It remembers this for {acctName(modal.acc.id)}.</div>
+                <FormRow><FormField label="Date column" required half>{sel("date_col")}</FormField><FormField label="Date format" required half>
+                  <select style={fieldStyle} value={mp.date_format} onChange={e => setMd({ map: { ...mp, date_format: e.target.value } })}>{PBA_DATE_FORMATS.map(f => <option key={f}>{f}</option>)}</select></FormField></FormRow>
+                <FormRow><FormField label="Description column" half>{sel("desc_col")}</FormField><FormField label="Amount column (one signed column)" half>{sel("amount_col")}</FormField></FormRow>
+                {mp.amount_col === "" && <FormRow><FormField label="Debit (money out) column" half>{sel("debit_col")}</FormField><FormField label="Credit (money in) column" half>{sel("credit_col")}</FormField></FormRow>}
+              </>
+            ) : <div style={{ fontSize: 12, color: CB.green, marginBottom: 8 }}>Same layout as the last import — using the saved mapping.</div>}
+            <FormRow>
+              <FormField label="Statement period start" half><input type="date" style={fieldStyle} value={modal.period_start} onChange={e => setMd({ period_start: e.target.value })} /></FormField>
+              <FormField label="Statement period end (in this month)" half><input type="date" style={fieldStyle} value={modal.period_end} onChange={e => setMd({ period_end: e.target.value })} /></FormField>
+            </FormRow>
+            <FormRow>
+              <FormField label="Beginning balance (from the statement)" required half><input type="number" step="0.01" style={fieldStyle} value={modal.opening} onChange={e => setMd({ opening: e.target.value })} /></FormField>
+              <FormField label="Ending balance (from the statement)" required half><input type="number" step="0.01" style={fieldStyle} value={modal.closing} onChange={e => setMd({ closing: e.target.value })} /></FormField>
+            </FormRow>
+            <div style={{ fontSize: 12, color: CB.textLight, margin: "6px 0" }}>{lines.length} lines read{bad ? ` · ${bad} unreadable` : ""}. First lines:</div>
+            {lines.slice(0, 5).map((l, i) => <div key={i} style={{ fontSize: 12, color: !l.date || !l.amount ? CB.red : CB.text }}>{l.date || "bad date"} · {l.description || "—"} · {l.amount == null ? "bad amount" : (l.amount > 0 ? "+" : "") + l.amount.toFixed(2)}</div>)}
+            {footer(save, "Import")}
+          </>
+        );
+      }
+
+      if (modal.kind === "manual") {
+        const setLine = (i, k, v) => setMd({ lines: modal.lines.map((l, j) => j === i ? { ...l, [k]: v } : l) });
+        body = (
+          <>
+            <FormRow>
+              <FormField label="Period start" half><input type="date" style={fieldStyle} value={modal.period_start} onChange={e => setMd({ period_start: e.target.value })} /></FormField>
+              <FormField label="Period end" half><input type="date" style={fieldStyle} value={modal.period_end} onChange={e => setMd({ period_end: e.target.value })} /></FormField>
+            </FormRow>
+            <FormRow>
+              <FormField label="Beginning balance" required half><input type="number" step="0.01" style={fieldStyle} value={modal.opening} onChange={e => setMd({ opening: e.target.value })} /></FormField>
+              <FormField label="Ending balance" required half><input type="number" step="0.01" style={fieldStyle} value={modal.closing} onChange={e => setMd({ closing: e.target.value })} /></FormField>
+            </FormRow>
+            <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 6 }}>Each line as printed: money in as a positive amount, money out as negative.</div>
+            {modal.lines.map((l, i) => (
+              <div key={i} style={{ display: "grid", gridTemplateColumns: "140px 1fr 110px 30px", gap: 6, marginBottom: 6 }}>
+                <input type="date" style={fieldStyle} value={l.date} onChange={e => setLine(i, "date", e.target.value)} />
+                <input style={fieldStyle} placeholder="Description" value={l.description} onChange={e => setLine(i, "description", e.target.value)} />
+                <input type="number" step="0.01" style={fieldStyle} placeholder="-12.34" value={l.amount} onChange={e => setLine(i, "amount", e.target.value)} />
+                <button onClick={() => setMd({ lines: modal.lines.filter((_, j) => j !== i) })} style={{ background: "none", border: "none", color: CB.red, cursor: "pointer" }}>✕</button>
+              </div>
+            ))}
+            <SecondaryButton onClick={() => setMd({ lines: [...modal.lines, { date: "", description: "", amount: "" }] })}>{icons.plus({ size: 13 })} Add line</SecondaryButton>
+            {footer(() => {
+              const lines = modal.lines.filter(l => l.date || l.amount).map(l => ({ date: l.date, description: l.description, amount: Number(l.amount) }));
+              if (modal.opening === "" || modal.closing === "") return addToast("Enter the beginning and ending balances", "error");
+              if (lines.some(l => !l.date || !l.amount)) return addToast("Every line needs a date and an amount", "error");
+              done("pba_import_statement", { p_id: modal.id, p_account: modal.acc.id, p_month: ms, p_data: { source: "manual", period_start: modal.period_start,
+                period_end: modal.period_end, opening_balance: Number(modal.opening), closing_balance: Number(modal.closing), lines } }, "Statement entered");
+            })}
+          </>
+        );
+      }
+
+      if (modal.kind === "count") body = (
+        <>
+          <FormField label={`Cash counted at the end of ${pbaMonthLabel(month)}`} required><input type="number" step="0.01" min="0" style={fieldStyle} value={modal.counted} onChange={e => setMd({ counted: e.target.value })} /></FormField>
+          <FormField label="Note (who counted, where)"><input style={fieldStyle} value={modal.note} onChange={e => setMd({ note: e.target.value })} /></FormField>
+          {footer(() => modal.counted === "" ? addToast("Enter the amount counted", "error") : done("pba_cash_count", { p_account: modal.acc.id, p_month: ms, p_counted: Number(modal.counted), p_note: modal.note }, "Count recorded"))}
+        </>
+      );
+
+      if (modal.kind === "pick") {
+        const l = modal.line;
+        const cands = d.txns.filter(t => t.status === "active" && (t.account_id === l.account_id || t.to_account_id === l.account_id) && effectOn(t, l.account_id) === Number(l.amount));
+        body = (
+          <>
+            <div style={{ fontSize: 13, marginBottom: 8 }}>{fmtD(l.line_date)} · {l.description || "—"} · {Number(l.amount).toFixed(2)}</div>
+            {cands.length === 0 ? <div style={{ fontSize: 13, color: CB.textLight }}>No entry on this account has exactly this amount. Make an entry from the line instead.</div> : (
+              <FormField label="Entry with the same amount"><select style={fieldStyle} value={modal.choice} onChange={e => setMd({ choice: e.target.value })}>
+                <option value="">Select…</option>{cands.map(t => <option key={t.id} value={t.id}>{txnLabel(t)}</option>)}</select></FormField>
+            )}
+            {footer(() => modal.choice ? done("pba_match", { p_line: l.id, p_txn: modal.choice }, "Matched") : addToast("Choose the entry", "error"), "Match")}
+          </>
+        );
+      }
+
+      if (modal.kind === "fromLine") {
+        const l = modal.line;
+        body = (
+          <>
+            <div style={{ fontSize: 13, marginBottom: 8 }}>{fmtD(l.line_date)} · {acctName(l.account_id)} · {Number(l.amount).toFixed(2)}</div>
+            <FormRow>
+              <FormField label="Entry" half><select style={fieldStyle} value={modal.type} onChange={e => setMd({ type: e.target.value })}>
+                {(l.amount > 0 ? ["deposit", "interest"] : ["withdrawal", "fee"]).map(t => <option key={t} value={t}>{pbaTypeLabel(t)}</option>)}</select></FormField>
+              <FormField label="Category" half><select style={fieldStyle} value={modal.category} onChange={e => setMd({ category: e.target.value })}>
+                <option value="">—</option>{PBA_CATEGORIES.map(c => <option key={c[0]} value={c[0]}>{c[1]}</option>)}</select></FormField>
+            </FormRow>
+            <FormField label="Payee / source"><input style={fieldStyle} value={modal.payee} onChange={e => setMd({ payee: e.target.value })} /></FormField>
+            {modal.type === "withdrawal" && <FormRow>
+              <FormField label="Who benefits" half><select style={fieldStyle} value={modal.beneficiary} onChange={e => setMd({ beneficiary: e.target.value })}>
+                <option value="person">{clientName}</option><option value="other">Another person</option></select></FormField>
+              {modal.beneficiary === "other" && <FormField label="Their name" required half><input style={fieldStyle} value={modal.beneficiary_name} onChange={e => setMd({ beneficiary_name: e.target.value })} /></FormField>}
+            </FormRow>}
+            {footer(() => {
+              if (modal.beneficiary === "other" && modal.type === "withdrawal" && !modal.beneficiary_name.trim()) return addToast("Name the person who benefits", "error");
+              done("pba_entry_from_line", { p_new_id: modal.id, p_line: l.id, p_data: { type: modal.type, category: modal.category || null, payee: modal.payee || null,
+                beneficiary: modal.type === "withdrawal" ? modal.beneficiary : "person", beneficiary_name: modal.type === "withdrawal" && modal.beneficiary === "other" ? modal.beneficiary_name.trim() : null } },
+                "Entry recorded and matched");
+            }, "Record & Match")}
+          </>
+        );
+      }
+
+      if (modal.kind === "explain") body = (
+        <>
+          <div style={{ fontSize: 13, marginBottom: 8 }}>{txnLabel(modal.txn)} — on the ledger but not on the statement.</div>
+          <FormField label="Why (e.g. check 101 written 10/28, not cleared yet)" required><textarea style={{ ...fieldStyle, minHeight: 60 }} value={modal.text} onChange={e => setMd({ text: e.target.value })} /></FormField>
+          {footer(() => modal.text.trim() ? done("pba_explain", { p_txn: modal.txn.id, p_account: modal.acc.id, p_month: ms, p_text: modal.text.trim() }, "Explained") : addToast("Write the explanation", "error"))}
+        </>
+      );
+
+      if (modal.kind === "addLine") body = (
+        <>
+          <FormRow>
+            <FormField label="Date" required half><input type="date" style={fieldStyle} value={modal.date} onChange={e => setMd({ date: e.target.value })} /></FormField>
+            <FormField label="Amount (+ in, − out)" required half><input type="number" step="0.01" style={fieldStyle} value={modal.amount} onChange={e => setMd({ amount: e.target.value })} /></FormField>
+          </FormRow>
+          <FormField label="Description"><input style={fieldStyle} value={modal.description} onChange={e => setMd({ description: e.target.value })} /></FormField>
+          {footer(() => (!modal.date || !Number(modal.amount)) ? addToast("Date and amount are required", "error")
+            : done("pba_add_line", { p_statement: modal.st.id, p_line: { date: modal.date, description: modal.description, amount: Number(modal.amount) } }, "Line added"))}
+        </>
+      );
+
+      if (modal.kind === "signB") body = (
+        <>
+          <div style={{ fontSize: 13, color: CB.textMid }}>Signing checks every account, the receipts and the enrollment papers. If anything is open, it says what. Once signed, {pbaMonthLabel(month)} is sealed: corrections become reversing entries in an open month.</div>
+          {attest(`I reconciled every account of ${clientName} for ${pbaMonthLabel(month)} against its statement (and cash against its count).`)}
+          {footer(() => signedOk() && done("pba_close_month", { p_person: clientId, p_month: ms, p_name: modal.name.trim(),
+            p_attest: `I reconciled every account of ${clientName} for ${pbaMonthLabel(month)} against its statement (and cash against its count).` }, `${pbaMonthLabel(month)} closed and sealed`), "Sign & Close")}
+        </>
+      );
+
+      if (modal.kind === "formC") {
+        const save = async () => {
+          if (!modal.review_date) return addToast("Enter the date of the review", "error");
+          if (!signedOk()) return;
+          let sig = null;
+          if (!modal.useException) {
+            if (!modal.signerName.trim()) return addToast("Enter the signer's name", "error");
+            let drawn = null, scan = null;
+            if (modal.scan) { const up = await upload("form_scan", modal.scan); if (!up) return; scan = up.id; }
+            else {
+              if (!padRef.current || padRef.current.isEmpty()) return addToast("The Person signs on screen, or attach a signed scan, or record why they can't", "error");
+              const blob = await padRef.current.toBlob();
+              const up = await upload("signature", new File([blob], "signature.png", { type: "image/png" })); if (!up) return; drawn = up.id;
+            }
+            sig = { kind: modal.signer, name: modal.signerName.trim(), drawn_file: drawn, scan_file: scan, attestation: "I reviewed my money for the month with my PBA Manager." };
+          } else if (!modal.exception.trim()) return addToast("Record why the Person can't or won't sign", "error");
+          done("pba_complete_form_c", { p_person: clientId, p_month: ms, p_data: { review_date: modal.review_date, mode: modal.mode, attendees: modal.attendees,
+            person_comments: modal.comments, exception_reason: modal.useException ? modal.exception.trim() : null },
+            p_name: modal.name.trim(), p_attest: `I reviewed ${pbaMonthLabel(month)}'s deposits, expenses and savings with ${clientName}.`, p_person_sig: sig }, "Monthly review recorded");
+        };
+        body = (
+          <>
+            <FormRow>
+              <FormField label="Date of the review" required half><input type="date" style={fieldStyle} value={modal.review_date} max={ymd()} onChange={e => setMd({ review_date: e.target.value })} /></FormField>
+              <FormField label="How" half><select style={fieldStyle} value={modal.mode} onChange={e => setMd({ mode: e.target.value })}><option value="in_person">In person</option><option value="virtual">Virtual</option></select></FormField>
+            </FormRow>
+            <FormField label="Who attended"><input style={fieldStyle} value={modal.attendees} onChange={e => setMd({ attendees: e.target.value })} placeholder="e.g. guardian, host" /></FormField>
+            <FormField label={`${clientName}'s comments, in their own words`}><textarea style={{ ...fieldStyle, minHeight: 60 }} value={modal.comments} onChange={e => setMd({ comments: e.target.value })} /></FormField>
+            <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, margin: "6px 0", cursor: "pointer" }}>
+              <input type="checkbox" checked={modal.useException} onChange={e => setMd({ useException: e.target.checked })} /> The Person can't or won't sign this month
+            </label>
+            {modal.useException ? (
+              <FormField label="Why" required><input style={fieldStyle} value={modal.exception} onChange={e => setMd({ exception: e.target.value })} /></FormField>
+            ) : (
+              <>
+                <FormRow>
+                  <FormField label="Signing" half><select style={fieldStyle} value={modal.signer} onChange={e => setMd({ signer: e.target.value })}><option value="person">The Person</option><option value="guardian">Guardian</option></select></FormField>
+                  <FormField label="Signer's name" half><input style={fieldStyle} value={modal.signerName} onChange={e => setMd({ signerName: e.target.value })} /></FormField>
+                </FormRow>
+                <SignaturePad padRef={padRef} />
+                <div style={{ fontSize: 12, color: CB.textLight, marginTop: 4 }}>Or attach a signed scan (a virtual review): <input type="file" accept="application/pdf,image/*" onChange={e => setMd({ scan: e.target.files?.[0] || null })} /></div>
+              </>
+            )}
+            {attest(`I reviewed ${pbaMonthLabel(month)}'s deposits, expenses and savings with ${clientName}.`)}
+            {footer(save, "Record Review")}
+          </>
+        );
+      }
+
+      if (modal.kind === "signC") body = (
+        <>
+          <FormRow>
+            <FormField label="Signing" half><select style={fieldStyle} value={modal.signer} onChange={e => setMd({ signer: e.target.value })}><option value="person">The Person</option><option value="guardian">Guardian</option></select></FormField>
+            <FormField label="Signer's name" required half><input style={fieldStyle} value={modal.name} onChange={e => setMd({ name: e.target.value })} /></FormField>
+          </FormRow>
+          <SignaturePad padRef={padRef} />
+          <div style={{ fontSize: 12, color: CB.textLight, marginTop: 4 }}>Or attach a signed scan: <input type="file" accept="application/pdf,image/*" onChange={e => setMd({ scan: e.target.files?.[0] || null })} /></div>
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, marginTop: 8, cursor: "pointer" }}><input type="checkbox" checked={!!modal.agree} onChange={e => setMd({ agree: e.target.checked })} /> I witnessed this signature.</label>
+          {footer(async () => {
+            if (!modal.name.trim() || !modal.agree) return addToast("Name the signer and confirm you witnessed it", "error");
+            let drawn = null, scan = null;
+            if (modal.scan) { const up = await upload("form_scan", modal.scan); if (!up) return; scan = up.id; }
+            else { if (!padRef.current || padRef.current.isEmpty()) return addToast("Draw the signature or attach a scan", "error");
+                   const up = await upload("signature", new File([await padRef.current.toBlob()], "signature.png", { type: "image/png" })); if (!up) return; drawn = up.id; }
+            done("pba_sign", { p_form_type: "form_c", p_form_id: m.fc.id, p_signer_kind: modal.signer, p_signer_name: modal.name.trim(),
+                               p_attestation: "I reviewed my money for the month with my PBA Manager.", p_drawn_file: drawn, p_scan_file: scan }, "Signature added");
+          }, "Add Signature")}
+        </>
+      );
+
+      if (modal.kind === "formD") {
+        const labels = { receipts: "Receipts", balances: "Balances reconcile", third_party: "Purchases for others / gifts documented", cash_log: "Cash log complete",
+                         assets: "Assets under the alert, or a plan on file", provider_funds: "No provider funds involved", person_signed_c: "The Person signed the review" };
+        body = (
+          <>
+            <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 8 }}>Provly pre-checked what the record shows. Confirm each item; anything wrong goes in the findings — they go to the Compliance Director, and the SC report still goes out on time.</div>
+            {Object.keys(modal.pre).map(k => (
+              <div key={k} style={{ padding: "6px 0", borderTop: `1px solid ${CB.border}` }}>
+                <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, cursor: "pointer" }}>
+                  <input type="checkbox" checked={!!modal.confirm[k]} onChange={e => setMd({ confirm: { ...modal.confirm, [k]: e.target.checked } })} />
+                  <span><strong>{labels[k] || k}</strong> <span style={{ color: modal.pre[k].ok ? CB.green : CB.red }}>{modal.pre[k].ok ? "✓ record shows yes" : "✗ record shows no"}</span>
+                    <div style={{ fontSize: 12, color: CB.textMid }}>{modal.pre[k].detail}</div></span>
+                </label>
+                <input style={{ ...fieldStyle, marginTop: 4, padding: "6px 10px", fontSize: 12 }} placeholder="Note (optional)" value={modal.notes[k] || ""} onChange={e => setMd({ notes: { ...modal.notes, [k]: e.target.value } })} />
+              </div>
+            ))}
+            <FormField label="Findings (one per line)"><textarea style={{ ...fieldStyle, minHeight: 70 }} value={modal.findings} onChange={e => setMd({ findings: e.target.value })} /></FormField>
+            {attest(`I reviewed ${clientName}'s ${pbaMonthLabel(month)} financial record and checklist.`)}
+            {footer(() => {
+              if (!signedOk()) return;
+              const checklist = Object.fromEntries(Object.keys(modal.pre).map(k => [k, { confirmed: !!modal.confirm[k], note: modal.notes[k] || null }]));
+              const findings = modal.findings.split("\n").map(s => s.trim()).filter(Boolean);
+              done("pba_complete_form_d", { p_person: clientId, p_month: ms, p_checklist: checklist, p_findings: findings, p_name: modal.name.trim(),
+                p_attest: `I reviewed ${clientName}'s ${pbaMonthLabel(month)} financial record and checklist.` }, "Administrative review signed");
+            }, "Sign Review")}
+          </>
+        );
+      }
+
+      if (modal.kind === "answer") body = (
+        <>
+          <div style={{ fontSize: 13, marginBottom: 8 }}>{modal.finding.finding}</div>
+          <FormField label="Response" required><textarea style={{ ...fieldStyle, minHeight: 70 }} value={modal.text} onChange={e => setMd({ text: e.target.value })} /></FormField>
+          {footer(() => modal.text.trim() ? done("pba_answer_finding", { p_finding: modal.finding.id, p_response: modal.text.trim() }, "Response recorded") : addToast("Write the response", "error"))}
+        </>
+      );
+
+      if (modal.kind === "formG") {
+        // the package: Form G with Forms B, C and D enclosed (R2-6)
+        const build = async () => {
+          try {
+            const doc = new jspdf.jsPDF();
+            let y = 16;
+            const line = (t, size = 10, bold = false) => { doc.setFontSize(size); doc.setFont(undefined, bold ? "bold" : "normal");
+              doc.splitTextToSize(String(t), 180).forEach(s => { if (y > 280) { doc.addPage(); y = 16; } doc.text(s, 14, y); y += size * 0.5 + 1.5; }); };
+            line("Personal Budget Assistance — Monthly Financial Report (Form G)", 14, true);
+            line(`${clientName} · ${pbaMonthLabel(month)} · prepared ${new Date().toLocaleDateString()}`);
+            y += 2; line("Accounts (Form B — reconciliation)", 12, true);
+            ((m.fb?.summary?.accounts) || []).forEach(a => line(`${a.label || "Account"}: ledger ${pbaMoney(a.ledger_closing)}${a.statement_closing != null ? ` · statement ${pbaMoney(a.statement_closing)}` : ""}${a.counted != null ? ` · counted ${pbaMoney(a.counted)}` : ""}${Number(a.outstanding || 0) ? ` · outstanding ${pbaMoney(a.outstanding)}` : ""}`));
+            line(`Countable assets at the close: ${pbaMoney(m.fb?.countable)} (SSI resource limit $2,000)`);
+            const sigB = d.sigs.find(s => s.form_type === "form_b" && s.form_id === m.fb?.id);
+            if (sigB) line(`Reconciled and signed by ${sigB.signer_name} on ${new Date(sigB.signed_at).toLocaleDateString()}`);
+            y += 2; line("Transactions", 12, true);
+            const tx = d.txns.filter(t => (t.entry_date || "").slice(0, 7) === month).slice().sort((a, b) => a.entry_date.localeCompare(b.entry_date));
+            if (tx.length === 0) line("None.");
+            tx.forEach(t => line(`${fmtD(t.entry_date)}  ${pbaTypeLabel(t.type)}  ${t.payee || ""}  ${pbaCatLabel(t.category)}  ${t.status !== "active" ? "(voided) " : ""}${t.reverses_id ? "(reversal) " : ""}${pbaMoney(t.amount)}${t.beneficiary === "other" ? `  for ${t.beneficiary_name}` : ""}`, 9));
+            y += 2; line("Review with the Person (Form C)", 12, true);
+            if (m.fc) {
+              line(`${fmtD(m.fc.review_date)} · ${m.fc.mode === "virtual" ? "virtual" : "in person"}${m.fc.attendees ? ` · attended: ${m.fc.attendees}` : ""}`);
+              if (m.fc.person_comments) line(`The Person's comments: "${m.fc.person_comments}"`);
+              const ps = d.sigs.filter(s => s.form_type === "form_c" && s.form_id === m.fc.id);
+              ps.forEach(s => line(`Signed by ${s.signer_name} (${s.capacity}) on ${new Date(s.signed_at).toLocaleDateString()}`));
+              if (m.fc.exception_reason && !ps.some(s => s.capacity === "person" || s.capacity === "guardian")) line(`Not signed by the Person: ${m.fc.exception_reason}`);
+            }
+            y += 2; line("Administrative review (Form D)", 12, true);
+            if (m.fd) {
+              const pre = m.fd.checklist?.prechecks || {}; const rv = m.fd.checklist?.reviewer || {};
+              Object.keys(pre).forEach(k => line(`${rv[k]?.confirmed ? "✓" : "✗"} ${pre[k].detail}${rv[k]?.note ? ` — ${rv[k].note}` : ""}`, 9));
+              const sd = d.sigs.find(s => s.form_type === "form_d" && s.form_id === m.fd.id);
+              if (sd) line(`Reviewed and signed by ${sd.signer_name} on ${new Date(sd.signed_at).toLocaleDateString()}`);
+              line(m.finds.length ? "Findings:" : "No findings.", 10, true);
+              m.finds.forEach(f => line(`• ${f.finding}${f.response ? ` — Response: ${f.response}` : " — response pending"}`, 9));
+            }
+            const blob = doc.output("blob");
+            const file = new File([blob], `PBA-${month}-Form-G.pdf`, { type: "application/pdf" });
+            const up = await upload("document", file); if (!up) return;
+            const url = URL.createObjectURL(blob); window.open(url, "_blank", "noopener");
+            setMd({ step: "record", file: up });
+          } catch (e) { addToast(e.message || "Couldn't build the PDF", "error"); }
+        };
+        body = modal.step === "build" ? (
+          <>
+            <div style={{ fontSize: 13, color: CB.textMid, marginBottom: 10 }}>Builds the Form G package — balances, every transaction, and Forms B, C and D with their findings — saves it to the record, and opens it so you can send it to the SC through your usual secure channel.</div>
+            {footer(build, "Build PDF")}
+          </>
+        ) : (
+          <>
+            <div style={{ fontSize: 13, color: CB.green, marginBottom: 8 }}>Saved to the record. Send it, then record how.</div>
+            <FormRow>
+              <FormField label="Sent on" required half><input type="date" style={fieldStyle} max={ymd()} value={modal.sent_on} onChange={e => setMd({ sent_on: e.target.value })} /></FormField>
+              <FormField label="How" required half><input style={fieldStyle} value={modal.method} onChange={e => setMd({ method: e.target.value })} placeholder="e.g. secure email, SC portal" /></FormField>
+            </FormRow>
+            <FormRow>
+              <FormField label="Sent to (SC)" required half><input style={fieldStyle} value={modal.to_name} onChange={e => setMd({ to_name: e.target.value })} /></FormField>
+              <FormField label="Their email" half><input style={fieldStyle} value={modal.to_email} onChange={e => setMd({ to_email: e.target.value })} /></FormField>
+            </FormRow>
+            {footer(() => (!modal.to_name.trim() || !modal.method.trim()) ? addToast("Who it went to and how are required", "error")
+              : done("pba_record_form_g", { p_person: clientId, p_month: ms, p_data: { sent_on: modal.sent_on, sent_to_name: modal.to_name.trim(),
+                  sent_to_email: modal.to_email.trim() || null, method: modal.method.trim(), file_id: modal.file.id } }, "SC report recorded"), "Record Sent")}
+          </>
+        );
+      }
+
+      return <Modal open={true} onClose={close} width={["import", "manual", "formC", "formD"].includes(modal.kind) ? 680 : 540} title={title}>{body}</Modal>;
+    }
+
+    // Benefits: the asset response (R2-7), Medicaid spend-down, SSA payee accounting
+    function PbaBenefits({ clientId, access, d, flags, onChanged }) {
+      const { addToast } = useToast();
+      const [rows, setRows] = useState(null);
+      const [countable, setCountable] = useState(null);
+      const [modal, setModal] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const canWrite = access?.role === "manager" || access?.owner || access?.compliance;
+      const load = async () => {
+        const [sd, pr, ar, ct] = await Promise.all([
+          supabase.from("pba_spenddowns").select("*").eq("person_id", clientId).order("month", { ascending: false }).limit(24),
+          supabase.from("pba_payee_reports").select("*").eq("person_id", clientId).order("requested_on", { ascending: false }).limit(24),
+          supabase.from("pba_asset_responses").select("*").eq("person_id", clientId).order("month", { ascending: false }).limit(12),
+          supabase.rpc("pba_countable", { p_person: clientId }),
+        ]);
+        setRows({ sd: sd.data || [], pr: pr.data || [], ar: ar.data || [] }); if (!ct.error) setCountable(ct.data);
+      };
+      useEffect(() => { load(); }, [clientId, d.txns.length]);
+      const run = async (fn, args, ok) => {
+        setBusy(true); const { error } = await supabase.rpc(fn, args); setBusy(false);
+        if (error) { addToast(error.message, "error"); return false; }
+        addToast(ok, "success"); setModal(null); load(); onChanged?.(); return true;
+      };
+      const setMd = (p) => setModal(c => c ? { ...c, ...p } : c);
+      const fmtD = (x) => x ? new Date(x + "T00:00:00").toLocaleDateString() : "—";
+      const assetFlag = flags.find(f => f.o_flag === "asset_alert" || f.o_flag === "asset_warning");
+      const payments = d.txns.filter(t => t.status === "active" && (t.type === "withdrawal" || t.type === "transfer"));
+      if (!rows) return null;
+      return (
+        <PbaCard title="Benefits" actions={canWrite ? <>
+            <SecondaryButton onClick={() => setModal({ kind: "sd", month: ymd().slice(0, 7), amount: "", due: "" })}>{icons.plus({ size: 13 })} Spend-down</SecondaryButton>
+            <SecondaryButton onClick={() => setModal({ kind: "pr", id: newId(), requested: ymd(), due: "" })}>{icons.plus({ size: 13 })} SSA payee report</SecondaryButton>
+          </> : null}>
+          <div style={{ fontSize: 13, marginBottom: 8 }}>Countable now (bank + pay card + cash; ABLE excluded): <strong>{pbaMoney(countable)}</strong> <span style={{ color: CB.textLight }}>· the SSI resource limit is $2,000</span></div>
+          {assetFlag && canWrite && (
+            <div style={{ padding: "10px 12px", borderRadius: 10, background: `${CB.red}08`, border: `1px solid ${CB.red}40`, marginBottom: 10 }}>
+              <div style={{ fontSize: 13, color: CB.red, marginBottom: 6 }}>{assetFlag.o_detail}</div>
+              <SecondaryButton onClick={() => setModal({ kind: "ar", month: (d.lastClose || ymd().slice(0, 7)), person: "", residential: "", sc: "", plan_type: "planned_purchase", plan_detail: "", target: "" })}>Record notices &amp; plan</SecondaryButton>
+            </div>
+          )}
+          {rows.ar.slice(0, 2).map(r => <div key={r.id} style={{ fontSize: 12, color: CB.textMid }}>Asset plan ({new Date(r.month + "T00:00:00").toLocaleDateString(undefined, { month: "short", year: "numeric" })}): {r.plan_detail} · by {fmtD(r.target_date)} · notices {fmtD(r.notices.person)}, {fmtD(r.notices.residential)}, {fmtD(r.notices.sc)}</div>)}
+          {rows.sd.map(s => (
+            <div key={s.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "6px 0", borderTop: `1px solid ${CB.border}`, flexWrap: "wrap" }}>
+              <div style={{ fontSize: 13 }}>Spend-down {new Date(s.month + "T00:00:00").toLocaleDateString(undefined, { month: "short", year: "numeric" })}: {pbaMoney(s.amount)} due {fmtD(s.due_date)}
+                <span style={{ color: s.paid_txn_id ? CB.green : s.due_date < ymd() ? CB.red : CB.textLight }}> · {s.paid_txn_id ? "paid" : s.due_date < ymd() ? "overdue" : "unpaid"}</span></div>
+              {!s.paid_txn_id && access?.role === "manager" && <SecondaryButton onClick={() => setModal({ kind: "pay", sd: s, txn: "" })}>Link payment</SecondaryButton>}
+            </div>
+          ))}
+          {rows.pr.map(r => (
+            <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "6px 0", borderTop: `1px solid ${CB.border}`, flexWrap: "wrap" }}>
+              <div style={{ fontSize: 13 }}>SSA payee accounting requested {fmtD(r.requested_on)}, due {fmtD(r.due_date)}
+                <span style={{ color: r.completed_on ? CB.green : r.due_date < ymd() ? CB.red : CB.textLight }}> · {r.completed_on ? `done ${fmtD(r.completed_on)}` : r.due_date < ymd() ? "overdue" : "open"}</span></div>
+              {!r.completed_on && canWrite && <SecondaryButton onClick={() => run("pba_save_payee_report", { p_id: r.id, p_person: clientId, p_data: { requested_on: r.requested_on, due_date: r.due_date, completed_on: ymd() } }, "Marked done")}>Mark done</SecondaryButton>}
+            </div>
+          ))}
+          <Modal open={!!modal} onClose={() => setModal(null)} width={520} title={{ sd: "Medicaid Spend-down", pr: "SSA Payee Accounting Request", ar: "Asset Alert — Notices and Plan", pay: "Link the Spend-down Payment" }[modal?.kind] || ""}>
+            {modal?.kind === "sd" && <>
+              <FormRow><FormField label="Month" half><input type="month" style={fieldStyle} value={modal.month} onChange={e => setMd({ month: e.target.value })} /></FormField>
+                <FormField label="Amount" required half><input type="number" step="0.01" style={fieldStyle} value={modal.amount} onChange={e => setMd({ amount: e.target.value })} /></FormField></FormRow>
+              <FormField label="Due date" required><input type="date" style={fieldStyle} value={modal.due} onChange={e => setMd({ due: e.target.value })} /></FormField>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}><SecondaryButton onClick={() => setModal(null)}>Cancel</SecondaryButton>
+                <PrimaryButton loading={busy} onClick={() => (!(Number(modal.amount) > 0) || !modal.due) ? addToast("Amount and due date are required", "error") : run("pba_save_spenddown", { p_person: clientId, p_month: `${modal.month}-01`, p_amount: Number(modal.amount), p_due: modal.due }, "Spend-down saved")}>Save</PrimaryButton></div>
+            </>}
+            {modal?.kind === "pr" && <>
+              <FormRow><FormField label="Requested on" half><input type="date" style={fieldStyle} value={modal.requested} onChange={e => setMd({ requested: e.target.value })} /></FormField>
+                <FormField label="Due" required half><input type="date" style={fieldStyle} value={modal.due} onChange={e => setMd({ due: e.target.value })} /></FormField></FormRow>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}><SecondaryButton onClick={() => setModal(null)}>Cancel</SecondaryButton>
+                <PrimaryButton loading={busy} onClick={() => !modal.due ? addToast("Enter the due date", "error") : run("pba_save_payee_report", { p_id: modal.id, p_person: clientId, p_data: { requested_on: modal.requested, due_date: modal.due } }, "Reminder saved")}>Save</PrimaryButton></div>
+            </>}
+            {modal?.kind === "pay" && <>
+              <FormField label="The payment"><select style={fieldStyle} value={modal.txn} onChange={e => setMd({ txn: e.target.value })}><option value="">Select…</option>
+                {payments.map(t => <option key={t.id} value={t.id}>{fmtD(t.entry_date)} · {t.payee || pbaTypeLabel(t.type)} · {pbaMoney(t.amount)}</option>)}</select></FormField>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}><SecondaryButton onClick={() => setModal(null)}>Cancel</SecondaryButton>
+                <PrimaryButton loading={busy} onClick={() => !modal.txn ? addToast("Choose the payment", "error") : run("pba_pay_spenddown", { p_spenddown: modal.sd.id, p_txn: modal.txn }, "Payment linked")}>Link</PrimaryButton></div>
+            </>}
+            {modal?.kind === "ar" && <>
+              <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 8 }}>SOW 15.2(6): written notice to the Person, the residential provider team and the SC, and a plan to stay under the limit.</div>
+              <FormRow><FormField label="Person notified on" required half><input type="date" style={fieldStyle} value={modal.person} onChange={e => setMd({ person: e.target.value })} /></FormField>
+                <FormField label="Residential team notified on" required half><input type="date" style={fieldStyle} value={modal.residential} onChange={e => setMd({ residential: e.target.value })} /></FormField></FormRow>
+              <FormField label="SC notified on" required><input type="date" style={fieldStyle} value={modal.sc} onChange={e => setMd({ sc: e.target.value })} /></FormField>
+              <FormRow><FormField label="Plan" half><select style={fieldStyle} value={modal.plan_type} onChange={e => setMd({ plan_type: e.target.value })}>
+                  <option value="planned_purchase">Planned purchase</option><option value="able">ABLE account deposit</option><option value="other">Other</option></select></FormField>
+                <FormField label="By" required half><input type="date" style={fieldStyle} value={modal.target} onChange={e => setMd({ target: e.target.value })} /></FormField></FormRow>
+              <FormField label="What the plan is" required><input style={fieldStyle} value={modal.plan_detail} onChange={e => setMd({ plan_detail: e.target.value })} /></FormField>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}><SecondaryButton onClick={() => setModal(null)}>Cancel</SecondaryButton>
+                <PrimaryButton loading={busy} onClick={() => (!modal.person || !modal.residential || !modal.sc || !modal.target || !modal.plan_detail.trim()) ? addToast("All three notice dates, the plan and its date are required", "error")
+                  : run("pba_save_asset_response", { p_person: clientId, p_month: `${modal.month}-01`, p_data: { notices: { person: modal.person, residential: modal.residential, sc: modal.sc },
+                      plan_type: modal.plan_type, plan_detail: modal.plan_detail.trim(), target_date: modal.target } }, "Notices and plan recorded")}>Save</PrimaryButton></div>
+            </>}
+          </Modal>
+        </PbaCard>
+      );
+    }
+
+    // Dashboard / Compliance: every Person's open close steps (owner and Compliance Director)
+    function PbaCyclesCard({ onNavigate, compact }) {
+      const [rows, setRows] = useState(null);
+      useEffect(() => { supabase.rpc("pba_cycles").then(({ data, error }) => setRows(error ? [] : (data || []))); }, []);
+      const list = (rows || []).filter(r => !compact || r.o_status === "overdue" || r.o_status === "due_soon");
+      if (!rows || (compact && list.length === 0)) return null;
+      const stepLabel = (k) => PBA_STEPS.find(s => s.key === k)?.label || k;
+      return (
+        <div style={{ background: CB.white, borderRadius: 16, padding: 20, border: `1px solid ${CB.border}`, marginBottom: 20 }}>
+          <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 8 }}>PBA Monthly Close {compact ? "— due soon or overdue" : ""}</h3>
+          {list.length === 0 ? <div style={{ fontSize: 13, color: CB.textLight }}>Every close is up to date.</div> : list.slice(0, compact ? 8 : 200).map((r, i) => (
+            <button key={i} onClick={() => onNavigate && onNavigate("client-profile", { type: "client", id: r.o_person_id, profileTab: "pba" })}
+              style={{ display: "flex", gap: 10, alignItems: "center", width: "100%", textAlign: "left", padding: "8px 10px", borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.cream, marginBottom: 6, cursor: "pointer", fontFamily: "inherit" }}>
+              <span style={{ minWidth: 74, fontSize: 11, fontWeight: 700, color: pbaStepColor(r.o_status), textAlign: "center" }}>{r.o_status === "overdue" ? "Overdue" : r.o_status === "due_soon" ? "Due soon" : "Open"}</span>
+              <span style={{ fontSize: 13 }}><strong>{r.o_person_name}</strong> · {new Date(r.o_month + "T00:00:00").toLocaleDateString(undefined, { month: "long", year: "numeric" })} · {stepLabel(r.o_step)} · due {new Date(r.o_due + "T00:00:00").toLocaleDateString()}</span>
+            </button>
+          ))}
         </div>
       );
     }
@@ -19353,6 +20125,10 @@
             )}
           </PbaCard>
 
+          {/* ── v20.0.30: the monthly close for the month in view, and the benefits checks ── */}
+          <PbaMonthlyClose clientId={clientId} client={client} access={access} d={d} month={month} onChanged={load} />
+          <PbaBenefits clientId={clientId} access={access} d={d} flags={d.flags} onChanged={load} />
+
           {/* ── modals ── */}
           <Modal open={!!modal && modal.kind !== "start"} onClose={() => setModal(null)} width={modal?.kind === "txn" ? 640 : 540}
             title={{ formA: "Natural Support Determination (Form A)", sign: "Sign", role: "Assign a PBA Role", account: modal?.isNew ? "Add Account" : "Edit Account",
@@ -19677,6 +20453,7 @@
         <div style={{ background: CB.white, borderRadius: 16, padding: 24, border: `1px solid ${CB.border}` }}>
           <h3 style={{ fontSize: 16, fontWeight: 700, color: CB.navy, marginBottom: 4 }}>Personal Budget Assistance</h3>
           <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 14 }}>Open PBA flags for every Person — visible to the owner and the Compliance Director.</div>
+          <PbaCyclesCard onNavigate={onNavigate} /> {/* v20.0.30 */}
           {error && <div role="alert" style={{ color: CB.red, fontSize: 13, marginBottom: 10 }}>Couldn't load ({error}). <SecondaryButton onClick={load}>Retry</SecondaryButton></div>}
           {staffFlags.length > 0 && (
             <div style={{ padding: "12px 14px", borderRadius: 10, border: `1px solid ${CB.amber}60`, background: `${CB.amber}08`, marginBottom: 12 }}>

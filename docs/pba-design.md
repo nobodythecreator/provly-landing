@@ -1,6 +1,6 @@
-# Provly — PBA (Personal Budget Assistance) Design v1.1
+# Provly — PBA (Personal Budget Assistance) Design v1.2
 
-**v1.0 decided Oct 4, 2026; v1.1 = cross-check against the spec (Oct 5) · approved by Tombé · requirements: `docs/pba-module-spec-v1.md` (Hope Haven Policy PBA-001, SOW Article 15 + 1.28) · this doc covers Release 1, built as v20.0.29**
+**v1.0 decided Oct 4, 2026; v1.1 = cross-check against the spec (Oct 5) · approved by Tombé · v1.2 adds Release 2 (decided Oct 5) · requirements: `docs/pba-module-spec-v1.md` (Hope Haven Policy PBA-001, SOW Article 15 + 1.28) · this doc covers Release 1, built as v20.0.29**
 
 ## Decisions (locked one at a time, Oct 4)
 
@@ -87,6 +87,36 @@ One private bucket, **`pba`**. Paths `{org_id}/{person_id}/{receipts|documents|s
 ### Acceptance tests that land in R1
 
 P1 (saved as pending, receipt task) · P2 (accepted; Forms C/D/G arrive in R2) · P3 (blocked **at the request**; recorded-anyway → flag) · P4 (third-party flag) · P5 · P6 · P7 (reviewer edit refused) · P8 (host as manager refused). P9–P12 land in R2/R3.
+
+
+## Release 2 — the monthly close (decided Oct 5; built as v20.0.30)
+
+### Decisions
+
+| # | Decision | Choice |
+|---|---|---|
+| R2-1 | When a month is sealed | **When the reconciliation (Form B) is signed.** Signing requires every statement line matched, every purchase over $50 with a receipt or fully signed affidavit, every unmatched entry resolved, and enrollment complete. Forms C, D and G then work from the same fixed numbers; a later correction is a reversing entry in an open month |
+| R2-2 | Reading a bank's statement file | **Map the columns once per account.** First import: pick the date, description and amount (or debit + credit) columns and the date format; Provly remembers it per account and asks again if the headers change. Manual lines are the fallback |
+| R2-3 | Matching statement lines to entries | **Provly suggests, the PBA Manager confirms.** Suggestions by amount and date (± 3 days), exact ones marked; one "Accept all exact matches" button; an unmatched bank line becomes an entry in one click (pre-filled); an unmatched entry is corrected, voided or explained (e.g. an uncleared check) before Form B |
+| R2-4 | The review with the Person (Form C) | **The Person signs, with a recorded exception.** Date, in person / virtual, who attended, the Person's comments in their own words; signed on screen by the Person or guardian (or a scan); if they can't or won't sign, the reason is recorded, the step completes, and it is flagged for the reviewer |
+| R2-5 | Administrative review findings (Form D) | **Recorded, routed to the Compliance Director, the cycle continues.** A pre-checked checklist the reviewer confirms; each finding is an open item the CD answers; money errors are corrected in the next open month; Form G goes out on time with Form D and its findings |
+| R2-6 | Getting Form G to the SC | **Provly builds the PDF; the PBA Manager sends it and records how.** Date, recipient (pre-filled from the client's SC), method; that completes the step. Direct email / secure links come with the email and HIPAA arcs |
+| R2-7 | Counting assets | **The official check at each reconciliation, plus a live early warning.** Countable = bank + pay card + cash on hand (ABLE excluded); checked against the $1,500 setting when Form B is signed (the month-end balance is the next month's first-moment figure SSI counts) and warned live between closes. Crossing it requires the notices recorded (Person, residential team, SC) and a plan (planned purchase / ABLE / other + target date) |
+
+### The cycle (Gap 21)
+
+For month M, due in month M+1: **Form B day 5 · Form C day 10 · Form D day 15 · Form G day 30.** Each step locks when signed; a step can't start before the one before it is complete. Status per Person per step: green (done), amber (due within 3 days), red (overdue). Dashboard and Compliance → PBA show every Person's cycle.
+
+### Readings (stated in the PR)
+
+- **Cash on hand** has no statement: its reconciliation is a counted amount the PBA Manager records each month; a difference from the ledger must be zero or explained by an entry.
+- **Opening balance** for a first close comes from the account's opening balance (Release 1); each later month opens at the previous sealed close.
+- **Spend-down**: Medicaid spend-down amount + due date per month; unpaid by the due date → flag. **SSA payee accounting**: a reminder record with a due date when SSA requests it.
+- **Billing check**: a PBA service note written by the Person's Administrative Reviewer or Quarterly Auditor is flagged (their time is internal control, not billable — spec §3).
+
+### Acceptance tests that land in R2
+
+P9 (room & board) stays R3. **P10** countable assets $1,520 → alert, notices + plan required. **P12** day 16 with no Form D → step overdue. Plus: Form B refused while a line is unmatched or a receipt is missing; signing B seals the month; C with a recorded exception completes and flags; a D finding opens a CD item and G still completes; the column mapping is reused on the second import and re-asked when headers change.
 
 ## Not in Release 1 (decided when each release starts)
 
