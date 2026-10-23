@@ -9,8 +9,21 @@
 -- start while the staff member has an open EVV visit (the app closes an open punch when an EVV visit
 -- starts). The weekly calculation (R1c) merges punches and EVV sessions so time is never counted twice.
 --
+-- r1 (Greptile round 1, before this file ever ran):
+--   · the EVV hand-off moves into the database: a BEFORE INSERT trigger on evv_sessions ends the staff
+--     member's open punch in the same transaction as the EVV insert, so a failed insert leaves the
+--     punch open (no lost hours) and a successful one never leaves two clocks running;
+--   · time_clock_in and the hand-off take the same per-staff advisory lock, so a punch and an EVV
+--     clock-in can't race past each other;
+--   · corrections set corrected_at and capture the originals once, so a forgotten clock-out closed by
+--     a manager is marked corrected and a second correction never overwrites the first originals.
+-- r2: self-test 12 called the hand-off and checked its result in the same statement, so the check
+--   read the row as it was before the hand-off (one statement, one snapshot). The call and the check
+--   are now separate statements. The first r1 run rolled back; nothing was applied.
+--
 -- RUN IN SUPABASE (SQL editor), ONCE. One transaction:
---   preflight → tables → functions → RLS + grants → rolled-back self-test → COMMIT → verification table.
+--   preflight → tables → functions → EVV hand-off trigger → RLS + grants → rolled-back self-test → COMMIT
+--   → verification table.
 -- =====================================================================================
 
 begin;
@@ -63,7 +76,8 @@ create table time_punches (
   clock_out_lat         numeric(9,6) check (clock_out_lat between -90 and 90),
   clock_out_lng         numeric(9,6) check (clock_out_lng between -180 and 180),
   original_clock_in_at  timestamptz,
-  original_clock_out_at timestamptz,
+  original_clock_out_at timestamptz,   -- null with corrected_at set = the punch was still open when first corrected
+  corrected_at          timestamptz,   -- set on the first correction; the originals are captured exactly then
   note                  text,
   created_at            timestamptz not null default now(),
   foreign key (staff_id, org_id)  references staff(id, org_id),
@@ -73,6 +87,7 @@ create table time_punches (
   check (work_type in ('service','indirect') or (person_id is null and service_code_id is null)),
   check ((clock_in_lat is null) = (clock_in_lng is null)),
   check ((clock_out_lat is null) = (clock_out_lng is null)),
+  check ((corrected_at is null) = (original_clock_in_at is null)),
   -- One stretch of time per staff member: punches never overlap, and an open punch
   -- (no clock-out yet) blocks a second one.
   constraint time_punches_no_overlap
@@ -98,6 +113,13 @@ create table time_punch_edit_log (
 -- -------------------------------------------------------------------------------------
 -- 2. Internal functions (explicit org + staff; never callable by clients)
 -- -------------------------------------------------------------------------------------
+-- One lock per staff member, held to the end of the transaction. Every path that starts or ends a
+-- clock for a staff member takes it first, so the time clock and the EVV clock can't race.
+create function _time_staff_lock(p_staff uuid)
+returns void language sql security definer set search_path = public, pg_temp as $$
+  select pg_advisory_xact_lock(hashtextextended('provly.clock:' || p_staff::text, 0));
+$$;
+
 create function _time_clock_in(p_org uuid, p_staff uuid, p_work_type text, p_person uuid,
                                p_service_code text, p_shift uuid, p_lat numeric, p_lng numeric, p_note text)
 returns uuid language plpgsql security definer set search_path = public, pg_temp as $$
@@ -106,6 +128,7 @@ declare
   v_evv  boolean;
   v_id   uuid;
 begin
+  perform _time_staff_lock(p_staff);
   if not exists (select 1 from staff where id = p_staff and org_id = p_org and is_active) then
     raise exception 'staff member not found or inactive' using errcode = 'P0002';
   end if;
@@ -160,6 +183,7 @@ returns void language plpgsql security definer set search_path = public, pg_temp
 declare
   v_old jsonb;
 begin
+  perform _time_staff_lock(p_staff);
   select to_jsonb(t) into v_old from time_punches t
   where t.id = p_punch and t.org_id = p_org and t.staff_id = p_staff and t.clock_out_at is null
   for update;
@@ -196,11 +220,13 @@ begin
   end if;
 
   begin
+    -- SET expressions read the row as it was: the originals are captured only on the first correction.
     update time_punches set
-      original_clock_in_at  = coalesce(original_clock_in_at,  case when p_clock_in  is not null then clock_in_at  end),
-      original_clock_out_at = coalesce(original_clock_out_at, case when p_clock_out is not null then clock_out_at end),
-      clock_in_at  = coalesce(p_clock_in,  clock_in_at),
-      clock_out_at = coalesce(p_clock_out, clock_out_at)
+      original_clock_in_at  = case when corrected_at is null then clock_in_at  else original_clock_in_at  end,
+      original_clock_out_at = case when corrected_at is null then clock_out_at else original_clock_out_at end,
+      corrected_at          = coalesce(corrected_at, clock_timestamp()),
+      clock_in_at           = coalesce(p_clock_in,  clock_in_at),
+      clock_out_at          = coalesce(p_clock_out, clock_out_at)
     where id = p_punch;
   exception when exclusion_violation then
     raise exception 'the corrected times overlap another punch for this staff member' using errcode = '23514';
@@ -222,6 +248,51 @@ begin
                       from time_punches t where t.id = p_punch), p_actor_staff);
 end
 $$;
+
+-- EVV hand-off: a live EVV clock-in (no clock-out yet) that starts after the staff member's open punch
+-- ends that punch at the visit's start, in the same transaction as the EVV insert. Back-dated or
+-- already-completed EVV entries leave the punch alone (the weekly calculation merges any overlap).
+create function _time_evv_handoff(p_org uuid, p_staff uuid, p_at timestamptz, p_live boolean,
+                                  p_lat numeric, p_lng numeric)
+returns uuid language plpgsql security definer set search_path = public, pg_temp as $$
+declare
+  v_punch time_punches;
+  v_ok    boolean := p_lat is not null and p_lng is not null
+                     and p_lat between -90 and 90 and p_lng between -180 and 180;
+begin
+  if not p_live or p_at is null then
+    return null;
+  end if;
+  perform _time_staff_lock(p_staff);
+  select * into v_punch from time_punches
+  where staff_id = p_staff and org_id = p_org and clock_out_at is null
+  for update;
+  if not found or p_at <= v_punch.clock_in_at then
+    return null;
+  end if;
+  update time_punches
+     set clock_out_at  = p_at,
+         clock_out_lat = case when v_ok then round(p_lat, 6) end,
+         clock_out_lng = case when v_ok then round(p_lng, 6) end
+   where id = v_punch.id;
+  perform _pay_audit(p_org, 'time_punch_evv', 'time_punches', v_punch.id, to_jsonb(v_punch),
+                     (select to_jsonb(t) from time_punches t where t.id = v_punch.id), p_staff);
+  return v_punch.id;
+end
+$$;
+
+create function trg_evv_time_punch_handoff() returns trigger
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  perform _time_evv_handoff(new.org_id, new.staff_id, new.clock_in_at, new.clock_out_at is null,
+                            new.clock_in_lat, new.clock_in_lng);
+  return new;
+end
+$$;
+
+create trigger evv_sessions_time_punch_handoff
+  before insert on evv_sessions
+  for each row execute function trg_evv_time_punch_handoff();
 
 -- -------------------------------------------------------------------------------------
 -- 3. Client-facing RPCs
@@ -310,11 +381,12 @@ begin
     select p.oid::regprocedure as sig, p.proname
     from pg_proc p join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'public'
-      and p.proname in ('_time_clock_in','_time_clock_out','_time_correct_punch',
+      and p.proname in ('_time_staff_lock','_time_clock_in','_time_clock_out','_time_correct_punch',
+                        '_time_evv_handoff','trg_evv_time_punch_handoff',
                         'time_clock_in','time_clock_out','time_correct_punch')
   loop
     execute format('revoke all on function %s from public, anon, authenticated', f.sig);
-    if left(f.proname, 1) <> '_' then
+    if left(f.proname, 1) <> '_' and left(f.proname, 4) <> 'trg_' then
       execute format('grant execute on function %s to authenticated', f.sig);
     end if;
   end loop;
@@ -332,7 +404,11 @@ declare
   v_person uuid;
   v_a      uuid;
   v_b      uuid;
+  v_c      uuid;
+  v_d      uuid;
+  v_closed uuid;
   v_in     timestamptz;
+  v_d_in   timestamptz;
   v_evv    text;
   v_nonevv text;
 begin
@@ -397,13 +473,20 @@ begin
     exception when sqlstate '23514' then null;
     end;
 
-    -- 8. A correction keeps the original time and logs the change
+    -- 8. A correction keeps the original time, marks the punch corrected and logs the change
     select clock_in_at into v_in from time_punches where id = v_a;
     perform _time_correct_punch(v_org, v_owner, null, v_a, v_in - interval '1 hour', null, 'self-test: started earlier');
     if not exists (select 1 from time_punches where id = v_a and original_clock_in_at = v_in
-                   and clock_in_at = v_in - interval '1 hour')
+                   and clock_in_at = v_in - interval '1 hour' and corrected_at is not null)
        or not exists (select 1 from time_punch_edit_log where punch_id = v_a and field = 'clock_in_at') then
-      raise exception 'SELFTEST FAIL 8: correction not preserved or not logged';
+      raise exception 'SELFTEST FAIL 8: correction not preserved, not marked or not logged';
+    end if;
+
+    -- 8b. A second correction never overwrites the first originals
+    perform _time_correct_punch(v_org, v_owner, null, v_a, v_in - interval '2 hours', null, 'self-test: earlier still');
+    if not exists (select 1 from time_punches where id = v_a and original_clock_in_at = v_in
+                   and clock_in_at = v_in - interval '2 hours') then
+      raise exception 'SELFTEST FAIL 8b: second correction overwrote the originals';
     end if;
 
     -- 9. A correction needs a reason
@@ -419,6 +502,37 @@ begin
       raise exception 'SELFTEST FAIL 10: overlapping correction accepted';
     exception when sqlstate '23514' then null;
     end;
+
+    -- 12. EVV hand-off: a live EVV clock-in ends the open punch at the visit's start
+    -- (the call and the check are separate statements: a check in the same statement would read
+    --  the row as it was before the hand-off)
+    v_c := _time_clock_in(v_org, v_staff, 'admin', null, null, null, null, null, 'self-test');
+    v_closed := _time_evv_handoff(v_org, v_staff, clock_timestamp(), true, 40.730000, -111.860000);
+    if v_closed is distinct from v_c
+       or not exists (select 1 from time_punches where id = v_c and clock_out_at is not null and clock_out_lat = 40.73) then
+      raise exception 'SELFTEST FAIL 12: EVV hand-off did not end the open punch';
+    end if;
+
+    -- 13. Completed or back-dated EVV entries leave an open punch alone
+    v_d := _time_clock_in(v_org, v_staff, 'meeting', null, null, null, null, null, 'self-test');
+    select clock_in_at into v_d_in from time_punches where id = v_d;
+    v_closed := _time_evv_handoff(v_org, v_staff, clock_timestamp(), false, null, null);
+    if v_closed is not null then
+      raise exception 'SELFTEST FAIL 13: a completed EVV entry ended the punch';
+    end if;
+    v_closed := _time_evv_handoff(v_org, v_staff, v_d_in - interval '1 day', true, null, null);
+    if v_closed is not null
+       or not exists (select 1 from time_punches where id = v_d and clock_out_at is null) then
+      raise exception 'SELFTEST FAIL 13b: a back-dated EVV entry ended the punch';
+    end if;
+
+    -- 14. A forgotten clock-out closed by a manager is marked corrected (original clock-out = still open)
+    perform _time_correct_punch(v_org, v_owner, null, v_d, null, v_d_in + interval '30 minutes', 'self-test: forgot to clock out');
+    if not exists (select 1 from time_punches where id = v_d and corrected_at is not null
+                   and original_clock_out_at is null and original_clock_in_at = v_d_in
+                   and clock_out_at = v_d_in + interval '30 minutes') then
+      raise exception 'SELFTEST FAIL 14: closing a forgotten punch was not marked corrected';
+    end if;
 
     -- 11. Without a signed-in session the client RPCs refuse
     begin
@@ -462,7 +576,9 @@ with checks as (
   union all
   select 5, 'Internal time functions callable by clients',
          (select count(*) from pg_proc p join pg_namespace ns on ns.oid = p.pronamespace
-          where ns.nspname = 'public' and p.proname in ('_time_clock_in','_time_clock_out','_time_correct_punch')
+          where ns.nspname = 'public'
+            and p.proname in ('_time_staff_lock','_time_clock_in','_time_clock_out','_time_correct_punch',
+                              '_time_evv_handoff','trg_evv_time_punch_handoff')
             and (has_function_privilege('authenticated', p.oid, 'EXECUTE')
                  or has_function_privilege('anon', p.oid, 'EXECUTE')))::text, '0'
   union all
@@ -480,10 +596,14 @@ with checks as (
   union all
   select 9, 'Self-test leftovers (punches)', (select count(*) from time_punches)::text, '0'
   union all
-  select 10, 'EVV sessions untouched (no new triggers on evv_sessions)',
-         (select count(*) from pg_trigger tg join pg_proc p on p.oid = tg.tgfoid
-          where tg.tgrelid = 'public.evv_sessions'::regclass and not tg.tgisinternal
-            and p.proname like '%time%')::text, '0'
+  select 10, 'EVV hand-off trigger on evv_sessions (before insert)',
+         (select count(*) from pg_trigger tg
+          where tg.tgrelid = 'public.evv_sessions'::regclass and tg.tgname = 'evv_sessions_time_punch_handoff'
+            and not tg.tgisinternal)::text, '1'
+  union all
+  select 11, 'Corrected flag on punches',
+         (select count(*) from information_schema.columns
+          where table_schema = 'public' and table_name = 'time_punches' and column_name = 'corrected_at')::text, '1'
 )
 select n, check_name, got, want, case when got = want then '✅' else '❌' end as ok
 from checks

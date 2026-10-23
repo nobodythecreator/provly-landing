@@ -40,7 +40,8 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
-  <!-- v20.0.32 (pay engine R1b part 1 — the time clock; docs/pay-engine-design.md, Decision 15): the EVV page gains a Time clock card for work EVV doesn't cover — nursing visits and other non-EVV service, indirect service, training, meetings, admin. Clock in picks the work (and the code and client for service), captures one location point if the device allows it (hours are recorded either way), and clock out captures one more; never continuous tracking. Starting an EVV visit ends your open time-clock punch at that moment, so only one clock runs at a time. Managers and supervisors see recent punches and correct them with a reason (originals kept, change logged; nobody but the owner corrects their own). Database side: sql/v20.0.32_time_clock.sql. -->
+  <!-- v20.0.32 r1 (Greptile r1): the EVV hand-off happens in the database — a trigger on evv_sessions ends an open time-clock punch in the same transaction as the EVV insert (a failed insert leaves the punch open; two clocks never run), and the time clock and EVV clock-in share a per-staff lock so they can't race. Corrections mark the punch corrected and keep the first originals. The card hides only when the time clock tables don't exist yet; any other load error shows Retry and keeps the last known punch and its Clock out. -->
+  <!-- v20.0.32 (pay engine R1b part 1 — the time clock; docs/pay-engine-design.md, Decision 15): the EVV page gains a Time clock card for work EVV doesn't cover — nursing visits and other non-EVV service, indirect service, training, meetings, admin. Clock in picks the work (and the code and client for service), captures one location point if the device allows it (hours are recorded either way), and clock out captures one more; never continuous tracking. Starting an EVV visit ends the staff member's open time-clock punch at that moment, so only one clock runs at a time. Managers and supervisors see recent punches and correct them with a reason (originals kept, change logged; nobody but the owner corrects their own). Database side: sql/v20.0.32_time_clock.sql. -->
   <!-- v20.0.30 r3 (Greptile r3): if the spend-down status can't be loaded, the Benefits card says so (with Retry) instead of showing valid payments as no longer standing. Database side: sql/v20.0.30r3_benefits.sql. -->
   <!-- v20.0.30 r2 (Greptile r2): confirming unreadable bank rows is tied to the exact rows and mapping it was given for — change a column or the date format and it must be confirmed again; spend-downs show paid only while their payment still stands (from the database), with a prompt to link another when it doesn't; the asset response answers the close the alert is about (or this month's live warning). Database side: sql/v20.0.30r2_benefits.sql. -->
   <!-- v20.0.30 r1 (Greptile r1): a bank row that can't be read is never dropped — every non-blank row is counted and blocks the import until fixed; the close card shows only the accounts open in that month (as the database does) and refreshes when accounts change; "Accept all exact matches" reports what actually matched and stops on the first failure. Database side: sql/v20.0.30r1_close.sql (the seal enforced by triggers under the close's lock, the opening-balance chain, manager-only Form C witnesses, spend-down payments that cover it, asset responses dated after the close). -->
@@ -8982,10 +8983,12 @@
     // Nursing visits and other non-EVV service, indirect service, training, meetings, admin.
     // One location point at punch in and one at punch out — never continuous tracking — and
     // location is optional: hours are recorded even when the device can't give one.
-    // EVV sessions are unchanged and count as worked time on their own; an open punch ends
-    // when the same person starts an EVV visit (see EVVPage.handleClockIn).
+    // EVV sessions count as worked time on their own. When a staff member starts an EVV visit,
+    // the database ends their open punch in the same transaction as the EVV insert (trigger on
+    // evv_sessions), so a failed insert leaves the punch open and two clocks never run together.
     // Writes go through time_clock_in / time_clock_out / time_correct_punch
-    // (sql/v20.0.32_time_clock.sql). Until that runs, the card stays hidden.
+    // (sql/v20.0.32_time_clock.sql). Until that runs, the card stays hidden; any other load
+    // error shows a Retry and keeps the last known punch (and its Clock out) on screen.
     // ═══════════════════════════════════════════════════════════════
     const TIME_WORK_TYPES = [
       { value: "service",  label: "Service visit (non-EVV code)" },
@@ -9019,6 +9022,7 @@
       const canFix = accessTier === "manage" || accessTier === "operate";
       const emptyForm = { work_type: "training", person_id: "", service_code: "", note: "" };
       const [available, setAvailable] = useState(true);
+      const [loadError, setLoadError] = useState(null);
       const [openPunch, setOpenPunch] = useState(null);
       const [busy, setBusy] = useState(false);
       const [showIn, setShowIn] = useState(false);
@@ -9035,12 +9039,21 @@
         const mine = await supabase.from("time_punches")
           .select("id, work_type, clock_in_at, person_id, service_code_id")
           .eq("staff_id", myStaffId).is("clock_out_at", null).maybeSingle();
-        if (mine.error) { setAvailable(false); return; }   // sql/v20.0.32_time_clock.sql not run yet
+        if (mine.error) {
+          // Hide the card only when the table doesn't exist yet (migration not run). Any other
+          // error keeps the last known punch on screen and offers a Retry.
+          const missing = mine.error.code === "42P01" || mine.error.code === "PGRST205"
+            || /time_punches/i.test(mine.error.message || "") && /does not exist|schema cache/i.test(mine.error.message || "");
+          if (missing) { setAvailable(false); return; }
+          setLoadError(mine.error.message || "Couldn\u2019t load the time clock");
+          return;
+        }
         setAvailable(true);
+        setLoadError(null);
         setOpenPunch(mine.data || null);
         if (canFix) {
           const r = await supabase.from("time_punches")
-            .select("id, staff_id, work_type, service_code_id, clock_in_at, clock_out_at, original_clock_in_at, original_clock_out_at")
+            .select("id, staff_id, work_type, service_code_id, clock_in_at, clock_out_at, corrected_at")
             .order("clock_in_at", { ascending: false }).limit(50);
           if (!r.error) setRecent(r.data || []);
         }
@@ -9162,6 +9175,12 @@
                   ? `On the clock: ${timeWorkLabel(openPunch.work_type)}${openPunch.service_code_id && codeById(openPunch.service_code_id) ? ` · ${codeById(openPunch.service_code_id)}` : ""} since ${fmtT(openPunch.clock_in_at)}`
                   : "For work EVV doesn\u2019t cover \u2014 nursing visits, DSG, training, meetings, admin."}
               </div>
+              {loadError && (
+                <div style={{ fontSize: 12, color: CB.red, marginTop: 6, display: "flex", alignItems: "center", gap: 8 }}>
+                  {icons.alertTriangle({ size: 13, color: CB.red })} Couldn{"\u2019"}t refresh the time clock ({loadError}).
+                  <button onClick={load} style={{ border: `1px solid ${CB.border}`, background: CB.white, borderRadius: 8, padding: "2px 10px", fontSize: 12, cursor: "pointer" }}>Retry</button>
+                </div>
+              )}
             </div>
             {openPunch
               ? <PrimaryButton onClick={clockOut} loading={busy} color={CB.red}>{icons.stop({ size: 14, color: CB.white })} Clock out</PrimaryButton>
@@ -9176,7 +9195,7 @@
                   <span style={{ minWidth: 130, fontWeight: 600 }}>{staffName(p.staff_id)}</span>
                   <span style={{ minWidth: 150 }}>{timeWorkLabel(p.work_type)}{p.service_code_id && codeById(p.service_code_id) ? ` · ${codeById(p.service_code_id)}` : ""}</span>
                   <span style={{ minWidth: 200, color: CB.textMid }}>{fmtT(p.clock_in_at)} → {p.clock_out_at ? fmtT(p.clock_out_at) : "open"}</span>
-                  {(p.original_clock_in_at || p.original_clock_out_at) && <span style={{ color: CB.amber, fontWeight: 600 }}>corrected</span>}
+                  {p.corrected_at && <span style={{ color: CB.amber, fontWeight: 600 }}>corrected</span>}
                   <button onClick={() => openFix(p)} style={{ marginLeft: "auto", border: `1px solid ${CB.border}`, background: CB.white, borderRadius: 8, padding: "4px 10px", fontSize: 12, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 4 }}>
                     {icons.edit({ size: 12, color: CB.textMid })} Fix
                   </button>
@@ -9505,25 +9524,13 @@
           const now = new Date();
           const nowISO = now.toISOString();
 
-          // v20.0.32 — one clock at a time. If this staff member is on the time clock, starting an
-          // EVV visit ends that punch now (your own), or stops here (someone else's — they clock out
-          // of it first). If sql/v20.0.32_time_clock.sql hasn't run, the lookup errors and EVV goes on.
+          // v20.0.32 — one clock at a time. The database ends this staff member's open time-clock
+          // punch in the same transaction as the EVV insert below (trigger on evv_sessions), so a
+          // failed insert leaves the punch open. This read only decides whether to refresh the card
+          // and say so afterwards; if sql/v20.0.32_time_clock.sql hasn't run, it errors and is ignored.
           const openPunchRes = await supabase.from("time_punches").select("id")
             .eq("staff_id", clockForm.staff_id).is("clock_out_at", null).maybeSingle();
-          if (!openPunchRes.error && openPunchRes.data) {
-            if (staffProfile && staffProfile.id === clockForm.staff_id) {
-              const { error: punchOutErr } = await supabase.rpc("time_clock_out", {
-                p_punch: openPunchRes.data.id,
-                p_lat: Number(Number(gps.lat).toFixed(6)),
-                p_lng: Number(Number(gps.lng).toFixed(6)),
-              });
-              if (punchOutErr) throw punchOutErr;
-              window.dispatchEvent(new Event(TIME_PUNCH_EVENT));
-              addToast("Your time-clock punch ended as this visit started", "info");
-            } else {
-              throw new Error("This staff member is still on the time clock — they need to clock out of it first");
-            }
-          }
+          const hadOpenPunch = !openPunchRes.error && !!openPunchRes.data;
 
           // ── v19.0: look for a scheduled shift to link ──
           // Match: same staff+client, same day, scheduled_start within ±60 min of now, status still "scheduled"
@@ -9604,6 +9611,10 @@
             addToast("Clocked in — context linked", "success");
           } else {
             addToast("Clocked in successfully", "success");
+          }
+          if (hadOpenPunch) {   // v20.0.32 — the database ended the open punch with this insert
+            window.dispatchEvent(new Event(TIME_PUNCH_EVENT));
+            addToast("The open time-clock punch ended as this visit started", "info");
           }
           setShowClockIn(false);
           loadAll();
