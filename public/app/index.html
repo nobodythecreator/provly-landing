@@ -40,6 +40,7 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.32 (pay engine R1b part 1 — the time clock; docs/pay-engine-design.md, Decision 15): the EVV page gains a Time clock card for work EVV doesn't cover — nursing visits and other non-EVV service, indirect service, training, meetings, admin. Clock in picks the work (and the code and client for service), captures one location point if the device allows it (hours are recorded either way), and clock out captures one more; never continuous tracking. Starting an EVV visit ends your open time-clock punch at that moment, so only one clock runs at a time. Managers and supervisors see recent punches and correct them with a reason (originals kept, change logged; nobody but the owner corrects their own). Database side: sql/v20.0.32_time_clock.sql. -->
   <!-- v20.0.30 r3 (Greptile r3): if the spend-down status can't be loaded, the Benefits card says so (with Retry) instead of showing valid payments as no longer standing. Database side: sql/v20.0.30r3_benefits.sql. -->
   <!-- v20.0.30 r2 (Greptile r2): confirming unreadable bank rows is tied to the exact rows and mapping it was given for — change a column or the date format and it must be confirmed again; spend-downs show paid only while their payment still stands (from the database), with a prompt to link another when it doesn't; the asset response answers the close the alert is about (or this month's live warning). Database side: sql/v20.0.30r2_benefits.sql. -->
   <!-- v20.0.30 r1 (Greptile r1): a bank row that can't be read is never dropped — every non-blank row is counted and blocks the import until fixed; the close card shows only the accounts open in that month (as the database does) and refreshes when accounts change; "Accept all exact matches" reports what actually matched and stops on the first failure. Database side: sql/v20.0.30r1_close.sql (the seal enforced by triggers under the close's lock, the opening-balance chain, manager-only Form C witnesses, spend-down payments that cover it, asset responses dated after the close). -->
@@ -1886,7 +1887,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.30</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.32</span>
               </div>
             </button>
             {isMobile && (
@@ -8977,6 +8978,269 @@
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // v20.0.32 — TIME CLOCK for work EVV doesn't cover (pay-engine Decision 15)
+    // Nursing visits and other non-EVV service, indirect service, training, meetings, admin.
+    // One location point at punch in and one at punch out — never continuous tracking — and
+    // location is optional: hours are recorded even when the device can't give one.
+    // EVV sessions are unchanged and count as worked time on their own; an open punch ends
+    // when the same person starts an EVV visit (see EVVPage.handleClockIn).
+    // Writes go through time_clock_in / time_clock_out / time_correct_punch
+    // (sql/v20.0.32_time_clock.sql). Until that runs, the card stays hidden.
+    // ═══════════════════════════════════════════════════════════════
+    const TIME_WORK_TYPES = [
+      { value: "service",  label: "Service visit (non-EVV code)" },
+      { value: "indirect", label: "Indirect service" },
+      { value: "training", label: "Training" },
+      { value: "meeting",  label: "Meeting" },
+      { value: "admin",    label: "Admin / assigned work" },
+    ];
+    const TIME_PUNCH_EVENT = "provly-time-punch-changed";
+    const timeWorkLabel = (v) => (TIME_WORK_TYPES.find(t => t.value === v) || {}).label || v;
+
+    // One location fix, or null when the device can't give one.
+    function captureLocationOnce() {
+      return new Promise(resolve => {
+        if (!navigator.geolocation) return resolve(null);
+        let done = false;
+        const finish = (v) => { if (!done) { done = true; resolve(v); } };
+        navigator.geolocation.getCurrentPosition(
+          pos => finish({ lat: Number(pos.coords.latitude.toFixed(6)), lng: Number(pos.coords.longitude.toFixed(6)) }),
+          () => finish(null),
+          { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+        );
+        setTimeout(() => finish(null), 17000);
+      });
+    }
+
+    function TimeClockCard() {
+      const { addToast } = useToast();
+      const { staffProfile, accessTier } = useAuth();
+      const myStaffId = staffProfile?.id;
+      const canFix = accessTier === "manage" || accessTier === "operate";
+      const emptyForm = { work_type: "training", person_id: "", service_code: "", note: "" };
+      const [available, setAvailable] = useState(true);
+      const [openPunch, setOpenPunch] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const [showIn, setShowIn] = useState(false);
+      const [form, setForm] = useState(emptyForm);
+      const [codes, setCodes] = useState([]);
+      const [clients, setClients] = useState([]);
+      const [staffNames, setStaffNames] = useState([]);
+      const [recent, setRecent] = useState([]);
+      const [fixing, setFixing] = useState(null);
+      const [fixForm, setFixForm] = useState({ clock_in: "", clock_out: "", reason: "" });
+
+      const load = useCallback(async () => {
+        if (!myStaffId) return;
+        const mine = await supabase.from("time_punches")
+          .select("id, work_type, clock_in_at, person_id, service_code_id")
+          .eq("staff_id", myStaffId).is("clock_out_at", null).maybeSingle();
+        if (mine.error) { setAvailable(false); return; }   // sql/v20.0.32_time_clock.sql not run yet
+        setAvailable(true);
+        setOpenPunch(mine.data || null);
+        if (canFix) {
+          const r = await supabase.from("time_punches")
+            .select("id, staff_id, work_type, service_code_id, clock_in_at, clock_out_at, original_clock_in_at, original_clock_out_at")
+            .order("clock_in_at", { ascending: false }).limit(50);
+          if (!r.error) setRecent(r.data || []);
+        }
+      }, [myStaffId, canFix]);
+
+      useEffect(() => { load(); }, [load]);
+      useEffect(() => {
+        const onChange = () => load();
+        window.addEventListener(TIME_PUNCH_EVENT, onChange);
+        return () => window.removeEventListener(TIME_PUNCH_EVENT, onChange);
+      }, [load]);
+      useEffect(() => {
+        (async () => {
+          const [c, p, s] = await Promise.all([
+            supabase.from("service_code_definitions").select("id, code, name, evv_required").order("code"),
+            supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name"),
+            canFix ? supabase.from("staff_directory_v").select("id, first_name, last_name") : Promise.resolve({ data: [] }),
+          ]);
+          setCodes(c.data || []);
+          setClients(p.data || []);
+          setStaffNames(s.data || []);
+        })();
+      }, [canFix]);
+
+      if (!myStaffId || !available) return null;
+
+      const needsCode = form.work_type === "service" || form.work_type === "indirect";
+      const codeOptions = codes.filter(c => form.work_type === "indirect" || !c.evv_required);
+      const codeById = (id) => (codes.find(c => c.id === id) || {}).code;
+      const staffName = (id) => { const s = staffNames.find(x => x.id === id); return s ? `${s.first_name} ${s.last_name}` : "—"; };
+      const fmtT = (iso) => iso ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "—";
+      const toLocalInput = (iso) => {
+        if (!iso) return "";
+        const d = new Date(iso); const pad = n => String(n).padStart(2, "0");
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      };
+
+      const clockIn = async () => {
+        if (needsCode && !form.service_code) return addToast("Pick the service code for this work", "error");
+        setBusy(true);
+        try {
+          const loc = await captureLocationOnce();
+          if (!loc && !window.confirm("Location isn't available. Clock in anyway? Your hours are recorded either way — only mileage for this stretch can't be estimated.")) return;
+          const { error } = await supabase.rpc("time_clock_in", {
+            p_work_type: form.work_type,
+            p_person: needsCode && form.person_id ? form.person_id : null,
+            p_service_code: needsCode ? form.service_code : null,
+            p_lat: loc ? loc.lat : null,
+            p_lng: loc ? loc.lng : null,
+            p_note: form.note.trim() || null,
+          });
+          if (error) throw error;
+          addToast("Clocked in", "success");
+          setShowIn(false);
+          setForm(emptyForm);
+          load();
+        } catch (e) {
+          addToast(e.message || "Could not clock in", "error");
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const clockOut = async () => {
+        if (!openPunch) return;
+        setBusy(true);
+        try {
+          const loc = await captureLocationOnce();
+          const { error } = await supabase.rpc("time_clock_out", {
+            p_punch: openPunch.id, p_lat: loc ? loc.lat : null, p_lng: loc ? loc.lng : null,
+          });
+          if (error) throw error;
+          addToast("Clocked out", "success");
+          load();
+        } catch (e) {
+          addToast(e.message || "Could not clock out", "error");
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const openFix = (p) => {
+        setFixing(p);
+        setFixForm({ clock_in: toLocalInput(p.clock_in_at), clock_out: toLocalInput(p.clock_out_at), reason: "" });
+      };
+      const saveFix = async () => {
+        if (!fixForm.reason.trim()) return addToast("A reason is required", "error");
+        const inChanged = fixForm.clock_in && fixForm.clock_in !== toLocalInput(fixing.clock_in_at);
+        const outChanged = fixForm.clock_out && fixForm.clock_out !== toLocalInput(fixing.clock_out_at);
+        if (!inChanged && !outChanged) return addToast("No changes to save", "info");
+        setBusy(true);
+        try {
+          const { error } = await supabase.rpc("time_correct_punch", {
+            p_punch: fixing.id,
+            p_clock_in: inChanged ? new Date(fixForm.clock_in).toISOString() : null,
+            p_clock_out: outChanged ? new Date(fixForm.clock_out).toISOString() : null,
+            p_reason: fixForm.reason.trim(),
+          });
+          if (error) throw error;
+          addToast("Time punch corrected", "success");
+          setFixing(null);
+          load();
+        } catch (e) {
+          addToast(e.message || "Could not correct the punch", "error");
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      return (
+        <div style={{ background: CB.white, border: `1px solid ${CB.border}`, borderRadius: 14, padding: "16px 20px", marginBottom: 20 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 800, color: CB.navy, display: "flex", alignItems: "center", gap: 8 }}>
+                {icons.clock({ size: 16, color: CB.navy })} Time clock
+              </div>
+              <div style={{ fontSize: 12, color: CB.textMid, marginTop: 2 }}>
+                {openPunch
+                  ? `On the clock: ${timeWorkLabel(openPunch.work_type)}${openPunch.service_code_id && codeById(openPunch.service_code_id) ? ` · ${codeById(openPunch.service_code_id)}` : ""} since ${fmtT(openPunch.clock_in_at)}`
+                  : "For work EVV doesn\u2019t cover \u2014 nursing visits, DSG, training, meetings, admin."}
+              </div>
+            </div>
+            {openPunch
+              ? <PrimaryButton onClick={clockOut} loading={busy} color={CB.red}>{icons.stop({ size: 14, color: CB.white })} Clock out</PrimaryButton>
+              : <PrimaryButton onClick={() => setShowIn(true)} color={CB.teal}>{icons.play({ size: 14, color: CB.white })} Clock in</PrimaryButton>}
+          </div>
+
+          {canFix && recent.length > 0 && (
+            <div style={{ marginTop: 14, borderTop: `1px solid ${CB.border}`, paddingTop: 10 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>Recent time punches</div>
+              {recent.map(p => (
+                <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0", borderBottom: `1px solid ${CB.border}`, fontSize: 12, color: CB.text, flexWrap: "wrap" }}>
+                  <span style={{ minWidth: 130, fontWeight: 600 }}>{staffName(p.staff_id)}</span>
+                  <span style={{ minWidth: 150 }}>{timeWorkLabel(p.work_type)}{p.service_code_id && codeById(p.service_code_id) ? ` · ${codeById(p.service_code_id)}` : ""}</span>
+                  <span style={{ minWidth: 200, color: CB.textMid }}>{fmtT(p.clock_in_at)} → {p.clock_out_at ? fmtT(p.clock_out_at) : "open"}</span>
+                  {(p.original_clock_in_at || p.original_clock_out_at) && <span style={{ color: CB.amber, fontWeight: 600 }}>corrected</span>}
+                  <button onClick={() => openFix(p)} style={{ marginLeft: "auto", border: `1px solid ${CB.border}`, background: CB.white, borderRadius: 8, padding: "4px 10px", fontSize: 12, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    {icons.edit({ size: 12, color: CB.textMid })} Fix
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <Modal open={showIn} onClose={() => setShowIn(false)} title="Clock in" subtitle="For work EVV doesn't cover. One location point is captured if your device allows it.">
+            <FormField label="Work" required>
+              <select style={fieldStyle} value={form.work_type} onChange={e => setForm(p => ({ ...p, work_type: e.target.value, person_id: "", service_code: "" }))}>
+                {TIME_WORK_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+              </select>
+            </FormField>
+            {needsCode && (
+              <>
+                <FormField label="Service code" required>
+                  <select style={fieldStyle} value={form.service_code} onChange={e => setForm(p => ({ ...p, service_code: e.target.value }))}>
+                    <option value="">Select code...</option>
+                    {codeOptions.map(c => <option key={c.id} value={c.code}>{c.code} — {c.name}</option>)}
+                  </select>
+                  {form.work_type === "service" && (
+                    <div style={{ marginTop: 4, fontSize: 11, color: CB.textLight }}>EVV codes aren't listed — clock in for those with the EVV Clock In above.</div>
+                  )}
+                </FormField>
+                <FormField label="Client (if the work is for one person)">
+                  <select style={fieldStyle} value={form.person_id} onChange={e => setForm(p => ({ ...p, person_id: e.target.value }))}>
+                    <option value="">(none — group or not client-specific)</option>
+                    {clients.map(c => <option key={c.id} value={c.id}>{c.first_name} {c.last_name}</option>)}
+                  </select>
+                </FormField>
+              </>
+            )}
+            <FormField label="Note">
+              <input style={fieldStyle} value={form.note} onChange={e => setForm(p => ({ ...p, note: e.target.value }))} placeholder="Optional" />
+            </FormField>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <SecondaryButton onClick={() => setShowIn(false)}>Cancel</SecondaryButton>
+              <PrimaryButton onClick={clockIn} loading={busy} color={CB.teal}>{icons.play({ size: 14, color: CB.white })} Clock in</PrimaryButton>
+            </div>
+          </Modal>
+
+          <Modal open={!!fixing} onClose={() => setFixing(null)} title="Correct time punch" subtitle={fixing ? `${staffName(fixing.staff_id)} · ${timeWorkLabel(fixing.work_type)}. The original times are kept and the change is logged.` : ""}>
+            <FormRow>
+              <FormField label="Clock in" half>
+                <input type="datetime-local" style={fieldStyle} value={fixForm.clock_in} onChange={e => setFixForm(p => ({ ...p, clock_in: e.target.value }))} />
+              </FormField>
+              <FormField label="Clock out" half>
+                <input type="datetime-local" style={fieldStyle} value={fixForm.clock_out} onChange={e => setFixForm(p => ({ ...p, clock_out: e.target.value }))} />
+              </FormField>
+            </FormRow>
+            <FormField label="Reason" required>
+              <input style={fieldStyle} value={fixForm.reason} onChange={e => setFixForm(p => ({ ...p, reason: e.target.value }))} placeholder="e.g., forgot to clock out at 4:30 PM" />
+            </FormField>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <SecondaryButton onClick={() => setFixing(null)}>Cancel</SecondaryButton>
+              <PrimaryButton onClick={saveFix} loading={busy} color={CB.teal}>{icons.save({ size: 14, color: CB.white })} Save correction</PrimaryButton>
+            </div>
+          </Modal>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // MODULE 5: EVV CLOCK IN / OUT — GPS-based with geofence
     // ═══════════════════════════════════════════════════════════════
     function EVVPage() {
@@ -9240,6 +9504,26 @@
           const gps = await getGPS();
           const now = new Date();
           const nowISO = now.toISOString();
+
+          // v20.0.32 — one clock at a time. If this staff member is on the time clock, starting an
+          // EVV visit ends that punch now (your own), or stops here (someone else's — they clock out
+          // of it first). If sql/v20.0.32_time_clock.sql hasn't run, the lookup errors and EVV goes on.
+          const openPunchRes = await supabase.from("time_punches").select("id")
+            .eq("staff_id", clockForm.staff_id).is("clock_out_at", null).maybeSingle();
+          if (!openPunchRes.error && openPunchRes.data) {
+            if (staffProfile && staffProfile.id === clockForm.staff_id) {
+              const { error: punchOutErr } = await supabase.rpc("time_clock_out", {
+                p_punch: openPunchRes.data.id,
+                p_lat: Number(Number(gps.lat).toFixed(6)),
+                p_lng: Number(Number(gps.lng).toFixed(6)),
+              });
+              if (punchOutErr) throw punchOutErr;
+              window.dispatchEvent(new Event(TIME_PUNCH_EVENT));
+              addToast("Your time-clock punch ended as this visit started", "info");
+            } else {
+              throw new Error("This staff member is still on the time clock — they need to clock out of it first");
+            }
+          }
 
           // ── v19.0: look for a scheduled shift to link ──
           // Match: same staff+client, same day, scheduled_start within ±60 min of now, status still "scheduled"
@@ -9727,6 +10011,8 @@
           <PageHeader title="EVV" subtitle="GPS clock in/out for all 9 EVV-required codes with geofence validation"
             action={<PrimaryButton onClick={() => setShowClockIn(true)} color={CB.blue}>{icons.play({ size: 16 })} Clock In</PrimaryButton>}
           />
+
+          <TimeClockCard /> {/* v20.0.32 — the time clock for work EVV doesn't cover */}
 
           {/* Active sessions banner */}
           {activeSessions.length > 0 && (
