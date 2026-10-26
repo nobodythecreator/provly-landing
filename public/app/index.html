@@ -40,6 +40,7 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.34 (pay engine R1b part 2 — work blocks and cancellation reasons; Decision 17): the Schedule page gains a "Training, meetings & admin" card for scheduled non-service work (work blocks), beside the shift grid — managers and supervisors add, edit and cancel them (cancelling needs a reason); front-line logins see their own. A time-clock punch of the same type links to the work block scheduled at that time (done in the database). Cancelling a shift now asks whether it was no-fault (the Person, guardian or provider cancelled — leaves scheduled hours) or staff-caused (stays in scheduled hours). Database side: sql/v20.0.34_work_blocks.sql. -->
   <!-- v20.0.33 r1 (Greptile r1): if the signed-in staff profile didn't load, the Clock In form now looks up your staff record itself (my_staff_id) and shows a Retry if that fails, instead of leaving you unable to clock in. The "no clients" note shows only after the client list loaded successfully and came back empty; while it's loading the field says so, and a failed load shows a Retry — never false advice to change the schedule. -->
   <!-- v20.0.33 (hotfix — front-line EVV clock-in): a front-line login (deliver tier, e.g. a DSP) now sees only their own name in the EVV Clock In form, already selected, instead of the whole staff list — the database only accepts a front-line clock-in for yourself, so picking anyone else always failed. When a front-line login has no clients they're currently assigned to or scheduled with, the Client field says so and tells them who can fix it. Managers and supervisors keep the full staff picker. -->
   <!-- v20.0.32 r2 (Greptile r2): a live EVV clock-in always ends the open time-clock punch, even when the device clock runs behind the server (sql/v20.0.32a_time_clock_handoff.sql); the time clock card refreshes after every successful EVV clock-in, and only the "punch ended" message depends on the earlier lookup. -->
@@ -1891,7 +1892,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.33</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.34</span>
               </div>
             </button>
             {isMobile && (
@@ -7815,6 +7816,209 @@
       cancelled:   { bg: "#94A3B818", border: "#94A3B8", text: "#475569", label: "Cancelled" },
     };
 
+    // ═══════════════════════════════════════════════════════════════
+    // v20.0.34 — WORK BLOCKS: scheduled training, meetings and admin (pay-engine Decision 17)
+    // Beside shifts, never mixed into them: the shift grid and EVV shift-matching are unchanged.
+    // A time-clock punch of the same type, started from 30 minutes before a block to its end,
+    // links to it (sql/v20.0.34_work_blocks.sql) — that is what makes non-billable nursing time
+    // "assigned in advance". Managers and supervisors add, edit and cancel (with a reason);
+    // front-line logins see their own. Until the SQL runs, the card stays hidden.
+    // ═══════════════════════════════════════════════════════════════
+    const WORK_BLOCK_TYPES = [
+      { value: "training", label: "Training" },
+      { value: "meeting",  label: "Meeting" },
+      { value: "admin",    label: "Admin / assigned work" },
+    ];
+    const CANCEL_REASONS = [
+      { value: "no_fault", label: "No-fault — Person, guardian or provider cancelled" },
+      { value: "staff",    label: "Staff — staff cancelled or didn\u2019t show" },
+    ];
+
+    function WorkBlocksCard({ startISO, endISO, staffOptions }) {
+      const { addToast } = useToast();
+      const { accessTier } = useAuth();
+      const canEdit = accessTier === "manage" || accessTier === "operate";
+      const emptyForm = { id: null, staff_id: "", work_type: "training", scheduled_date: startISO, scheduled_start: "09:00", scheduled_end: "10:00", note: "" };
+      const [available, setAvailable] = useState(true);
+      const [blocks, setBlocks] = useState([]);
+      const [status, setStatus] = useState("loading");   // loading | ok | error
+      const [error, setError] = useState(null);
+      const [editing, setEditing] = useState(null);       // form object when the add/edit modal is open
+      const [cancelling, setCancelling] = useState(null); // block being cancelled
+      const [cancelForm, setCancelForm] = useState({ reason: "", note: "" });
+      const [busy, setBusy] = useState(false);
+
+      const load = useCallback(async () => {
+        const r = await supabase.from("work_blocks")
+          .select("id, staff_id, work_type, scheduled_date, scheduled_start, scheduled_end, note, status, cancellation_reason")
+          .gte("scheduled_date", startISO).lte("scheduled_date", endISO)
+          .order("scheduled_date").order("scheduled_start");
+        if (r.error) {
+          const missing = r.error.code === "42P01" || r.error.code === "PGRST205"
+            || (/work_blocks/i.test(r.error.message || "") && /does not exist|schema cache/i.test(r.error.message || ""));
+          if (missing) { setAvailable(false); return; }   // sql/v20.0.34_work_blocks.sql not run yet
+          setStatus("error"); setError(r.error.message);
+          return;
+        }
+        setAvailable(true);
+        setBlocks(r.data || []);
+        setStatus("ok"); setError(null);
+      }, [startISO, endISO]);
+      useEffect(() => { load(); }, [load]);
+
+      if (!available) return null;
+
+      const staffName = (id) => { const s = (staffOptions || []).find(x => x.id === id); return s ? `${s.first_name} ${s.last_name}` : "—"; };
+      const typeLabel = (v) => (WORK_BLOCK_TYPES.find(t => t.value === v) || {}).label || v;
+      const fmtDay = (d) => new Date(d + "T00:00:00").toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+      const fmtT = (t) => { const [h, m] = String(t || "").split(":").map(Number); const d = new Date(); d.setHours(h || 0, m || 0, 0, 0); return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); };
+
+      const save = async () => {
+        const f = editing;
+        if (!f.staff_id || !f.scheduled_date || !f.scheduled_start || !f.scheduled_end) return addToast("Staff, date, start and end are required", "error");
+        if (f.scheduled_end <= f.scheduled_start) return addToast("End time must be after the start time", "error");
+        setBusy(true);
+        try {
+          const { error: e } = await supabase.rpc("work_block_save", {
+            p_id: f.id, p_staff: f.staff_id, p_work_type: f.work_type, p_date: f.scheduled_date,
+            p_start: f.scheduled_start, p_end: f.scheduled_end, p_note: f.note.trim() || null,
+          });
+          if (e) throw e;
+          addToast(f.id ? "Work block updated" : "Work block scheduled", "success");
+          setEditing(null);
+          load();
+        } catch (e) {
+          addToast(e.message || "Could not save the work block", "error");
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const confirmCancel = async () => {
+        if (!cancelForm.reason) return addToast("Pick a cancellation reason", "error");
+        setBusy(true);
+        try {
+          const { error: e } = await supabase.rpc("work_block_cancel", {
+            p_id: cancelling.id, p_reason: cancelForm.reason, p_note: cancelForm.note.trim() || null,
+          });
+          if (e) throw e;
+          addToast("Work block cancelled", "success");
+          setCancelling(null);
+          load();
+        } catch (e) {
+          addToast(e.message || "Could not cancel the work block", "error");
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      return (
+        <div style={{ background: CB.white, border: `1px solid ${CB.border}`, borderRadius: 14, padding: "16px 20px", marginTop: 20 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 800, color: CB.navy }}>Training, meetings & admin</div>
+              <div style={{ fontSize: 12, color: CB.textMid, marginTop: 2 }}>
+                Scheduled non-service work this week. A time-clock punch of the same type links to it when it starts.
+              </div>
+            </div>
+            {canEdit && (
+              <PrimaryButton onClick={() => setEditing({ ...emptyForm })} color={CB.teal}>{icons.plus({ size: 14, color: CB.white })} Add work block</PrimaryButton>
+            )}
+          </div>
+
+          {status === "loading" && blocks.length === 0 && <div style={{ marginTop: 12, fontSize: 12, color: CB.textLight }}>Loading{"\u2026"}</div>}
+          {status === "error" && (
+            <div style={{ marginTop: 12, fontSize: 12, color: CB.red, display: "flex", alignItems: "center", gap: 8 }}>
+              Couldn{"\u2019"}t load work blocks ({error}).
+              <button onClick={load} style={{ border: `1px solid ${CB.border}`, background: CB.white, borderRadius: 8, padding: "2px 10px", fontSize: 12, cursor: "pointer" }}>Retry</button>
+            </div>
+          )}
+          {status === "ok" && blocks.length === 0 && <div style={{ marginTop: 12, fontSize: 12, color: CB.textLight }}>Nothing scheduled this week.</div>}
+
+          {blocks.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              {blocks.map(b => {
+                const cancelled = b.status === "cancelled";
+                return (
+                  <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 0", borderBottom: `1px solid ${CB.border}`, fontSize: 12, color: CB.text, flexWrap: "wrap", opacity: cancelled ? 0.6 : 1 }}>
+                    <span style={{ minWidth: 110, fontWeight: 600 }}>{fmtDay(b.scheduled_date)}</span>
+                    <span style={{ minWidth: 130 }}>{fmtT(b.scheduled_start)} – {fmtT(b.scheduled_end)}</span>
+                    <span style={{ minWidth: 140 }}>{staffName(b.staff_id)}</span>
+                    <span style={{ minWidth: 150 }}>{typeLabel(b.work_type)}{b.note ? ` · ${b.note}` : ""}</span>
+                    {cancelled && <span style={{ color: CB.red, fontWeight: 600 }}>Cancelled ({b.cancellation_reason === "no_fault" ? "no-fault" : "staff"})</span>}
+                    {canEdit && !cancelled && (
+                      <span style={{ marginLeft: "auto", display: "inline-flex", gap: 6 }}>
+                        <button onClick={() => setEditing({ id: b.id, staff_id: b.staff_id, work_type: b.work_type, scheduled_date: b.scheduled_date, scheduled_start: String(b.scheduled_start).slice(0, 5), scheduled_end: String(b.scheduled_end).slice(0, 5), note: b.note || "" })}
+                          style={{ border: `1px solid ${CB.border}`, background: CB.white, borderRadius: 8, padding: "4px 10px", fontSize: 12, cursor: "pointer" }}>Edit</button>
+                        <button onClick={() => { setCancelling(b); setCancelForm({ reason: "", note: "" }); }}
+                          style={{ border: `1px solid ${CB.red}40`, background: CB.white, color: CB.red, borderRadius: 8, padding: "4px 10px", fontSize: 12, cursor: "pointer" }}>Cancel</button>
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <Modal open={!!editing} onClose={() => setEditing(null)} title={editing?.id ? "Edit work block" : "Schedule work block"} subtitle="Training, meetings or assigned admin work. Pay comes from the time clock; this records that the work was assigned in advance.">
+            {editing && (
+              <>
+                <FormRow>
+                  <FormField label="Staff" required half>
+                    <select style={fieldStyle} value={editing.staff_id} onChange={e => setEditing(p => ({ ...p, staff_id: e.target.value }))}>
+                      <option value="">Select staff...</option>
+                      {(staffOptions || []).map(s => <option key={s.id} value={s.id}>{s.first_name} {s.last_name}</option>)}
+                    </select>
+                  </FormField>
+                  <FormField label="Work" required half>
+                    <select style={fieldStyle} value={editing.work_type} onChange={e => setEditing(p => ({ ...p, work_type: e.target.value }))}>
+                      {WORK_BLOCK_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                    </select>
+                  </FormField>
+                </FormRow>
+                <FormRow>
+                  <FormField label="Date" required half>
+                    <input type="date" style={fieldStyle} value={editing.scheduled_date} onChange={e => setEditing(p => ({ ...p, scheduled_date: e.target.value }))} />
+                  </FormField>
+                  <FormField label="Start" required half>
+                    <input type="time" style={fieldStyle} value={editing.scheduled_start} onChange={e => setEditing(p => ({ ...p, scheduled_start: e.target.value }))} />
+                  </FormField>
+                </FormRow>
+                <FormRow>
+                  <FormField label="End" required half>
+                    <input type="time" style={fieldStyle} value={editing.scheduled_end} onChange={e => setEditing(p => ({ ...p, scheduled_end: e.target.value }))} />
+                  </FormField>
+                  <FormField label="Note" half>
+                    <input style={fieldStyle} value={editing.note} onChange={e => setEditing(p => ({ ...p, note: e.target.value }))} placeholder="e.g., CPR renewal" />
+                  </FormField>
+                </FormRow>
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                  <SecondaryButton onClick={() => setEditing(null)}>Close</SecondaryButton>
+                  <PrimaryButton onClick={save} loading={busy} color={CB.teal}>{icons.save({ size: 14, color: CB.white })} {editing.id ? "Update" : "Schedule"}</PrimaryButton>
+                </div>
+              </>
+            )}
+          </Modal>
+
+          <Modal open={!!cancelling} onClose={() => setCancelling(null)} title="Cancel work block" subtitle={cancelling ? `${staffName(cancelling.staff_id)} · ${typeLabel(cancelling.work_type)} · ${fmtDay(cancelling.scheduled_date)}` : ""}>
+            <FormField label="Reason" required>
+              <select style={fieldStyle} value={cancelForm.reason} onChange={e => setCancelForm(p => ({ ...p, reason: e.target.value }))}>
+                <option value="">Select reason...</option>
+                {CANCEL_REASONS.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
+              </select>
+            </FormField>
+            <FormField label="Note">
+              <input style={fieldStyle} value={cancelForm.note} onChange={e => setCancelForm(p => ({ ...p, note: e.target.value }))} placeholder="Optional" />
+            </FormField>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <SecondaryButton onClick={() => setCancelling(null)}>Keep it</SecondaryButton>
+              <PrimaryButton onClick={confirmCancel} loading={busy} color={CB.red}>Cancel work block</PrimaryButton>
+            </div>
+          </Modal>
+        </div>
+      );
+    }
+
     function ShiftForm({ open, onClose, onSaved, editing, prefillDate, prefillStaffId, prefillContextId }) {
       const { addToast } = useToast();
       const { orgId, enforcement } = useAuth();
@@ -7891,7 +8095,14 @@
             location: editing.location || "",
             notes: editing.notes || "",
             status: editing.status || "scheduled",
+            cancellation_reason: "", // v20.0.34 — loaded below for a cancelled shift
           });
+          // v20.0.34 — the reason is read on its own so the schedule's shift list query is unchanged;
+          // if sql/v20.0.34_work_blocks.sql hasn't run, the read errors and the field just starts empty.
+          if (editing.status === "cancelled") {
+            supabase.from("shifts").select("cancellation_reason").eq("id", editing.id).maybeSingle()
+              .then(({ data, error }) => { if (!error && data) setForm(p => ({ ...p, cancellation_reason: data.cancellation_reason || "" })); });
+          }
         } else {
           setForm({
             staff_id: prefillStaffId || "",
@@ -7899,7 +8110,7 @@
             context_id: prefillContextId || "",
             scheduled_date: prefillDate || fmtISODate(new Date()),
             scheduled_start: "08:00", scheduled_end: "16:00",
-            location: "", notes: "", status: "scheduled",
+            location: "", notes: "", status: "scheduled", cancellation_reason: "", // v20.0.34
           });
         }
       }, [open, editing, prefillDate, prefillStaffId, prefillContextId]);
@@ -7980,12 +8191,23 @@
         };
         // Strip null optional keys
         Object.keys(payload).forEach(k => { if (payload[k] === null) delete payload[k]; });
+        // v20.0.34 — cancellation reason: required when cancelling; the database clears it otherwise
+        if (form.status === "cancelled") {
+          if (!form.cancellation_reason) { setSaving(false); return addToast("Pick why the shift was cancelled", "error"); }
+          payload.cancellation_reason = form.cancellation_reason;
+        }
 
         const writeShift = async (p) => editing
           ? supabase.from("shifts").update(p).eq("id", editing.id)
           : supabase.from("shifts").insert(p);
 
         let result = await writeShift(payload);
+        // v20.0.34 schema fallback: if cancellation_reason doesn't exist yet, save the shift without it
+        if (result.error && /cancellation_reason/i.test(result.error.message || "")) {
+          const { cancellation_reason, ...withoutReason } = payload;
+          result = await writeShift(withoutReason);
+          if (!result.error && cancellation_reason) addToast("Shift saved — cancellation reason not stored (run v20.0.34 SQL)", "warning");
+        }
         // v19.2 schema fallback: if context_id column doesn't exist, retry without it
         if (result.error && /column .*context_id.* does not exist/i.test(result.error.message || "")) {
           const { context_id, ...withoutCtx } = payload;
@@ -8141,6 +8363,13 @@
                 <option value="missed">No-Show</option>
                 <option value="cancelled">Cancelled</option>
               </select>
+              {form.status === "cancelled" && (
+                // v20.0.34 — who cancelled decides whether the shift still counts in scheduled hours
+                <select style={{ ...fieldStyle, marginTop: 6 }} value={form.cancellation_reason || ""} onChange={e => set("cancellation_reason", e.target.value)}>
+                  <option value="">Why was it cancelled? (required)</option>
+                  {CANCEL_REASONS.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
+                </select>
+              )}
             </FormField>
           </FormRow>
           <FormRow>
@@ -8797,6 +9026,8 @@
               })}
             </div>
           )}
+
+          <WorkBlocksCard startISO={fmtISODate(anchorDate)} endISO={fmtISODate(weekEndDate)} staffOptions={staff} /> {/* v20.0.34 */}
 
           <ShiftForm
             open={showForm}
