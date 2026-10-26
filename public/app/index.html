@@ -40,6 +40,7 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.34 r1 (Greptile r1): the work blocks card shows "Loading…" when you change weeks and ignores a slower answer for a week you've already left; the shift form's stored cancellation reason never overwrites a reason you've already picked, or lands in a different shift's form. Database side: sql/v20.0.34a_work_block_rules.sql — service punches link only to the same client's shift, and a work block with clock-ins linked can change only its note and can't be cancelled. -->
   <!-- v20.0.34 (pay engine R1b part 2 — work blocks and cancellation reasons; Decision 17): the Schedule page gains a "Training, meetings & admin" card for scheduled non-service work (work blocks), beside the shift grid — managers and supervisors add, edit and cancel them (cancelling needs a reason); front-line logins see their own. A time-clock punch of the same type links to the work block scheduled at that time (done in the database). Cancelling a shift now asks whether it was no-fault (the Person, guardian or provider cancelled — leaves scheduled hours) or staff-caused (stays in scheduled hours). Database side: sql/v20.0.34_work_blocks.sql. -->
   <!-- v20.0.33 r1 (Greptile r1): if the signed-in staff profile didn't load, the Clock In form now looks up your staff record itself (my_staff_id) and shows a Retry if that fails, instead of leaving you unable to clock in. The "no clients" note shows only after the client list loaded successfully and came back empty; while it's loading the field says so, and a failed load shows a Retry — never false advice to change the schedule. -->
   <!-- v20.0.33 (hotfix — front-line EVV clock-in): a front-line login (deliver tier, e.g. a DSP) now sees only their own name in the EVV Clock In form, already selected, instead of the whole staff list — the database only accepts a front-line clock-in for yourself, so picking anyone else always failed. When a front-line login has no clients they're currently assigned to or scheduled with, the Client field says so and tells them who can fix it. Managers and supervisors keep the full staff picker. -->
@@ -7848,11 +7849,14 @@
       const [cancelForm, setCancelForm] = useState({ reason: "", note: "" });
       const [busy, setBusy] = useState(false);
 
+      const loadSeq = useRef(0);   // v20.0.34 r1 — only the newest request's answer lands
       const load = useCallback(async () => {
+        const seq = ++loadSeq.current;
         const r = await supabase.from("work_blocks")
           .select("id, staff_id, work_type, scheduled_date, scheduled_start, scheduled_end, note, status, cancellation_reason")
           .gte("scheduled_date", startISO).lte("scheduled_date", endISO)
           .order("scheduled_date").order("scheduled_start");
+        if (seq !== loadSeq.current) return;   // a newer request (e.g., another week) superseded this one
         if (r.error) {
           const missing = r.error.code === "42P01" || r.error.code === "PGRST205"
             || (/work_blocks/i.test(r.error.message || "") && /does not exist|schema cache/i.test(r.error.message || ""));
@@ -7864,7 +7868,8 @@
         setBlocks(r.data || []);
         setStatus("ok"); setError(null);
       }, [startISO, endISO]);
-      useEffect(() => { load(); }, [load]);
+      // v20.0.34 r1 — a new week starts as "loading", never as the previous week's list or "nothing scheduled"
+      useEffect(() => { setStatus("loading"); setBlocks([]); load(); }, [load]);
 
       if (!available) return null;
 
@@ -8033,6 +8038,12 @@
       const [decks, setDecks] = useState([]);
       const [deckSvcCodes, setDeckSvcCodes] = useState([]);
       const [deckCompletions, setDeckCompletions] = useState([]);
+      // v20.0.34 r1 — the stored cancellation reason lands only in the form it was read for, and never
+      // over a reason the user has already picked.
+      const reasonReq = useRef(0);
+      const reasonTouched = useRef(false);
+      const openShiftId = useRef(null);
+      openShiftId.current = open && editing ? editing.id : null;
       const [form, setForm] = useState({
         staff_id: "", person_id: "", service_code_id: "",
         context_id: "", // v19.2
@@ -8099,9 +8110,15 @@
           });
           // v20.0.34 — the reason is read on its own so the schedule's shift list query is unchanged;
           // if sql/v20.0.34_work_blocks.sql hasn't run, the read errors and the field just starts empty.
+          const req = ++reasonReq.current;
+          reasonTouched.current = false;
           if (editing.status === "cancelled") {
-            supabase.from("shifts").select("cancellation_reason").eq("id", editing.id).maybeSingle()
-              .then(({ data, error }) => { if (!error && data) setForm(p => ({ ...p, cancellation_reason: data.cancellation_reason || "" })); });
+            const shiftId = editing.id;
+            supabase.from("shifts").select("cancellation_reason").eq("id", shiftId).maybeSingle()
+              .then(({ data, error }) => {
+                if (req !== reasonReq.current || reasonTouched.current || openShiftId.current !== shiftId) return;
+                if (!error && data) setForm(p => ({ ...p, cancellation_reason: data.cancellation_reason || "" }));
+              });
           }
         } else {
           setForm({
@@ -8365,7 +8382,7 @@
               </select>
               {form.status === "cancelled" && (
                 // v20.0.34 — who cancelled decides whether the shift still counts in scheduled hours
-                <select style={{ ...fieldStyle, marginTop: 6 }} value={form.cancellation_reason || ""} onChange={e => set("cancellation_reason", e.target.value)}>
+                <select style={{ ...fieldStyle, marginTop: 6 }} value={form.cancellation_reason || ""} onChange={e => { reasonTouched.current = true; set("cancellation_reason", e.target.value); }}>
                   <option value="">Why was it cancelled? (required)</option>
                   {CANCEL_REASONS.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
                 </select>
