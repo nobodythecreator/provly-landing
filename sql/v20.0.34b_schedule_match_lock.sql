@@ -1,3 +1,4 @@
+-- ⚠ RUN ONLY AFTER THE PR'S REVIEW IS 5/5 ⚠
 -- =====================================================================================
 -- sql/v20.0.34b_schedule_match_lock.sql
 -- Provly pay engine — v20.0.34 review round 2 (v20.0.34 and v20.0.34a have run; this is a new migration)
@@ -10,6 +11,8 @@
 --   2. The self-test is independent of real schedules and the time of day: every match runs against test
 --      records on a far-future date (2099-06-15).
 --   Same-client shift links and frozen used work blocks (v20.0.34a) are unchanged.
+-- r1 (Greptile round 3, before this file ran): the self-test picks a staff member with no punch that
+--   overlaps its 2099 test punch — an open punch (no clock-out) counts as overlapping everything after it.
 --
 -- RUN IN SUPABASE (SQL editor), ONCE, after v20.0.34a — and only after this PR's review is 5/5.
 -- One transaction: preflight → replace functions → rolled-back self-test → COMMIT → verification table.
@@ -165,11 +168,18 @@ begin
   from org_members m2 join staff s on s.user_id = m2.user_id and s.org_id = m2.org_id
   where m2.org_id = v_org and m2.role = 'owner'
   order by m2.joined_at, s.id limit 1;
-  select id into v_staff from staff where org_id = v_org and is_active order by created_at, id limit 1;
+  -- a staff member none of whose punches overlap the test punch below (an open punch overlaps it too)
+  select s.id into v_staff from staff s
+  where s.org_id = v_org and s.is_active
+    and not exists (select 1 from time_punches t
+                    where t.staff_id = s.id
+                      and tstzrange(t.clock_in_at, t.clock_out_at, '[)')
+                          && tstzrange(timestamptz '2099-06-15 16:00:00+00', timestamptz '2099-06-15 17:00:00+00', '[)'))
+  order by s.created_at, s.id limit 1;
   select id into v_person from persons where org_id = v_org and is_active order by created_at, id limit 1;
   select id into v_code_id from service_code_definitions where not evv_required order by code limit 1;
   if v_owner is null or v_staff is null or v_person is null or v_code_id is null then
-    raise exception 'SELFTEST FAIL 0: needs an owner, an active staff member, an active Person and a non-EVV code';
+    raise exception 'SELFTEST FAIL 0: needs an owner, an active staff member with no open or overlapping punch, an active Person and a non-EVV code';
   end if;
 
   begin
