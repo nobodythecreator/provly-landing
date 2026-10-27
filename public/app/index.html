@@ -40,6 +40,7 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.35 (pay engine R1b part 3 — schedule releases and release notices; Decision 9): the Schedule page gains a "Releases (off-duty gaps)" card — managers and supervisors add a release between two scheduled items for a staff member's day (the return time is the next item's start), revoke one with a reason, or use "Release now" after telling someone they're off duty (it records the notice at that moment). When staff clock out of the first item — on EVV or the time clock — the app shows "You're off duty until …", and tapping OK logs the notice on the server. A gap is unpaid only with a release, a logged notice, and enough time (applied in the weekly calculation); otherwise it's paid. Database side: sql/v20.0.35_schedule_releases.sql. -->
   <!-- v20.0.34 r1 (Greptile r1): the work blocks card shows "Loading…" when you change weeks and ignores a slower answer for a week you've already left; the shift form's stored cancellation reason never overwrites a reason you've already picked, or lands in a different shift's form. Database side: sql/v20.0.34a_work_block_rules.sql — service punches link only to the same client's shift, and a work block with clock-ins linked can change only its note and can't be cancelled. -->
   <!-- v20.0.34 (pay engine R1b part 2 — work blocks and cancellation reasons; Decision 17): the Schedule page gains a "Training, meetings & admin" card for scheduled non-service work (work blocks), beside the shift grid — managers and supervisors add, edit and cancel them (cancelling needs a reason); front-line logins see their own. A time-clock punch of the same type links to the work block scheduled at that time (done in the database). Cancelling a shift now asks whether it was no-fault (the Person, guardian or provider cancelled — leaves scheduled hours) or staff-caused (stays in scheduled hours). Database side: sql/v20.0.34_work_blocks.sql. -->
   <!-- v20.0.33 r1 (Greptile r1): if the signed-in staff profile didn't load, the Clock In form now looks up your staff record itself (my_staff_id) and shows a Retry if that fails, instead of leaving you unable to clock in. The "no clients" note shows only after the client list loaded successfully and came back empty; while it's loading the field says so, and a failed load shows a Retry — never false advice to change the schedule. -->
@@ -1893,7 +1894,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.34</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.35</span>
               </div>
             </button>
             {isMobile && (
@@ -8024,6 +8025,359 @@
       );
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // v20.0.35 — SCHEDULE RELEASES + RELEASE NOTICES (pay-engine Decision 9)
+    // A gap between two pieces of scheduled work is unpaid only when the schedule released the staff
+    // member for it, they were told at clock-out (they tap OK — logged on the server), and the gap is
+    // long enough (R1c). Managers/supervisors add and revoke releases, or release someone on the spot;
+    // front-line logins see their own. Until sql/v20.0.35_schedule_releases.sql runs, this stays hidden
+    // and clock-outs show no notice.
+    // ═══════════════════════════════════════════════════════════════
+    const fmtClock = (iso) => new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const fmtHHMM = (t) => { const [h, m] = String(t || "").split(":").map(Number); const d = new Date(); d.setHours(h || 0, m || 0, 0, 0); return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); };
+
+    // After a successful clock-out: ask the server whether a release starts now for this visit/punch.
+    // The server answers only for the signed-in staff member's own record, so a supervisor clocking
+    // someone else out never sees (or logs) that person's notice.
+    async function checkReleaseNotice(kind, id) {
+      try {
+        const { data, error } = await supabase.rpc("release_for_clockout", { p_kind: kind, p_id: id });
+        if (error) return; // e.g., the v20.0.35 SQL hasn't run
+        const row = Array.isArray(data) ? data[0] : null;
+        if (row && !row.already_noticed && new Date(row.return_at) > new Date()) {
+          window.dispatchEvent(new CustomEvent("provly:release-notice", { detail: row }));
+        }
+      } catch (e) { /* a notice is best-effort; without it the gap is paid */ }
+    }
+
+    function ReleaseNoticeHost() {
+      const { addToast } = useToast();
+      const [notice, setNotice] = useState(null);
+      const [busy, setBusy] = useState(false);
+      useEffect(() => {
+        const onNotice = (e) => setNotice(e.detail);
+        window.addEventListener("provly:release-notice", onNotice);
+        return () => window.removeEventListener("provly:release-notice", onNotice);
+      }, []);
+      if (!notice) return null;
+      const acknowledge = async () => {
+        const current = notice;
+        setBusy(true);
+        try {
+          const { error } = await supabase.rpc("release_acknowledge", { p_release: current.release_id });
+          if (error) throw error;
+          addToast(`Got it — you're off duty until ${fmtClock(current.return_at)}`, "success");
+          setNotice(n => (n && n.release_id === current.release_id ? null : n));
+        } catch (e) {
+          addToast(e.message || "Could not record the notice", "error");
+        } finally {
+          setBusy(false);
+        }
+      };
+      return (
+        <Modal open onClose={() => setNotice(null)} title={`You\u2019re off duty until ${fmtClock(notice.return_at)}`} subtitle="Your schedule releases you until then.">
+          <div style={{ fontSize: 13, color: CB.text, lineHeight: 1.6 }}>
+            You don{"\u2019"}t need to work or stay available until {fmtClock(notice.return_at)}. Tap OK to confirm you got this notice.
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}>
+            <PrimaryButton onClick={acknowledge} loading={busy} color={CB.teal}>OK, got it</PrimaryButton>
+          </div>
+        </Modal>
+      );
+    }
+
+    function ReleasesCard({ startISO, endISO, staffOptions }) {
+      const { addToast } = useToast();
+      const { accessTier } = useAuth();
+      const canEdit = accessTier === "manage" || accessTier === "operate";
+      const [available, setAvailable] = useState(true);
+      const [rows, setRows] = useState([]);
+      const [notices, setNotices] = useState({});   // release_id → [{channel, noticed_at}]
+      const [items, setItems] = useState({});       // "shift:<id>" / "work_block:<id>" → label
+      const [status, setStatus] = useState("loading");
+      const [error, setError] = useState(null);
+      const [adding, setAdding] = useState(null);    // { staff_id, date, before, after, note }
+      const [dayItems, setDayItems] = useState({ key: "", status: "idle", list: [] });
+      const [nowForm, setNowForm] = useState(null);  // { staff_id, time, note }
+      const [revoking, setRevoking] = useState(null);
+      const [revokeReason, setRevokeReason] = useState("");
+      const [busy, setBusy] = useState(false);
+      const loadSeq = useRef(0);
+      const daySeq = useRef(0);
+
+      const labelShift = (sh) => `${sh.service_code_definitions?.code || "Shift"}${sh.persons ? ` · ${sh.persons.first_name} ${(sh.persons.last_name || "").slice(0, 1)}.` : ""} ${fmtHHMM(sh.scheduled_start)}–${fmtHHMM(sh.scheduled_end)}`;
+      const labelBlock = (w) => `${(WORK_BLOCK_TYPES.find(t => t.value === w.work_type) || {}).label || w.work_type} ${fmtHHMM(w.scheduled_start)}–${fmtHHMM(w.scheduled_end)}`;
+
+      const load = useCallback(async () => {
+        const seq = ++loadSeq.current;
+        const r = await supabase.from("schedule_releases")
+          .select("id, staff_id, kind, release_date, before_shift_id, before_work_block_id, after_shift_id, after_work_block_id, return_at, note, revoked_at, revoke_reason")
+          .gte("release_date", startISO).lte("release_date", endISO)
+          .order("release_date").order("return_at");
+        if (seq !== loadSeq.current) return;
+        if (r.error) {
+          const missing = r.error.code === "42P01" || r.error.code === "PGRST205"
+            || (/schedule_releases/i.test(r.error.message || "") && /does not exist|schema cache/i.test(r.error.message || ""));
+          if (missing) { setAvailable(false); return; }
+          setStatus("error"); setError(r.error.message);
+          return;
+        }
+        const list = r.data || [];
+        const ids = list.map(x => x.id);
+        const shiftIds = [...new Set(list.flatMap(x => [x.before_shift_id, x.after_shift_id]).filter(Boolean))];
+        const blockIds = [...new Set(list.flatMap(x => [x.before_work_block_id, x.after_work_block_id]).filter(Boolean))];
+        const [nRes, sRes, bRes] = await Promise.all([
+          ids.length ? supabase.from("release_notices").select("release_id, channel, noticed_at").in("release_id", ids) : Promise.resolve({ data: [] }),
+          shiftIds.length ? supabase.from("shifts").select("id, scheduled_start, scheduled_end, persons(first_name, last_name), service_code_definitions(code)").in("id", shiftIds) : Promise.resolve({ data: [] }),
+          blockIds.length ? supabase.from("work_blocks").select("id, work_type, scheduled_start, scheduled_end").in("id", blockIds) : Promise.resolve({ data: [] }),
+        ]);
+        if (seq !== loadSeq.current) return;
+        if (nRes.error) { setStatus("error"); setError(nRes.error.message); return; }
+        const byRelease = {};
+        (nRes.data || []).forEach(n => { (byRelease[n.release_id] = byRelease[n.release_id] || []).push(n); });
+        const labels = {};
+        (sRes.data || []).forEach(sh => { labels[`shift:${sh.id}`] = labelShift(sh); });
+        (bRes.data || []).forEach(w => { labels[`work_block:${w.id}`] = labelBlock(w); });
+        setAvailable(true);
+        setRows(list); setNotices(byRelease); setItems(labels);
+        setStatus("ok"); setError(null);
+      }, [startISO, endISO]);
+      useEffect(() => { setStatus("loading"); setRows([]); load(); }, [load]);
+
+      // The chosen staff member's items on the chosen day, for the Add release pickers. Only the
+      // newest request's answer lands, and it is labeled with the staff/day it belongs to.
+      useEffect(() => {
+        if (!adding || !adding.staff_id || !adding.date) { setDayItems({ key: "", status: "idle", list: [] }); return; }
+        const key = `${adding.staff_id}|${adding.date}`;
+        const seq = ++daySeq.current;
+        setDayItems({ key, status: "loading", list: [] });
+        (async () => {
+          const [sRes, bRes] = await Promise.all([
+            supabase.from("shifts").select("id, scheduled_start, scheduled_end, status, persons(first_name, last_name), service_code_definitions(code)")
+              .eq("staff_id", adding.staff_id).eq("scheduled_date", adding.date).order("scheduled_start"),
+            supabase.from("work_blocks").select("id, work_type, scheduled_start, scheduled_end, status")
+              .eq("staff_id", adding.staff_id).eq("scheduled_date", adding.date).order("scheduled_start"),
+          ]);
+          if (seq !== daySeq.current) return;
+          if (sRes.error || bRes.error) { setDayItems({ key, status: "error", list: [] }); return; }
+          const list = [
+            ...(sRes.data || []).filter(x => !["cancelled", "missed"].includes(x.status))
+              .map(x => ({ value: `shift:${x.id}`, start: String(x.scheduled_start), end: String(x.scheduled_end), label: labelShift(x) })),
+            ...(bRes.data || []).filter(x => x.status === "scheduled")
+              .map(x => ({ value: `work_block:${x.id}`, start: String(x.scheduled_start), end: String(x.scheduled_end), label: labelBlock(x) })),
+          ].sort((a, b) => a.start.localeCompare(b.start));
+          setDayItems({ key, status: "ok", list });
+        })();
+      }, [adding?.staff_id, adding?.date]);
+
+      if (!available) return null;
+
+      const staffName = (id) => { const s = (staffOptions || []).find(x => x.id === id); return s ? `${s.first_name} ${s.last_name}` : "—"; };
+      const fmtDay = (d) => new Date(d + "T00:00:00").toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+      const currentList = adding && dayItems.key === `${adding.staff_id}|${adding.date}` ? dayItems.list : [];
+      const beforeItem = currentList.find(x => x.value === adding?.before);
+      const afterChoices = beforeItem ? currentList.filter(x => x.start >= beforeItem.end) : [];
+
+      const create = async () => {
+        if (!adding.before || !adding.after) return addToast("Pick the item before and the item after the gap", "error");
+        const [bk, bid] = adding.before.split(":");
+        const [ak, aid] = adding.after.split(":");
+        setBusy(true);
+        try {
+          const { error: e } = await supabase.rpc("release_create", {
+            p_before_kind: bk, p_before_id: bid, p_after_kind: ak, p_after_id: aid, p_note: adding.note.trim() || null,
+          });
+          if (e) throw e;
+          addToast("Release added — the notice shows when they clock out", "success");
+          setAdding(null);
+          load();
+        } catch (e) {
+          addToast(e.message || "Could not add the release", "error");
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const issueNow = async () => {
+        if (!nowForm.staff_id || !nowForm.time) return addToast("Pick the staff member and their return time", "error");
+        setBusy(true);
+        try {
+          const { error: e } = await supabase.rpc("release_issue_now", {
+            p_staff: nowForm.staff_id, p_return_local: nowForm.time, p_note: nowForm.note.trim() || null,
+          });
+          if (e) throw e;
+          addToast("Released — recorded that you told them", "success");
+          setNowForm(null);
+          load();
+        } catch (e) {
+          addToast(e.message || "Could not record the release", "error");
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const revoke = async () => {
+        if (!revokeReason.trim()) return addToast("A reason is required", "error");
+        setBusy(true);
+        try {
+          const { error: e } = await supabase.rpc("release_revoke", { p_release: revoking.id, p_reason: revokeReason.trim() });
+          if (e) throw e;
+          addToast("Release revoked", "success");
+          setRevoking(null);
+          load();
+        } catch (e) {
+          addToast(e.message || "Could not revoke the release", "error");
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const noticeText = (r) => {
+        const ns = notices[r.id] || [];
+        const sup = ns.find(n => n.channel === "supervisor");
+        const out = ns.find(n => n.channel === "clock_out");
+        if (out) return { text: `Told at clock-out ${fmtClock(out.noticed_at)}`, color: CB.green };
+        if (sup) return { text: `Supervisor told them ${fmtClock(sup.noticed_at)}`, color: CB.green };
+        return { text: "Not told yet", color: CB.amber };
+      };
+      const btn = { border: `1px solid ${CB.border}`, background: CB.white, borderRadius: 8, padding: "4px 10px", fontSize: 12, cursor: "pointer" };
+
+      return (
+        <div style={{ background: CB.white, border: `1px solid ${CB.border}`, borderRadius: 14, padding: "16px 20px", marginTop: 20 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 800, color: CB.navy }}>Releases (off-duty gaps)</div>
+              <div style={{ fontSize: 12, color: CB.textMid, marginTop: 2 }}>
+                A gap is unpaid only with a release, a logged notice, and enough time. Otherwise it{"\u2019"}s paid.
+              </div>
+            </div>
+            {canEdit && (
+              <span style={{ display: "inline-flex", gap: 8 }}>
+                <SecondaryButton onClick={() => setNowForm({ staff_id: "", time: "", note: "" })}>Release now</SecondaryButton>
+                <PrimaryButton onClick={() => setAdding({ staff_id: "", date: startISO, before: "", after: "", note: "" })} color={CB.teal}>{icons.plus({ size: 14, color: CB.white })} Add release</PrimaryButton>
+              </span>
+            )}
+          </div>
+
+          {status === "loading" && rows.length === 0 && <div style={{ marginTop: 12, fontSize: 12, color: CB.textLight }}>Loading{"\u2026"}</div>}
+          {status === "error" && (
+            <div style={{ marginTop: 12, fontSize: 12, color: CB.red, display: "flex", alignItems: "center", gap: 8 }}>
+              Couldn{"\u2019"}t load releases ({error}).
+              <button onClick={load} style={btn}>Retry</button>
+            </div>
+          )}
+          {status === "ok" && rows.length === 0 && <div style={{ marginTop: 12, fontSize: 12, color: CB.textLight }}>No releases this week.</div>}
+
+          {rows.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              {rows.map(r => {
+                const revoked = !!r.revoked_at;
+                const n = noticeText(r);
+                const beforeKey = r.before_shift_id ? `shift:${r.before_shift_id}` : r.before_work_block_id ? `work_block:${r.before_work_block_id}` : null;
+                const afterKey = r.after_shift_id ? `shift:${r.after_shift_id}` : r.after_work_block_id ? `work_block:${r.after_work_block_id}` : null;
+                return (
+                  <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 0", borderBottom: `1px solid ${CB.border}`, fontSize: 12, color: CB.text, flexWrap: "wrap", opacity: revoked ? 0.6 : 1 }}>
+                    <span style={{ minWidth: 110, fontWeight: 600 }}>{fmtDay(r.release_date)}</span>
+                    <span style={{ minWidth: 140 }}>{staffName(r.staff_id)}</span>
+                    <span style={{ minWidth: 150 }}>Off until {fmtClock(r.return_at)}</span>
+                    <span style={{ minWidth: 200, color: CB.textMid }}>
+                      {r.kind === "on_the_spot" ? "On the spot" : `${items[beforeKey] || "(item removed)"} → ${items[afterKey] || "(item removed)"}`}
+                      {r.note ? ` · ${r.note}` : ""}
+                    </span>
+                    {revoked
+                      ? <span style={{ color: CB.red, fontWeight: 600 }}>Revoked: {r.revoke_reason}</span>
+                      : <span style={{ color: n.color, fontWeight: 600 }}>{n.text}</span>}
+                    {canEdit && !revoked && (
+                      <button onClick={() => { setRevoking(r); setRevokeReason(""); }} style={{ ...btn, marginLeft: "auto", color: CB.red, borderColor: `${CB.red}40` }}>Revoke</button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <Modal open={!!adding} onClose={() => setAdding(null)} title="Add release" subtitle="Releases a staff member between two scheduled items. They see the notice when they clock out of the first one.">
+            {adding && (
+              <>
+                <FormRow>
+                  <FormField label="Staff" required half>
+                    <select style={fieldStyle} value={adding.staff_id} onChange={e => setAdding(p => ({ ...p, staff_id: e.target.value, before: "", after: "" }))}>
+                      <option value="">Select staff...</option>
+                      {(staffOptions || []).map(s => <option key={s.id} value={s.id}>{s.first_name} {s.last_name}</option>)}
+                    </select>
+                  </FormField>
+                  <FormField label="Date" required half>
+                    <input type="date" style={fieldStyle} value={adding.date} onChange={e => setAdding(p => ({ ...p, date: e.target.value, before: "", after: "" }))} />
+                  </FormField>
+                </FormRow>
+                {adding.staff_id && dayItems.status === "loading" && <div style={{ fontSize: 12, color: CB.textLight, marginBottom: 8 }}>Loading their schedule{"\u2026"}</div>}
+                {adding.staff_id && dayItems.status === "error" && <div style={{ fontSize: 12, color: CB.red, marginBottom: 8 }}>Couldn{"\u2019"}t load their schedule for that day.</div>}
+                {adding.staff_id && dayItems.status === "ok" && currentList.length < 2 && (
+                  <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 8 }}>They need two scheduled items that day (shifts or work blocks) for a release between them.</div>
+                )}
+                <FormRow>
+                  <FormField label="Released after" required half>
+                    <select style={fieldStyle} value={adding.before} onChange={e => setAdding(p => ({ ...p, before: e.target.value, after: "" }))}>
+                      <option value="">Select item...</option>
+                      {currentList.map(x => <option key={x.value} value={x.value}>{x.label}</option>)}
+                    </select>
+                  </FormField>
+                  <FormField label="Back for" required half>
+                    <select style={fieldStyle} value={adding.after} onChange={e => setAdding(p => ({ ...p, after: e.target.value }))} disabled={!beforeItem}>
+                      <option value="">{beforeItem && afterChoices.length === 0 ? "Nothing later that day" : "Select item..."}</option>
+                      {afterChoices.map(x => <option key={x.value} value={x.value}>{x.label}</option>)}
+                    </select>
+                  </FormField>
+                </FormRow>
+                <FormField label="Note">
+                  <input style={fieldStyle} value={adding.note} onChange={e => setAdding(p => ({ ...p, note: e.target.value }))} placeholder="Optional" />
+                </FormField>
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                  <SecondaryButton onClick={() => setAdding(null)}>Close</SecondaryButton>
+                  <PrimaryButton onClick={create} loading={busy} color={CB.teal}>Add release</PrimaryButton>
+                </div>
+              </>
+            )}
+          </Modal>
+
+          <Modal open={!!nowForm} onClose={() => setNowForm(null)} title="Release now" subtitle="Use this after you tell a staff member they're off duty (for example, the Person cancelled). It records that you told them, now.">
+            {nowForm && (
+              <>
+                <FormRow>
+                  <FormField label="Staff" required half>
+                    <select style={fieldStyle} value={nowForm.staff_id} onChange={e => setNowForm(p => ({ ...p, staff_id: e.target.value }))}>
+                      <option value="">Select staff...</option>
+                      {(staffOptions || []).map(s => <option key={s.id} value={s.id}>{s.first_name} {s.last_name}</option>)}
+                    </select>
+                  </FormField>
+                  <FormField label="Back on duty at (today)" required half>
+                    <input type="time" style={fieldStyle} value={nowForm.time} onChange={e => setNowForm(p => ({ ...p, time: e.target.value }))} />
+                  </FormField>
+                </FormRow>
+                <FormField label="Note">
+                  <input style={fieldStyle} value={nowForm.note} onChange={e => setNowForm(p => ({ ...p, note: e.target.value }))} placeholder="e.g., Person cancelled afternoon" />
+                </FormField>
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                  <SecondaryButton onClick={() => setNowForm(null)}>Close</SecondaryButton>
+                  <PrimaryButton onClick={issueNow} loading={busy} color={CB.teal}>I told them — release</PrimaryButton>
+                </div>
+              </>
+            )}
+          </Modal>
+
+          <Modal open={!!revoking} onClose={() => setRevoking(null)} title="Revoke release" subtitle={revoking ? `${staffName(revoking.staff_id)} · off until ${fmtClock(revoking.return_at)}` : ""}>
+            <FormField label="Reason" required>
+              <input style={fieldStyle} value={revokeReason} onChange={e => setRevokeReason(e.target.value)} placeholder="e.g., schedule changed" />
+            </FormField>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <SecondaryButton onClick={() => setRevoking(null)}>Keep it</SecondaryButton>
+              <PrimaryButton onClick={revoke} loading={busy} color={CB.red}>Revoke</PrimaryButton>
+            </div>
+          </Modal>
+        </div>
+      );
+    }
+
     function ShiftForm({ open, onClose, onSaved, editing, prefillDate, prefillStaffId, prefillContextId }) {
       const { addToast } = useToast();
       const { orgId, enforcement } = useAuth();
@@ -9045,6 +9399,7 @@
           )}
 
           <WorkBlocksCard startISO={fmtISODate(anchorDate)} endISO={fmtISODate(weekEndDate)} staffOptions={staff} /> {/* v20.0.34 */}
+          <ReleasesCard startISO={fmtISODate(anchorDate)} endISO={fmtISODate(weekEndDate)} staffOptions={staff} /> {/* v20.0.35 */}
 
           <ShiftForm
             open={showForm}
@@ -9370,14 +9725,16 @@
 
       const clockOut = async () => {
         if (!openPunch) return;
+        const punchId = openPunch.id; // v20.0.35 — kept for the release check after the reload
         setBusy(true);
         try {
           const loc = await captureLocationOnce();
           const { error } = await supabase.rpc("time_clock_out", {
-            p_punch: openPunch.id, p_lat: loc ? loc.lat : null, p_lng: loc ? loc.lng : null,
+            p_punch: punchId, p_lat: loc ? loc.lat : null, p_lng: loc ? loc.lng : null,
           });
           if (error) throw error;
           addToast("Clocked out", "success");
+          checkReleaseNotice("punch", punchId); // v20.0.35
           load();
         } catch (e) {
           addToast(e.message || "Could not clock out", "error");
@@ -9940,6 +10297,7 @@
           } else {
             addToast("Clocked out successfully", "success");
           }
+          checkReleaseNotice("evv", sessionId); // v20.0.35 — shows only for your own visit, only if a release starts now
           loadAll();
         } catch (e) {
           // v19.7.6 — same GPS interpretation as clock-in
@@ -10304,6 +10662,7 @@
           />
 
           <TimeClockCard /> {/* v20.0.32 — the time clock for work EVV doesn't cover */}
+          <ReleaseNoticeHost /> {/* v20.0.35 — "You're off duty until …" after a clock-out that starts a release */}
 
           {/* Active sessions banner */}
           {activeSessions.length > 0 && (
