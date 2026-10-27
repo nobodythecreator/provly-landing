@@ -17,10 +17,14 @@
 --   3. RPCs: release_create, release_revoke, release_issue_now (manage/operate); release_for_clockout,
 --      release_acknowledge (the staff member themself, for their own visit or punch).
 --
--- Concurrency: creating a release locks both items (FOR SHARE), so an edit and a release can't pass
--- each other; revoke and acknowledge lock the release (FOR UPDATE), so they serialize.
--- R1c validity rule (recorded here, applied there): a scheduled release counts only if it is not revoked
--- and both its items still exist and are not cancelled or no-shows.
+-- A release holds only while the schedule it was made for holds (_release_valid): both items still exist,
+-- stand, belong to the staff member, keep the end and start the release was made for, and nothing else
+-- is scheduled inside the gap. A release can't cover other work, and a schedule edit needs a new release —
+-- the clock-out notice and the acknowledgment both check this, and R1c uses the same test.
+-- Concurrency: creating or acknowledging a release locks its items (FOR SHARE), so a schedule edit waits;
+-- revoke and acknowledge lock the release (FOR UPDATE), so they serialize.
+-- r1 (Greptile round 1, before this file ran): validity re-checked at clock-out and acknowledgment;
+--   releases can't cover other scheduled work; release_validity for the Schedule card.
 --
 -- RUN IN SUPABASE (SQL editor), ONCE, after v20.0.34b. One transaction:
 --   preflight → tables → functions → rolled-back self-test → COMMIT → verification table.
@@ -55,6 +59,8 @@ create table schedule_releases (
   before_work_block_id uuid,
   after_shift_id       uuid,
   after_work_block_id  uuid,
+  before_end_local     timestamp,                 -- the schedule the release was made for (local times)
+  after_start_local    timestamp,
   return_at            timestamptz not null,
   note                 text,
   created_by           uuid,
@@ -74,6 +80,7 @@ create table schedule_releases (
   check (num_nonnulls(before_shift_id, before_work_block_id) <= 1),
   check (num_nonnulls(after_shift_id, after_work_block_id) <= 1),
   check (kind = 'scheduled' or num_nonnulls(after_shift_id, after_work_block_id) = 0),
+  check (kind = 'on_the_spot' or (before_end_local is not null and after_start_local is not null)),
   check ((revoked_at is null) = (revoke_reason is null))
 );
 
@@ -124,33 +131,115 @@ $rls$;
 -- 2. Internal functions (take org and actor explicitly; the public wrappers derive them)
 -- -------------------------------------------------------------------------------------
 
--- One scheduled item, locked FOR SHARE: its staff, local date, start and end (local), and whether it
--- still stands (not cancelled / no-show).
-create function _release_item(p_org uuid, p_kind text, p_id uuid,
+-- One scheduled item: its staff, local date, local start and end, and whether it still stands
+-- (not cancelled / no-show). p_lock takes a FOR SHARE lock, so a concurrent edit waits.
+create function _release_item(p_org uuid, p_kind text, p_id uuid, p_lock boolean,
                               out o_staff uuid, out o_date date, out o_start timestamp, out o_end timestamp,
                               out o_active boolean)
 language plpgsql security definer set search_path = public, pg_temp as $$
 begin
   if p_kind = 'shift' then
-    select sh.staff_id, sh.scheduled_date, sh.scheduled_date + sh.scheduled_start,
-           sh.scheduled_date + sh.scheduled_end
-                + case when sh.scheduled_end <= sh.scheduled_start then interval '1 day' else interval '0' end,
-           sh.status not in ('cancelled','missed')
-      into o_staff, o_date, o_start, o_end, o_active
-      from shifts sh where sh.id = p_id and sh.org_id = p_org
-      for share;
+    if p_lock then
+      select sh.staff_id, sh.scheduled_date, sh.scheduled_date + sh.scheduled_start,
+             sh.scheduled_date + sh.scheduled_end
+                  + case when sh.scheduled_end <= sh.scheduled_start then interval '1 day' else interval '0' end,
+             sh.status not in ('cancelled','missed')
+        into o_staff, o_date, o_start, o_end, o_active
+        from shifts sh where sh.id = p_id and sh.org_id = p_org
+        for share;
+    else
+      select sh.staff_id, sh.scheduled_date, sh.scheduled_date + sh.scheduled_start,
+             sh.scheduled_date + sh.scheduled_end
+                  + case when sh.scheduled_end <= sh.scheduled_start then interval '1 day' else interval '0' end,
+             sh.status not in ('cancelled','missed')
+        into o_staff, o_date, o_start, o_end, o_active
+        from shifts sh where sh.id = p_id and sh.org_id = p_org;
+    end if;
   elsif p_kind = 'work_block' then
-    select w.staff_id, w.scheduled_date, w.scheduled_date + w.scheduled_start, w.scheduled_date + w.scheduled_end,
-           w.status = 'scheduled'
-      into o_staff, o_date, o_start, o_end, o_active
-      from work_blocks w where w.id = p_id and w.org_id = p_org
-      for share;
+    if p_lock then
+      select w.staff_id, w.scheduled_date, w.scheduled_date + w.scheduled_start, w.scheduled_date + w.scheduled_end,
+             w.status = 'scheduled'
+        into o_staff, o_date, o_start, o_end, o_active
+        from work_blocks w where w.id = p_id and w.org_id = p_org
+        for share;
+    else
+      select w.staff_id, w.scheduled_date, w.scheduled_date + w.scheduled_start, w.scheduled_date + w.scheduled_end,
+             w.status = 'scheduled'
+        into o_staff, o_date, o_start, o_end, o_active
+        from work_blocks w where w.id = p_id and w.org_id = p_org;
+    end if;
   else
     raise exception 'unknown item kind %', p_kind using errcode = '23514';
   end if;
   if o_staff is null then
     raise exception '% not found', replace(p_kind, '_', ' ') using errcode = 'P0002';
   end if;
+end
+$$;
+
+-- True when no other active work (a shift that isn't cancelled or a no-show, or a scheduled work
+-- block) for this staff member overlaps the gap between p_from and p_to, apart from the two items
+-- the release is between.
+create function _release_gap_clear(p_org uuid, p_staff uuid, p_from timestamp, p_to timestamp,
+                                   p_skip_a uuid, p_skip_b uuid)
+returns boolean language sql stable security definer set search_path = public, pg_temp as $$
+  select not exists (
+           select 1 from shifts sh
+            where sh.org_id = p_org and sh.staff_id = p_staff and sh.status not in ('cancelled','missed')
+              and sh.scheduled_date between p_from::date - 1 and p_to::date
+              and sh.id is distinct from p_skip_a and sh.id is distinct from p_skip_b
+              and tsrange(sh.scheduled_date + sh.scheduled_start,
+                          sh.scheduled_date + sh.scheduled_end
+                            + case when sh.scheduled_end <= sh.scheduled_start then interval '1 day' else interval '0' end,
+                          '[)') && tsrange(p_from, p_to, '()'))
+     and not exists (
+           select 1 from work_blocks w
+            where w.org_id = p_org and w.staff_id = p_staff and w.status = 'scheduled'
+              and w.scheduled_date between p_from::date and p_to::date
+              and w.id is distinct from p_skip_a and w.id is distinct from p_skip_b
+              and tsrange(w.scheduled_date + w.scheduled_start, w.scheduled_date + w.scheduled_end, '[)')
+                  && tsrange(p_from, p_to, '()'));
+$$;
+
+-- Whether a release still holds. On-the-spot: not revoked. Scheduled: not revoked, both items still
+-- exist and stand, still belong to the staff member, still have the end and start the release was made
+-- for, and nothing else is scheduled inside the gap. A schedule edit therefore needs a new release.
+-- R1c uses this same test.
+create function _release_valid(p_org uuid, p_release uuid, p_lock boolean)
+returns boolean language plpgsql security definer set search_path = public, pg_temp as $$
+declare
+  r      record;
+  b      record;
+  a      record;
+  v_bk   text;
+  v_bid  uuid;
+  v_ak   text;
+  v_aid  uuid;
+begin
+  select * into r from schedule_releases where id = p_release and org_id = p_org;
+  if not found or r.revoked_at is not null then
+    return false;
+  end if;
+  if r.kind = 'on_the_spot' then
+    return true;
+  end if;
+  v_bk  := case when r.before_shift_id is not null then 'shift' when r.before_work_block_id is not null then 'work_block' end;
+  v_bid := coalesce(r.before_shift_id, r.before_work_block_id);
+  v_ak  := case when r.after_shift_id is not null then 'shift' when r.after_work_block_id is not null then 'work_block' end;
+  v_aid := coalesce(r.after_shift_id, r.after_work_block_id);
+  if v_bid is null or v_aid is null then
+    return false;                       -- an item was deleted
+  end if;
+  begin
+    select * into b from _release_item(p_org, v_bk, v_bid, p_lock);
+    select * into a from _release_item(p_org, v_ak, v_aid, p_lock);
+  exception when sqlstate 'P0002' then
+    return false;
+  end;
+  return b.o_active and a.o_active
+     and b.o_staff = r.staff_id and a.o_staff = r.staff_id
+     and b.o_end = r.before_end_local and a.o_start = r.after_start_local
+     and _release_gap_clear(p_org, r.staff_id, b.o_end, a.o_start, v_bid, v_aid);
 end
 $$;
 
@@ -162,8 +251,8 @@ declare
   a  record;
   v_id uuid;
 begin
-  select * into b from _release_item(p_org, p_before_kind, p_before_id);
-  select * into a from _release_item(p_org, p_after_kind, p_after_id);
+  select * into b from _release_item(p_org, p_before_kind, p_before_id, true);
+  select * into a from _release_item(p_org, p_after_kind, p_after_id, true);
   if b.o_staff <> a.o_staff then
     raise exception 'both items must belong to the same staff member' using errcode = '23514';
   end if;
@@ -176,16 +265,19 @@ begin
   if a.o_start::date <> b.o_end::date then
     raise exception 'a release covers a gap within one day' using errcode = '23514';
   end if;
+  if not _release_gap_clear(p_org, b.o_staff, b.o_end, a.o_start, p_before_id, p_after_id) then
+    raise exception 'other work is scheduled inside that gap — release only until the next item' using errcode = '23514';
+  end if;
   begin
     insert into schedule_releases (org_id, staff_id, kind, release_date,
                                    before_shift_id, before_work_block_id, after_shift_id, after_work_block_id,
-                                   return_at, note, created_by)
+                                   before_end_local, after_start_local, return_at, note, created_by)
     values (p_org, b.o_staff, 'scheduled', b.o_end::date,
             case when p_before_kind = 'shift' then p_before_id end,
             case when p_before_kind = 'work_block' then p_before_id end,
             case when p_after_kind = 'shift' then p_after_id end,
             case when p_after_kind = 'work_block' then p_after_id end,
-            a.o_start at time zone _time_org_tz(p_org),
+            b.o_end, a.o_start, a.o_start at time zone _time_org_tz(p_org),
             nullif(btrim(coalesce(p_note, '')), ''), p_actor)
     returning id into v_id;
   exception when unique_violation then
@@ -254,14 +346,16 @@ begin
 end
 $$;
 
--- The active release that starts when this visit or punch ends: the one whose "before" item is the
--- shift or work block the visit/punch is linked to. Only for the staff member's own records.
+-- The release that starts when this visit or punch ends: the one whose "before" item is the shift or
+-- work block the visit/punch is linked to — returned only while it still holds (_release_valid), so a
+-- schedule edit never produces a stale "off duty until …". Only for the staff member's own records.
 create function _release_for_clockout(p_org uuid, p_staff uuid, p_kind text, p_id uuid)
 returns table (release_id uuid, return_at timestamptz, already_noticed boolean)
-language plpgsql stable security definer set search_path = public, pg_temp as $$
+language plpgsql security definer set search_path = public, pg_temp as $$
 declare
   v_shift uuid;
   v_block uuid;
+  v_rel   uuid;
 begin
   if p_kind = 'evv' then
     select e.shift_id into v_shift from evv_sessions e
@@ -275,19 +369,26 @@ begin
   if v_shift is null and v_block is null then
     return;
   end if;
+  select r.id into v_rel
+    from schedule_releases r
+   where r.org_id = p_org and r.staff_id = p_staff and r.revoked_at is null
+     and ((v_shift is not null and r.before_shift_id = v_shift)
+          or (v_block is not null and r.before_work_block_id = v_block))
+   limit 1;
+  if v_rel is null or not _release_valid(p_org, v_rel, false) then
+    return;
+  end if;
   return query
     select r.id, r.return_at,
            exists (select 1 from release_notices n where n.release_id = r.id and n.channel = 'clock_out')
       from schedule_releases r
-     where r.org_id = p_org and r.staff_id = p_staff and r.revoked_at is null
-       and ((v_shift is not null and r.before_shift_id = v_shift)
-            or (v_block is not null and r.before_work_block_id = v_block))
-     limit 1;
+     where r.id = v_rel;
 end
 $$;
 
 -- The staff member taps OK on "You're off duty until …" — the notice is logged at that server moment.
--- Only before the return time, only for an active release, once.
+-- Only before the return time, only while the release still holds (its items are locked for the check,
+-- so a concurrent schedule edit waits), once.
 create function _release_acknowledge(p_org uuid, p_staff uuid, p_release uuid)
 returns timestamptz language plpgsql security definer set search_path = public, pg_temp as $$
 declare
@@ -304,6 +405,9 @@ begin
   end if;
   if v_now >= r.return_at then
     raise exception 'the release has already ended' using errcode = '55000';
+  end if;
+  if not _release_valid(p_org, p_release, true) then
+    raise exception 'your schedule changed — check with your supervisor before leaving' using errcode = '55000';
   end if;
   insert into release_notices (org_id, release_id, staff_id, channel, noticed_at, recorded_by)
   values (p_org, p_release, p_staff, 'clock_out', v_now, p_staff)
@@ -349,12 +453,32 @@ $$;
 
 create function release_for_clockout(p_kind text, p_id uuid)
 returns table (release_id uuid, return_at timestamptz, already_noticed boolean)
-language plpgsql stable security definer set search_path = public, pg_temp as $$
+language plpgsql security definer set search_path = public, pg_temp as $$
 begin
   if my_staff_id() is null then
     raise exception 'not permitted' using errcode = '42501';
   end if;
   return query select * from _release_for_clockout(org_id(), my_staff_id(), p_kind, p_id);
+end
+$$;
+
+-- Whether each listed release still holds — for the Schedule card. Only releases the caller may read
+-- (manage/operate: their organization's; everyone else: their own). At most 200 per call.
+create function release_validity(p_ids uuid[])
+returns table (release_id uuid, valid boolean)
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  if my_staff_id() is null and (select access_tier()) is null then
+    raise exception 'not permitted' using errcode = '42501';
+  end if;
+  if coalesce(array_length(p_ids, 1), 0) > 200 then
+    raise exception 'at most 200 releases per call' using errcode = '22023';
+  end if;
+  return query
+    select r.id, _release_valid(r.org_id, r.id, false)
+      from schedule_releases r
+     where r.id = any(p_ids) and r.org_id = org_id()
+       and ((select access_tier()) in ('manage','operate') or r.staff_id = my_staff_id());
 end
 $$;
 
@@ -376,9 +500,10 @@ begin
     select p.oid::regprocedure as sig, p.proname
     from pg_proc p join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'public'
-      and p.proname in ('_release_item','_release_create','_release_revoke','_release_issue_now',
-                        '_release_for_clockout','_release_acknowledge',
-                        'release_create','release_revoke','release_issue_now','release_for_clockout','release_acknowledge')
+      and p.proname in ('_release_item','_release_gap_clear','_release_valid','_release_create','_release_revoke',
+                        '_release_issue_now','_release_for_clockout','_release_acknowledge',
+                        'release_create','release_revoke','release_issue_now','release_for_clockout',
+                        'release_validity','release_acknowledge')
   loop
     execute format('revoke all on function %s from public, anon, authenticated', f.sig);
     if f.proname not like '\_%' then
@@ -403,6 +528,8 @@ declare
   v_b1    uuid;
   v_b2    uuid;
   v_b3    uuid;
+  v_b4    uuid;
+  v_b5    uuid;
   v_rel   uuid;
   v_p     uuid;
   v_at    timestamptz;
@@ -430,99 +557,134 @@ begin
     v_b1 := _work_block_save(v_org, v_owner, null, v_staff, 'meeting',  v_day, '08:00', '09:00', 'self-test');
     v_b2 := _work_block_save(v_org, v_owner, null, v_staff, 'training', v_day, '13:00', '14:00', 'self-test');
     v_b3 := _work_block_save(v_org, v_owner, null, v_staff, 'admin',    v_day, '08:30', '10:00', 'self-test');
+    v_b4 := _work_block_save(v_org, v_owner, null, v_staff, 'admin',    v_day, '10:00', '11:00', 'self-test');
 
-    -- 1. A release between two items returns at the next item's start (local time)
-    v_rel := _release_create(v_org, v_owner, 'work_block', v_b1, 'work_block', v_b2, 'self-test');
-    if not exists (select 1 from schedule_releases
-                   where id = v_rel and kind = 'scheduled' and release_date = v_day
-                     and return_at = (timestamp '2099-07-01 13:00:00' at time zone v_tz)) then
-      raise exception 'SELFTEST FAIL 1: release return time or date wrong';
-    end if;
-
-    -- 2. One active release per "before" item
+    -- 1. A release can't cover other scheduled work (b3 runs past 9:00 and b4 sits inside the gap)
     begin
       perform _release_create(v_org, v_owner, 'work_block', v_b1, 'work_block', v_b2, 'self-test');
-      raise exception 'SELFTEST FAIL 2: a second active release for the same item was accepted';
-    exception when unique_violation then null;
-    end;
-
-    -- 3. The next item must start after the first one ends
-    begin
-      perform _release_create(v_org, v_owner, 'work_block', v_b3, 'work_block', v_b1, 'self-test');
-      raise exception 'SELFTEST FAIL 3: a release with overlapping items was accepted';
+      raise exception 'SELFTEST FAIL 1: a release over other scheduled work was accepted';
     exception when sqlstate '23514' then null;
     end;
 
-    -- 4. A punch linked to the "before" block finds the release; acknowledging logs one notice
+    -- 2. The next item must start after the first one ends
+    begin
+      perform _release_create(v_org, v_owner, 'work_block', v_b3, 'work_block', v_b1, 'self-test');
+      raise exception 'SELFTEST FAIL 2: a release with overlapping items was accepted';
+    exception when sqlstate '23514' then null;
+    end;
+
+    -- 3. With the gap clear, the release returns at the next item's start (local time)
+    perform _work_block_cancel(v_org, v_owner, v_b3, 'no_fault', 'self-test');
+    perform _work_block_cancel(v_org, v_owner, v_b4, 'no_fault', 'self-test');
+    v_rel := _release_create(v_org, v_owner, 'work_block', v_b1, 'work_block', v_b2, 'self-test');
+    if not exists (select 1 from schedule_releases
+                   where id = v_rel and kind = 'scheduled' and release_date = v_day
+                     and return_at = (timestamp '2099-07-01 13:00:00' at time zone v_tz)
+                     and before_end_local = timestamp '2099-07-01 09:00:00'
+                     and after_start_local = timestamp '2099-07-01 13:00:00') then
+      raise exception 'SELFTEST FAIL 3: release return time, date or schedule snapshot wrong';
+    end if;
+    if not _release_valid(v_org, v_rel, false) then
+      raise exception 'SELFTEST FAIL 3b: a fresh release is not valid';
+    end if;
+
+    -- 4. One active release per "before" item
+    begin
+      perform _release_create(v_org, v_owner, 'work_block', v_b1, 'work_block', v_b2, 'self-test');
+      raise exception 'SELFTEST FAIL 4: a second active release for the same item was accepted';
+    exception when unique_violation then null;
+    end;
+
+    -- 5. A punch linked to the "before" block finds the release; acknowledging logs one notice
     insert into time_punches (org_id, staff_id, work_type, work_block_id, clock_in_at, clock_out_at, note)
     values (v_org, v_staff, 'meeting', v_b1, timestamptz '2099-07-01 15:00:00+00', timestamptz '2099-07-01 15:30:00+00', 'self-test')
     returning id into v_p;
     select * into x from _release_for_clockout(v_org, v_staff, 'punch', v_p);
     if not found or x.release_id is distinct from v_rel or x.already_noticed then
-      raise exception 'SELFTEST FAIL 4: clock-out did not find its release';
+      raise exception 'SELFTEST FAIL 5: clock-out did not find its release';
     end if;
     v_at := _release_acknowledge(v_org, v_staff, v_rel);
     perform _release_acknowledge(v_org, v_staff, v_rel);
     if v_at is null or (select count(*) from release_notices where release_id = v_rel) <> 1 then
-      raise exception 'SELFTEST FAIL 4b: acknowledging did not log exactly one notice';
-    end if;
-    select * into x from _release_for_clockout(v_org, v_staff, 'punch', v_p);
-    if not found or not x.already_noticed then
-      raise exception 'SELFTEST FAIL 4c: the notice was not reported as logged';
+      raise exception 'SELFTEST FAIL 5b: acknowledging did not log exactly one notice';
     end if;
 
-    -- 5. Someone else's punch finds nothing
-    if exists (select 1 from _release_for_clockout(v_org, v_owner, 'punch', v_p)) and v_owner <> v_staff then
-      raise exception 'SELFTEST FAIL 5: another staff member saw this release';
+    -- 6. Someone else's punch finds nothing
+    if v_owner <> v_staff and exists (select 1 from _release_for_clockout(v_org, v_owner, 'punch', v_p)) then
+      raise exception 'SELFTEST FAIL 6: another staff member saw this release';
     end if;
 
-    -- 6. Revoking needs a reason; a revoked release can't be acknowledged; the item is free again
+    -- 7. New work scheduled inside the gap: the release stops holding; cancelling it restores it
+    v_b5 := _work_block_save(v_org, v_owner, null, v_staff, 'meeting', v_day, '11:00', '12:00', 'self-test');
+    if _release_valid(v_org, v_rel, false) or exists (select 1 from _release_for_clockout(v_org, v_staff, 'punch', v_p)) then
+      raise exception 'SELFTEST FAIL 7: a release over newly scheduled work still holds';
+    end if;
+    perform _work_block_cancel(v_org, v_owner, v_b5, 'no_fault', 'self-test');
+    if not _release_valid(v_org, v_rel, false) then
+      raise exception 'SELFTEST FAIL 7b: the release did not hold again once the gap was clear';
+    end if;
+
+    -- 8. Moving the next item: no stale notice, and it can't be acknowledged
+    perform _work_block_save(v_org, v_owner, v_b2, v_staff, 'training', v_day, '12:30', '14:00', 'self-test');
+    if _release_valid(v_org, v_rel, false) or exists (select 1 from _release_for_clockout(v_org, v_staff, 'punch', v_p)) then
+      raise exception 'SELFTEST FAIL 8: a release still held after its next item moved';
+    end if;
+    begin
+      perform _release_acknowledge(v_org, v_staff, v_rel);
+      raise exception 'SELFTEST FAIL 8b: a release for a changed schedule was acknowledged';
+    exception when sqlstate '55000' then null;
+    end;
+
+    -- 9. Revoking needs a reason; a revoked release frees the item for a new one
     begin
       perform _release_revoke(v_org, v_owner, v_rel, '');
-      raise exception 'SELFTEST FAIL 6: revoke without a reason accepted';
+      raise exception 'SELFTEST FAIL 9: revoke without a reason accepted';
     exception when sqlstate '23514' then null;
     end;
     perform _release_revoke(v_org, v_owner, v_rel, 'self-test');
-    begin
-      perform _release_acknowledge(v_org, v_staff, v_rel);
-      raise exception 'SELFTEST FAIL 6b: a revoked release was acknowledged';
-    exception when sqlstate '55000' then null;
-    end;
-    perform _release_create(v_org, v_owner, 'work_block', v_b1, 'work_block', v_b2, 'self-test');
+    v_rel := _release_create(v_org, v_owner, 'work_block', v_b1, 'work_block', v_b2, 'self-test');
+    if not exists (select 1 from schedule_releases where id = v_rel and return_at = (timestamp '2099-07-01 12:30:00' at time zone v_tz)) then
+      raise exception 'SELFTEST FAIL 9b: the new release does not return at the moved start';
+    end if;
 
-    -- 7. A cancelled item can't be part of a release
-    perform _work_block_cancel(v_org, v_owner, v_b3, 'no_fault', 'self-test');
+    -- 10. A cancelled item can't be part of a release
     begin
       perform _release_create(v_org, v_owner, 'work_block', v_b3, 'work_block', v_b2, 'self-test');
-      raise exception 'SELFTEST FAIL 7: a cancelled item was released';
+      raise exception 'SELFTEST FAIL 10: a cancelled item was released';
     exception when sqlstate '23514' then null;
     end;
 
-    -- 8. On-the-spot: logs a supervisor notice at once; the return time must be later today.
-    --    (Skipped, never failed, within 10 minutes of local midnight — "today" is ambiguous there.)
+    -- 11. On-the-spot: logs a supervisor notice at once; the return time must be later today.
+    --     (Skipped, never failed, within 10 minutes of local midnight — "today" is ambiguous there.)
     v_now := clock_timestamp();
     if ((v_now + interval '10 minutes') at time zone v_tz)::date = (v_now at time zone v_tz)::date
        and ((v_now - interval '10 minutes') at time zone v_tz)::date = (v_now at time zone v_tz)::date then
       v_rel := _release_issue_now(v_org, v_owner, v_staff, ((v_now + interval '5 minutes') at time zone v_tz)::time, 'self-test');
-      if not exists (select 1 from release_notices where release_id = v_rel and channel = 'supervisor' and recorded_by = v_owner) then
-        raise exception 'SELFTEST FAIL 8: on-the-spot release has no supervisor notice';
+      if not exists (select 1 from release_notices where release_id = v_rel and channel = 'supervisor' and recorded_by = v_owner)
+         or not _release_valid(v_org, v_rel, false) then
+        raise exception 'SELFTEST FAIL 11: on-the-spot release has no supervisor notice or does not hold';
       end if;
       begin
         perform _release_issue_now(v_org, v_owner, v_staff, ((v_now - interval '5 minutes') at time zone v_tz)::time, 'self-test');
-        raise exception 'SELFTEST FAIL 8b: a return time in the past was accepted';
+        raise exception 'SELFTEST FAIL 11b: a return time in the past was accepted';
       exception when sqlstate '23514' then null;
       end;
     end if;
 
-    -- 9. Without a signed-in session the RPCs refuse
+    -- 12. Without a signed-in session the RPCs refuse
     begin
       perform release_create('work_block', v_b1, 'work_block', v_b2, 'self-test');
-      raise exception 'SELFTEST FAIL 9: release_create ran without a session';
+      raise exception 'SELFTEST FAIL 12: release_create ran without a session';
     exception when insufficient_privilege then null;
     end;
     begin
       perform release_acknowledge(v_rel);
-      raise exception 'SELFTEST FAIL 9b: release_acknowledge ran without a session';
+      raise exception 'SELFTEST FAIL 12b: release_acknowledge ran without a session';
+    exception when insufficient_privilege then null;
+    end;
+    begin
+      perform * from release_validity(array[v_rel]);
+      raise exception 'SELFTEST FAIL 12c: release_validity ran without a session';
     exception when insufficient_privilege then null;
     end;
 
@@ -550,11 +712,15 @@ select n, check_name, got, want, case when got = want then '✅' else '❌' end 
   union all select 4, 'One active release per item (unique indexes)',
     (select count(*) from pg_indexes where indexname in ('schedule_releases_one_per_before_shift','schedule_releases_one_per_before_block'))::text, '2'
   union all select 5, 'Public release RPCs for signed-in users (not anon)',
-    (select count(*) from pg_proc where proname in ('release_create','release_revoke','release_issue_now','release_for_clockout','release_acknowledge')
-     and has_function_privilege('authenticated', oid, 'EXECUTE') and not has_function_privilege('anon', oid, 'EXECUTE'))::text, '5'
+    (select count(*) from pg_proc where proname in ('release_create','release_revoke','release_issue_now','release_for_clockout','release_validity','release_acknowledge')
+     and has_function_privilege('authenticated', oid, 'EXECUTE') and not has_function_privilege('anon', oid, 'EXECUTE'))::text, '6'
   union all select 6, 'Internal release functions callable by clients',
-    (select count(*) from pg_proc where proname in ('_release_item','_release_create','_release_revoke','_release_issue_now','_release_for_clockout','_release_acknowledge')
+    (select count(*) from pg_proc where proname in ('_release_item','_release_gap_clear','_release_valid','_release_create','_release_revoke','_release_issue_now','_release_for_clockout','_release_acknowledge')
      and (has_function_privilege('authenticated', oid, 'EXECUTE') or has_function_privilege('anon', oid, 'EXECUTE')))::text, '0'
+  union all select 8, 'Clock-out notice and acknowledgment re-check the schedule',
+    (position('_release_valid' in pg_get_functiondef('_release_for_clockout(uuid,uuid,text,uuid)'::regprocedure)) > 0
+     and position('_release_valid' in pg_get_functiondef('_release_acknowledge(uuid,uuid,uuid)'::regprocedure)) > 0
+     and position('_release_gap_clear' in pg_get_functiondef('_release_create(uuid,uuid,text,uuid,text,uuid,text)'::regprocedure)) > 0)::text, 'true'
   union all select 7, 'Self-test leftovers (releases/blocks/punches)',
     (select count(*) from schedule_releases where note = 'self-test')::text || '/' ||
     (select count(*) from work_blocks where note like 'self-test%')::text || '/' ||
