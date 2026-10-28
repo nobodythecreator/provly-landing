@@ -40,6 +40,7 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.36 r1 (Greptile r1): the Role filter now narrows every view — Grid, By Context and List (mobile opens in List) — not just the grid's rows; "Only staff with shifts" shows only in Grid, the one view it affects. -->
   <!-- v20.0.36 (Schedule grid): the grid lists every active staff member every week — scheduling someone no longer hides everyone else. New toolbar filters: Role (schedule a whole category, e.g. every DSP or nurse) and "Only staff with shifts" for a compact view. Rows are sorted by last name. -->
   <!-- v20.0.35 r2 (Greptile r2): the releases card looks things up in batches (200 releases per validity check, the database's limit; 100 ids per list lookup), so a busy week with hundreds of releases still loads; revoked releases aren't re-checked. -->
   <!-- v20.0.35 r1 (Greptile r1): "Back for" offers only the next scheduled item (a release can't cover other work — the database refuses it too); each release shows whether it still holds — if the schedule changed or other work was added inside the gap, it says so and staff no longer get a stale "off duty until …" notice; a failed schedule lookup shows Retry instead of claiming items were removed. -->
@@ -8981,14 +8982,16 @@
         setShowForm(true);
       };
 
-      // Filtered shifts based on staff + context filter (v19.2)
+      // Filtered shifts based on staff + context filter (v19.2) and role (v20.0.36 r1 — every view, not just Grid)
+      const roleByStaff = useMemo(() => Object.fromEntries(staff.map(x => [x.id, x.role])), [staff]);
       const visibleShifts = useMemo(() => {
         return shifts.filter(s => {
           if (filterStaff && s.staff_id !== filterStaff) return false;
           if (filterContext && s.context_id !== filterContext) return false;
+          if (filterRole && roleByStaff[s.staff_id] !== filterRole) return false;
           return true;
         });
-      }, [shifts, filterStaff, filterContext]);
+      }, [shifts, filterStaff, filterContext, filterRole, roleByStaff]);
 
       // Group visible shifts by staff × date for grid
       const shiftsByStaffDate = useMemo(() => {
@@ -9085,7 +9088,7 @@
                   {rolesPresent.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
                 </select>
               )}
-              {!frontLine && (
+              {!frontLine && viewMode === "grid" && ( // r1 — the checkbox only changes Grid rows
                 <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: CB.textMid, cursor: "pointer" }}>
                   <input type="checkbox" checked={onlyScheduled} onChange={e => setOnlyScheduled(e.target.checked)} />
                   Only staff with shifts
