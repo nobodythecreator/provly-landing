@@ -40,6 +40,7 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.37 r1 (Greptile r1): real Form G builds again (the record's files are an id-keyed map); balances come from the Person's complete ledger fetched for the report, not the screen's newest 2,000 entries, and every account's closing must equal the figure signed on Form B or the report refuses to build; the month's last day is never dropped (month ends from pbaMonthEnd); tables wrap instead of cutting amounts, statements and notes; provider names and addresses are made PDF-safe for every branded PDF; purchases for someone else show who benefited; outstanding items are shown; the sample's last entry falls on the month's real last day. -->
   <!-- v20.0.37 (PBA — Form G, branded, with a sample): Form G is rebuilt on the shared branded PDF engine — the provider's logo, colors and identity on every page; a summary (opening balance, deposits, expenses, closing balance) with countable assets against the SSI limit; tables for accounts and transactions; and a recorded signature block for Forms B, C and D (who signed, in what capacity, when, and the drawn signature where one was captured). "Download sample Form G" (Settings → Branding, and the PBA Monthly Close card) builds the same report from fictitious data with "SAMPLE - FICTITIOUS DATA" on every page; it is never saved, so no sample Person exists anywhere. The SSI limit ($2,000, unchanged since 1989) is one shared constant. No SQL. -->
   <!-- v20.0.36 r1 (Greptile r1): the Role filter now narrows every view — Grid, By Context and List (mobile opens in List) — not just the grid's rows; "Only staff with shifts" shows only in Grid, the one view it affects. -->
   <!-- v20.0.36 (Schedule grid): the grid lists every active staff member every week — scheduling someone no longer hides everyone else. New toolbar filters: Role (schedule a whole category, e.g. every DSP or nurse) and "Only staff with shifts" for a compact view. Rows are sorted by last name. -->
@@ -20410,7 +20411,7 @@
         [22, CASH, "Withdrawal", "Haircut",             "Personal care", -18.00],
         [26, CU,   "Withdrawal", "Phone bill",          "Utilities",     -35.00],
         [28, CU,   "Fee",        "Monthly account fee", "Bank fees",     -2.00],
-        [30, CU,   "Interest",   "Interest",            "Income",        0.41],
+        [new Date(y, first.getMonth() + 1, 0).getDate(), CU, "Interest", "Interest", "Income", 0.41],   // the month's real last day
       ];
       const openings = { [CU]: 612.38, [CASH]: 25.00 };
       const r2 = (n) => Math.round(n * 100) / 100;
@@ -20455,53 +20456,76 @@
       };
     }
 
-    // A real month's Form G data, from the records the close screen already loaded. Drawn signatures (the
-    // Person's or guardian's on Form C) are fetched from storage; if one can't be fetched, its block still
-    // shows who signed and when.
-    async function pbaFormGData({ clientName, month, d, m }) {
+    // A real month's Form G data. Balances come from the Person's complete ledger, fetched for the report
+    // (the close screen holds only the newest 2,000 entries), and every account's closing is checked
+    // against the figure recorded when Form B was signed — if they differ, the report refuses to build
+    // rather than print figures that don't match the signature. Drawn signatures (the Person's or
+    // guardian's on Form C) come from storage; if one can't be fetched, its block still shows who signed.
+    async function pbaFormGData({ clientId, clientName, month, d, m }) {
       const ms = `${month}-01`;
-      const [yy, mm] = month.split("-").map(Number);
-      const me = new Date(yy, mm, 0).toISOString().slice(0, 10);
+      const me = pbaMonthEnd(month);              // string dates throughout — no time-zone shifts
       const inMonth = (t) => (t.entry_date || "") >= ms && (t.entry_date || "") <= me;
+      const history = [];
+      for (let from = 0; ; from += 1000) {
+        const { data, error } = await supabase.from("pba_transactions")
+          .select("id, account_id, to_account_id, entry_date, type, amount, status, reverses_id, payee, purpose, category, beneficiary, beneficiary_name")
+          .eq("person_id", clientId).lte("entry_date", me)
+          .order("entry_date", { ascending: true }).order("id", { ascending: true })
+          .range(from, from + 999);
+        if (error) throw new Error(`Couldn't load the ledger for the report: ${error.message}`);
+        history.push(...(data || []));
+        if (!data || data.length < 1000) break;
+      }
       const accs = (d.accounts || []).filter(a => (!a.closed_on || a.closed_on >= ms) && (!a.opened_on || a.opened_on <= me) && (!a.opening_date || a.opening_date <= me));
       const kindLabel = (k) => PBA_ACCOUNT_KINDS.find(x => x.value === k)?.label || k;
       const accLabel = (a) => `${a.institution || kindLabel(a.kind)}${a.last4 ? ` ··${a.last4}` : ""}`;
       const accShort = (a) => `${kindLabel(a.kind)}${a.last4 ? ` ··${a.last4}` : ""}`;   // fits the transactions table
       const summary = (m.fb?.summary?.accounts) || [];
+      const r2 = (n) => Math.round(Number(n || 0) * 100) / 100;
       const totals = { opening: 0, deposits: 0, expenses: 0, closing: 0 };
       const accounts = accs.map(a => {
         let opening = Number(a.opening_balance || 0), moneyIn = 0, moneyOut = 0;
-        (d.txns || []).forEach(t => {
+        history.forEach(t => {
           const eff = pbaSign(t, a.id) * Number(t.amount || 0);
           if (!eff) return;
           if ((t.entry_date || "") < ms) opening += eff;
           else if (inMonth(t)) { if (eff > 0) moneyIn += eff; else moneyOut += -eff; }
         });
-        const closing = opening + moneyIn - moneyOut;
-        const s = summary.find(x => x.account_id === a.id) || {};
-        const check = a.kind === "cash" ? (s.counted != null ? `Counted ${fgMoney(s.counted)}` : "—")
-          : (s.statement_closing != null ? `Statement ${fgMoney(s.statement_closing)}` : "—");
+        opening = r2(opening); moneyIn = r2(moneyIn); moneyOut = r2(moneyOut);
+        const closing = r2(opening + moneyIn - moneyOut);
+        const s = summary.find(x => x.account_id === a.id);
+        // the signed figure is the authority: cash is counted at month end; a statement account is
+        // comparable when its statement ends on the month's last day
+        if (s && s.ledger_closing != null && (a.kind === "cash" || s.period_end === me) && r2(s.ledger_closing) !== closing) {
+          throw new Error(`${accLabel(a)}: the ledger now shows ${fgMoney(closing)} at month end, but Form B was signed at ${fgMoney(s.ledger_closing)}. The report wasn't built — contact support.`);
+        }
+        const out = s && Number(s.outstanding || 0) ? ` · outstanding ${fgMoney(s.outstanding)}` : "";
+        const check = !s ? "—"
+          : a.kind === "cash" ? (s.counted != null ? `Counted ${fgMoney(s.counted)}` : "—")
+          : (s.statement_closing != null ? `Statement ${fgMoney(s.statement_closing)}${out}` : "—");
         totals.opening += opening; totals.closing += closing;
         return { label: accLabel(a), opening, moneyIn, moneyOut, closing, check };
       });
       // Deposits and expenses across the Person's accounts — transfers between their own accounts move
       // money, they don't add or spend it, so they are left out of these two totals.
-      (d.txns || []).filter(inMonth).forEach(t => {
+      history.filter(inMonth).forEach(t => {
         const eff = pbaSign(t, t.account_id) * Number(t.amount || 0);
         if (t.type === "deposit" || t.type === "interest") totals.deposits += eff;
         else if (["withdrawal", "fee", "cash_out"].includes(t.type)) totals.expenses += -eff;
       });
+      Object.keys(totals).forEach(k => { totals[k] = r2(totals[k]); });
       const acctById = Object.fromEntries((d.accounts || []).map(a => [a.id, a]));
-      const transactions = (d.txns || []).filter(inMonth).slice().sort((a, b) => a.entry_date.localeCompare(b.entry_date)).map(t => {
+      const transactions = history.filter(inMonth).map(t => {
         const eff = pbaSign(t, t.account_id) * Number(t.amount || 0);
+        const forWhom = t.beneficiary === "other" && t.beneficiary_name ? ` (for ${t.beneficiary_name})` : "";
         return {
           date: fgDay(t.entry_date), account: acctById[t.account_id] ? accShort(acctById[t.account_id]) : "",
           type: `${pbaTypeLabel(t.type)}${t.reverses_id ? " (reversal)" : ""}${t.status !== "active" ? " (voided)" : ""}`,
-          payee: t.payee || t.purpose || "", category: pbaCatLabel(t.category),
+          payee: `${t.payee || t.purpose || ""}${forWhom}`, category: pbaCatLabel(t.category),
           amount: t.status !== "active" ? `(${fgMoney(t.amount)})` : fgMoney(eff),
         };
       });
-      const fileById = Object.fromEntries((d.files || []).map(f => [f.id, f]));
+      const fileById = d.files || {};            // the close screen keeps files as a map keyed by id
       const drawn = async (sig) => {
         const f = sig?.drawn_file_id ? fileById[sig.drawn_file_id] : null;
         if (!f?.storage_path) return null;
@@ -20574,14 +20598,14 @@
         { tone: under ? "success" : "warn" });
 
       pdf.sectionTitle("Accounts (Form B - reconciliation)");
-      pdf.tableSimple(["Account", "Opening", "In", "Out", "Closing", "Statement / count"],
+      pdf.tableWrap(["Account", "Opening", "In", "Out", "Closing", "Statement / count"],
         data.accounts.map(a => [S(a.label), fgMoney(a.opening), fgMoney(a.moneyIn), fgMoney(a.moneyOut), fgMoney(a.closing), S(a.check)]),
-        { colWidths: [3.4, 1.2, 1.2, 1.2, 1.2, 1.9], align: ["left", "right", "right", "right", "right", "left"] });
+        { colWidths: [2.6, 1.25, 1.25, 1.25, 1.25, 2.4], align: ["left", "right", "right", "right", "right", "left"] });
       await pdf.recordedSignature({ heading: "Form B - Reconciliation", ...SG(data.formB.signature), pending: !data.formB.signature });
 
       pdf.sectionTitle("Transactions");
       if (data.transactions.length === 0) pdf.paragraph("No transactions this month.", { muted: true });
-      else pdf.tableSimple(["Date", "Account", "Type", "Payee / purpose", "Category", "Amount"],
+      else pdf.tableWrap(["Date", "Account", "Type", "Payee / purpose", "Category", "Amount"],
         data.transactions.map(t => [S(t.date), S(t.account), S(t.type), S(t.payee), S(t.category), S(t.amount)]),
         { colWidths: [0.9, 1.5, 1.4, 2.8, 1.5, 1.2], align: ["left", "left", "left", "left", "left", "right"] });
 
@@ -20602,7 +20626,7 @@
       pdf.sectionTitle("Administrative review (Form D)");
       if (!data.formD) pdf.paragraph("The administrative review hasn't been completed yet.", { muted: true });
       else {
-        pdf.tableSimple(["Checklist item", "Confirmed", "Note"],
+        pdf.tableWrap(["Checklist item", "Confirmed", "Note"],
           data.formD.checklist.map(c => [S(c.item), c.confirmed ? "Yes" : "No", S(c.note)]),
           { colWidths: [3.4, 1, 3.4] });
         if (data.formD.findings.length === 0) pdf.paragraph("No findings.", { muted: true });
@@ -20941,7 +20965,7 @@
         // the package: Form G with Forms B, C and D enclosed (R2-6) — v20.0.37: the branded report
         const build = async () => {
           try {
-            const bytes = await buildFormGPdf(await pbaFormGData({ clientName, month, d, m }), brand);
+            const bytes = await buildFormGPdf(await pbaFormGData({ clientId, clientName, month, d, m }), brand);
             const blob = new Blob([bytes], { type: "application/pdf" });
             const file = new File([blob], `PBA-${month}-Form-G.pdf`, { type: "application/pdf" });
             const up = await upload("document", file); if (!up) return;
@@ -23350,6 +23374,15 @@
     // and parameterized by brand so any tenant gets their own header.
     // ──────────────────────────────────────────────────────────────────
     async function createBrandedPDF({ title, subtitle, brand = DEFAULT_BRAND, watermark = null }) { // v20.0.37 — optional watermark
+      // v20.0.37 r1 — the standard fonts draw only Latin-1; a provider name or address with other characters
+      // (CJK, Cyrillic, emoji) would stop every PDF from building, so the header's text is made safe here.
+      const _pdfSafeOrNull = (v) => (v == null || v === "") ? v : pdfSafe(v);
+      brand = { ...brand,
+        orgName: _pdfSafeOrNull(brand.orgName), orgDisplayName: _pdfSafeOrNull(brand.orgDisplayName),
+        orgAddress: _pdfSafeOrNull(brand.orgAddress), orgPhone: _pdfSafeOrNull(brand.orgPhone), orgEmail: _pdfSafeOrNull(brand.orgEmail),
+        orgContractNumber: _pdfSafeOrNull(brand.orgContractNumber), orgContractAwardNumber: _pdfSafeOrNull(brand.orgContractAwardNumber),
+        orgFEIN: _pdfSafeOrNull(brand.orgFEIN) };
+      title = _pdfSafeOrNull(title); subtitle = _pdfSafeOrNull(subtitle);
       // Lazy-fail if pdf-lib didn't load (CDN issue, offline, etc)
       if (typeof PDFLib === "undefined") {
         throw new Error("pdf-lib not loaded — check your internet connection");
@@ -23760,6 +23793,63 @@
         spacer(6);
       }
 
+      // v20.0.37 r1 — a table whose cells wrap onto more lines instead of being cut, so no amount, balance or
+      // note is ever shortened. Rows grow to fit; the header repeats when a row moves to a new page.
+      function tableWrap(headers, rows, opts = {}) {
+        const size = 8.5, lineH = 10.5, padY = 4, headerH = 18;
+        const weights = (Array.isArray(opts.colWidths) && opts.colWidths.length === headers.length) ? opts.colWidths : headers.map(() => 1);
+        const totalWeight = weights.reduce((t, w) => t + w, 0) || 1;
+        const colWidths = weights.map(w => (CONTENT.w * w) / totalWeight);
+        const colOffsets = []; let acc = 0;
+        colWidths.forEach(w => { colOffsets.push(acc); acc += w; });
+        const right = (i) => Array.isArray(opts.align) && opts.align[i] === "right";
+        const wrap = (text, width) => {
+          const maxW = Math.max(10, width - 12);
+          const out = []; let line = "";
+          const pushWord = (w) => {   // a word wider than the cell is split, never dropped
+            let rest = w;
+            while (fontRegular.widthOfTextAtSize(rest, size) > maxW && rest.length > 1) {
+              let k = rest.length - 1;
+              while (k > 1 && fontRegular.widthOfTextAtSize(rest.slice(0, k), size) > maxW) k--;
+              out.push(rest.slice(0, k)); rest = rest.slice(k);
+            }
+            return rest;
+          };
+          String(text).split(/\s+/).filter(Boolean).forEach(w => {
+            const test = line ? `${line} ${w}` : w;
+            if (fontRegular.widthOfTextAtSize(test, size) <= maxW) { line = test; return; }
+            if (line) out.push(line);
+            line = pushWord(w);
+          });
+          if (line || out.length === 0) out.push(line);
+          return out;
+        };
+        const drawHead = () => {
+          page.drawRectangle({ x: MARGIN.left, y: yFromTop(cursorY + headerH), width: CONTENT.w, height: headerH, color: navy });
+          headers.forEach((h, i) => {
+            const ht = String(h).toUpperCase();
+            const x = right(i) ? MARGIN.left + colOffsets[i] + colWidths[i] - 6 - fontBold.widthOfTextAtSize(ht, 8) : MARGIN.left + colOffsets[i] + 6;
+            page.drawText(ht, { x, y: yFromTop(cursorY + headerH - 5), size: 8, font: fontBold, color: rgb(1, 1, 1) });
+          });
+          cursorY += headerH;
+        };
+        ensureSpace(headerH + lineH + padY * 2 + 4);
+        drawHead();
+        rows.forEach((row, ri) => {
+          const cells = row.map((c, i) => wrap((c === null || c === undefined || c === "") ? "—" : c, colWidths[i]));
+          const h = Math.max(...cells.map(l => l.length)) * lineH + padY * 2;
+          if (yFromTop(cursorY) - MARGIN.bottom < h) { newPage(); drawHead(); }
+          if (ri % 2 === 1) page.drawRectangle({ x: MARGIN.left, y: yFromTop(cursorY + h), width: CONTENT.w, height: h, color: cream });
+          cells.forEach((lines, i) => lines.forEach((ln, li) => {
+            const x = right(i) ? MARGIN.left + colOffsets[i] + colWidths[i] - 6 - fontRegular.widthOfTextAtSize(ln, size) : MARGIN.left + colOffsets[i] + 6;
+            page.drawText(ln, { x, y: yFromTop(cursorY + padY + (li + 1) * lineH - 2.5), size, font: fontRegular, color: navy });
+          }));
+          page.drawLine({ start: { x: MARGIN.left, y: yFromTop(cursorY + h) }, end: { x: PAGE.w - MARGIN.right, y: yFromTop(cursorY + h) }, thickness: 0.4, color: border });
+          cursorY += h;
+        });
+        spacer(8);
+      }
+
       // v20.0.37 — a row of figure tiles (e.g. opening balance, deposits, expenses, closing balance)
       function summaryTiles(items) {
         const h = 46, gap = 8, n = items.length || 1;
@@ -23860,7 +23950,7 @@
       newPage();
 
       return { newPage, sectionTitle, fieldRow, paragraph, spacer, tableSimple, signatureBlock, keepTogether, fitText, calloutBox, finalize, downloadAs,
-               summaryTiles, recordedSignature }; // v20.0.37
+               summaryTiles, recordedSignature, tableWrap }; // v20.0.37
     }
 
     // ──────────────────────────────────────────────────────────────────
