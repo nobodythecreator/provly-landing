@@ -40,6 +40,7 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.37 (PBA — Form G, branded, with a sample): Form G is rebuilt on the shared branded PDF engine — the provider's logo, colors and identity on every page; a summary (opening balance, deposits, expenses, closing balance) with countable assets against the SSI limit; tables for accounts and transactions; and a recorded signature block for Forms B, C and D (who signed, in what capacity, when, and the drawn signature where one was captured). "Download sample Form G" (Settings → Branding, and the PBA Monthly Close card) builds the same report from fictitious data with "SAMPLE - FICTITIOUS DATA" on every page; it is never saved, so no sample Person exists anywhere. The SSI limit ($2,000, unchanged since 1989) is one shared constant. No SQL. -->
   <!-- v20.0.36 r1 (Greptile r1): the Role filter now narrows every view — Grid, By Context and List (mobile opens in List) — not just the grid's rows; "Only staff with shifts" shows only in Grid, the one view it affects. -->
   <!-- v20.0.36 (Schedule grid): the grid lists every active staff member every week — scheduling someone no longer hides everyone else. New toolbar filters: Role (schedule a whole category, e.g. every DSP or nurse) and "Only staff with shifts" for a compact view. Rows are sorted by last name. -->
   <!-- v20.0.35 r2 (Greptile r2): the releases card looks things up in batches (200 releases per validity check, the database's limit; 100 ids per list lookup), so a busy week with hundreds of releases still loads; revoked releases aren't re-checked. -->
@@ -1898,7 +1899,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.36</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.37</span>
               </div>
             </button>
             {isMobile && (
@@ -20342,7 +20343,292 @@
       );
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // v20.0.37 — FORM G: the branded monthly report (and a sample of it)
+    // Built on createBrandedPDF, so it carries the provider's logo, colors and identity like every other
+    // Provly PDF. Sections: summary tiles (opening, deposits, expenses, closing) + countable assets against
+    // the SSI limit; accounts (Form B); transactions; a recorded signature block for Forms B, C and D.
+    // The sample is built from fictitious data in the browser and never saved: no Person, staff member,
+    // ledger entry or file is created, so nothing can reach billing, e520 files or dashboards.
+    // ═══════════════════════════════════════════════════════════════
+
+    // The SSI countable-resource limit is federal and the same for every provider, so it lives here once
+    // rather than as a per-provider setting (a provider could set it wrong). Unchanged since 1989; SSA's
+    // 2026 guidance: $2,000 for an individual, $3,000 for a couple. Update here if Congress changes it.
+    const SSI_RESOURCE_LIMIT = { individual: 2000, couple: 3000, asOf: "2026" };
+
+    const PBA_FORM_D_LABELS = {
+      receipts: "Receipts", balances: "Balances reconcile", third_party: "Purchases for others / gifts documented",
+      cash_log: "Cash log complete", assets: "Assets under the alert, or a plan on file",
+      provider_funds: "No provider funds involved", person_signed_c: "The Person signed the review",
+    };
+    const PBA_CAPACITY_LABELS = { reconciler: "PBA Manager", reviewer: "Administrative Reviewer", person: "The Person", guardian: "Guardian" };
+
+    // Standard PDF fonts can only draw Latin-1 (plus a few typographic marks); anything else would stop
+    // the PDF from building, so it is replaced rather than allowed to fail mid-report.
+    const pdfSafe = (v) => String(v == null ? "" : v).replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"')
+      .replace(/[\u2013\u2014]/g, "-").replace(/\u2026/g, "...").replace(/[^\x09\x0A\x0D\x20-\x7E\xA0-\xFF]/g, "?");
+    const fgMoney = (n) => `${Number(n) < 0 ? "-" : ""}$${Math.abs(Number(n || 0)).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const fgDate = (iso) => iso ? new Date(String(iso).length <= 10 ? `${iso}T00:00:00` : iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "";
+    const fgDay = (iso) => iso ? new Date(`${String(iso).slice(0, 10)}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "";
+    const fgDateTime = (iso) => iso ? new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }) : "";
+
+    // A drawn signature for the sample, rendered in the browser (fictitious names only).
+    async function fgSampleSignature(name) {
+      const c = document.createElement("canvas");
+      c.width = 520; c.height = 120;
+      const g = c.getContext("2d");
+      g.fillStyle = "#1b2a4a";
+      g.font = "italic 54px 'Brush Script MT', 'Segoe Script', 'Snell Roundhand', cursive";
+      g.textBaseline = "middle";
+      g.fillText(name, 12, 64);
+      const blob = await new Promise(res => c.toBlob(res, "image/png"));
+      return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
+    }
+
+    // The fictitious month for the sample report: last month, a made-up Person and signers.
+    async function pbaSampleFormGData() {
+      const now = new Date();
+      const first = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const y = first.getFullYear(), mo = String(first.getMonth() + 1).padStart(2, "0");
+      const day = (n) => `${y}-${mo}-${String(n).padStart(2, "0")}`;
+      const monthLabel = first.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+      const closeAt = new Date(now.getFullYear(), now.getMonth(), 4, 15, 12).toISOString();
+      const reviewAt = new Date(now.getFullYear(), now.getMonth(), 6, 10, 5).toISOString();
+      const auditAt = new Date(now.getFullYear(), now.getMonth(), 9, 13, 40).toISOString();
+      const CU = "Sample Credit Union ··0000", CASH = "Cash on hand";
+      // [day, account, type, payee, category, signed amount]
+      const rows = [
+        [1,  CU,   "Deposit",    "SSI benefit",         "Income",        994.00],
+        [2,  CU,   "Withdrawal", "Rent share",          "Housing",       -450.00],
+        [5,  CU,   "Withdrawal", "Grocery store",       "Food",          -86.42],
+        [8,  CU,   "Transfer",   "To cash on hand",     "Transfer",      -60.00],
+        [8,  CASH, "Transfer",   "From credit union",   "Transfer",      60.00],
+        [12, CASH, "Withdrawal", "Movie and lunch",     "Recreation",    -24.50],
+        [15, CU,   "Withdrawal", "Pharmacy co-pay",     "Medical",       -12.00],
+        [19, CU,   "Withdrawal", "Clothing store",      "Clothing",      -58.97],
+        [22, CASH, "Withdrawal", "Haircut",             "Personal care", -18.00],
+        [26, CU,   "Withdrawal", "Phone bill",          "Utilities",     -35.00],
+        [28, CU,   "Fee",        "Monthly account fee", "Bank fees",     -2.00],
+        [30, CU,   "Interest",   "Interest",            "Income",        0.41],
+      ];
+      const openings = { [CU]: 612.38, [CASH]: 25.00 };
+      const r2 = (n) => Math.round(n * 100) / 100;
+      // Every figure below is computed from the rows, so the sample always adds up.
+      const accounts = [CU, CASH].map(name => {
+        const mine = rows.filter(r => r[1] === name);
+        const moneyIn = r2(mine.filter(r => r[5] > 0).reduce((t, r) => t + r[5], 0));
+        const moneyOut = r2(mine.filter(r => r[5] < 0).reduce((t, r) => t - r[5], 0));
+        const closing = r2(openings[name] + moneyIn - moneyOut);
+        return { label: name, opening: openings[name], moneyIn, moneyOut, closing,
+                 check: name === CU ? `Statement ${fgMoney(closing)}` : `Counted ${fgMoney(closing)}` };
+      });
+      const totals = {
+        opening: r2(accounts.reduce((t, a) => t + a.opening, 0)),
+        deposits: r2(rows.filter(r => r[2] === "Deposit" || r[2] === "Interest").reduce((t, r) => t + r[5], 0)),
+        expenses: r2(rows.filter(r => r[2] === "Withdrawal" || r[2] === "Fee").reduce((t, r) => t - r[5], 0)),
+        closing: r2(accounts.reduce((t, a) => t + a.closing, 0)),
+      };
+      const transactions = rows.map(r => ({ date: fgDay(day(r[0])), account: r[1] === CU ? "Bank ··0000" : "Cash", type: r[2], payee: r[3], category: r[4], amount: fgMoney(r[5]) }));
+      return {
+        sample: true,
+        personName: "Jordan Sample",
+        monthLabel,
+        preparedOn: fgDate(now.toISOString()),
+        totals,
+        countable: totals.closing,
+        limit: SSI_RESOURCE_LIMIT.individual,
+        accounts,
+        transactions,
+        formB: { signature: { name: "Alex Rivera", role: "PBA Manager", signedAt: fgDateTime(closeAt), image: await fgSampleSignature("Alex Rivera") } },
+        formC: {
+          reviewDate: fgDate(reviewAt), mode: "In person", attendees: "Jordan Sample, Alex Rivera",
+          comments: "Jordan wants to save for a new tablet and asked to keep a little more cash for outings.",
+          exception: null,
+          signatures: [{ name: "Jordan Sample", role: "The Person", signedAt: fgDateTime(reviewAt), image: await fgSampleSignature("Jordan Sample") }],
+        },
+        formD: {
+          checklist: Object.keys(PBA_FORM_D_LABELS).map(k => ({ item: PBA_FORM_D_LABELS[k], confirmed: true, note: "" })),
+          findings: [],
+          signature: { name: "Casey Morgan", role: "Administrative Reviewer", signedAt: fgDateTime(auditAt), image: await fgSampleSignature("Casey Morgan") },
+        },
+      };
+    }
+
+    // A real month's Form G data, from the records the close screen already loaded. Drawn signatures (the
+    // Person's or guardian's on Form C) are fetched from storage; if one can't be fetched, its block still
+    // shows who signed and when.
+    async function pbaFormGData({ clientName, month, d, m }) {
+      const ms = `${month}-01`;
+      const [yy, mm] = month.split("-").map(Number);
+      const me = new Date(yy, mm, 0).toISOString().slice(0, 10);
+      const inMonth = (t) => (t.entry_date || "") >= ms && (t.entry_date || "") <= me;
+      const accs = (d.accounts || []).filter(a => (!a.closed_on || a.closed_on >= ms) && (!a.opened_on || a.opened_on <= me) && (!a.opening_date || a.opening_date <= me));
+      const kindLabel = (k) => PBA_ACCOUNT_KINDS.find(x => x.value === k)?.label || k;
+      const accLabel = (a) => `${a.institution || kindLabel(a.kind)}${a.last4 ? ` ··${a.last4}` : ""}`;
+      const accShort = (a) => `${kindLabel(a.kind)}${a.last4 ? ` ··${a.last4}` : ""}`;   // fits the transactions table
+      const summary = (m.fb?.summary?.accounts) || [];
+      const totals = { opening: 0, deposits: 0, expenses: 0, closing: 0 };
+      const accounts = accs.map(a => {
+        let opening = Number(a.opening_balance || 0), moneyIn = 0, moneyOut = 0;
+        (d.txns || []).forEach(t => {
+          const eff = pbaSign(t, a.id) * Number(t.amount || 0);
+          if (!eff) return;
+          if ((t.entry_date || "") < ms) opening += eff;
+          else if (inMonth(t)) { if (eff > 0) moneyIn += eff; else moneyOut += -eff; }
+        });
+        const closing = opening + moneyIn - moneyOut;
+        const s = summary.find(x => x.account_id === a.id) || {};
+        const check = a.kind === "cash" ? (s.counted != null ? `Counted ${fgMoney(s.counted)}` : "—")
+          : (s.statement_closing != null ? `Statement ${fgMoney(s.statement_closing)}` : "—");
+        totals.opening += opening; totals.closing += closing;
+        return { label: accLabel(a), opening, moneyIn, moneyOut, closing, check };
+      });
+      // Deposits and expenses across the Person's accounts — transfers between their own accounts move
+      // money, they don't add or spend it, so they are left out of these two totals.
+      (d.txns || []).filter(inMonth).forEach(t => {
+        const eff = pbaSign(t, t.account_id) * Number(t.amount || 0);
+        if (t.type === "deposit" || t.type === "interest") totals.deposits += eff;
+        else if (["withdrawal", "fee", "cash_out"].includes(t.type)) totals.expenses += -eff;
+      });
+      const acctById = Object.fromEntries((d.accounts || []).map(a => [a.id, a]));
+      const transactions = (d.txns || []).filter(inMonth).slice().sort((a, b) => a.entry_date.localeCompare(b.entry_date)).map(t => {
+        const eff = pbaSign(t, t.account_id) * Number(t.amount || 0);
+        return {
+          date: fgDay(t.entry_date), account: acctById[t.account_id] ? accShort(acctById[t.account_id]) : "",
+          type: `${pbaTypeLabel(t.type)}${t.reverses_id ? " (reversal)" : ""}${t.status !== "active" ? " (voided)" : ""}`,
+          payee: t.payee || t.purpose || "", category: pbaCatLabel(t.category),
+          amount: t.status !== "active" ? `(${fgMoney(t.amount)})` : fgMoney(eff),
+        };
+      });
+      const fileById = Object.fromEntries((d.files || []).map(f => [f.id, f]));
+      const drawn = async (sig) => {
+        const f = sig?.drawn_file_id ? fileById[sig.drawn_file_id] : null;
+        if (!f?.storage_path) return null;
+        try {
+          const { data, error } = await supabase.storage.from("pba").download(f.storage_path);
+          if (error || !data) return null;
+          return new Uint8Array(await data.arrayBuffer());
+        } catch (e) { return null; }
+      };
+      const sigOf = async (s) => s ? { name: s.signer_name, role: PBA_CAPACITY_LABELS[s.capacity] || s.capacity, signedAt: fgDateTime(s.signed_at), image: await drawn(s) } : null;
+      const sigs = d.sigs || [];
+      const sigB = m.fb ? sigs.find(s => s.form_type === "form_b" && s.form_id === m.fb.id) : null;
+      const sigsC = m.fc ? sigs.filter(s => s.form_type === "form_c" && s.form_id === m.fc.id) : [];
+      const sigD = m.fd ? sigs.find(s => s.form_type === "form_d" && s.form_id === m.fd.id) : null;
+      const pre = m.fd?.checklist?.prechecks || {}; const rv = m.fd?.checklist?.reviewer || {};
+      return {
+        sample: false,
+        personName: clientName,
+        monthLabel: pbaMonthLabel(month),
+        preparedOn: fgDate(new Date().toISOString()),
+        totals,
+        countable: Number(m.fb?.countable || 0),
+        limit: SSI_RESOURCE_LIMIT.individual,
+        accounts,
+        transactions,
+        formB: { signature: await sigOf(sigB) },
+        formC: m.fc ? {
+          reviewDate: fgDate(m.fc.review_date), mode: m.fc.mode === "virtual" ? "Virtual" : "In person", attendees: m.fc.attendees || "",
+          comments: m.fc.person_comments || "",
+          exception: (m.fc.exception_reason && !sigsC.some(s => s.capacity === "person" || s.capacity === "guardian")) ? m.fc.exception_reason : null,
+          signatures: await Promise.all(sigsC.map(sigOf)),
+        } : null,
+        formD: m.fd ? {
+          checklist: Object.keys(pre).map(k => ({ item: PBA_FORM_D_LABELS[k] || pre[k]?.detail || k, confirmed: !!rv[k]?.confirmed, note: rv[k]?.note || "" })),
+          findings: (m.finds || []).map(f => ({ text: f.finding, response: f.response || "" })),
+          signature: await sigOf(sigD),
+        } : null,
+      };
+    }
+
+    // Draws Form G and returns the PDF's bytes.
+    async function buildFormGPdf(data, brand) {
+      const S = pdfSafe;
+      // every name that reaches the page goes through pdfSafe, signatures included
+      const SG = (x) => x ? { ...x, name: S(x.name), role: S(x.role), signedAt: S(x.signedAt) } : {};
+      const pdf = await createBrandedPDF({
+        title: "PBA Monthly Report - Form G",
+        subtitle: S(`${data.personName}  ·  ${data.monthLabel}`),
+        brand,
+        watermark: data.sample ? "SAMPLE - FICTITIOUS DATA" : null,
+      });
+      pdf.fieldRow([
+        { label: "Person", value: S(data.personName) },
+        { label: "Month", value: S(data.monthLabel) },
+        { label: "Prepared", value: S(data.preparedOn) },
+      ]);
+
+      pdf.sectionTitle("Summary for the month");
+      pdf.summaryTiles([
+        { label: "Opening balance", value: fgMoney(data.totals.opening) },
+        { label: "Deposits", value: fgMoney(data.totals.deposits), accent: true },
+        { label: "Expenses", value: fgMoney(data.totals.expenses), accent: true },
+        { label: "Closing balance", value: fgMoney(data.totals.closing) },
+      ]);
+      const under = data.countable < data.limit;
+      pdf.calloutBox("Countable assets (SSI)",
+        S(`${fgMoney(data.countable)} counted against the ${fgMoney(data.limit)} SSI resource limit for an individual. ` +
+          (under ? "Under the limit." : "At or over the limit - written notices and a plan are required.") +
+          " ABLE accounts are not counted. Transfers between the Person's own accounts are not counted as deposits or expenses."),
+        { tone: under ? "success" : "warn" });
+
+      pdf.sectionTitle("Accounts (Form B - reconciliation)");
+      pdf.tableSimple(["Account", "Opening", "In", "Out", "Closing", "Statement / count"],
+        data.accounts.map(a => [S(a.label), fgMoney(a.opening), fgMoney(a.moneyIn), fgMoney(a.moneyOut), fgMoney(a.closing), S(a.check)]),
+        { colWidths: [3.4, 1.2, 1.2, 1.2, 1.2, 1.9], align: ["left", "right", "right", "right", "right", "left"] });
+      await pdf.recordedSignature({ heading: "Form B - Reconciliation", ...SG(data.formB.signature), pending: !data.formB.signature });
+
+      pdf.sectionTitle("Transactions");
+      if (data.transactions.length === 0) pdf.paragraph("No transactions this month.", { muted: true });
+      else pdf.tableSimple(["Date", "Account", "Type", "Payee / purpose", "Category", "Amount"],
+        data.transactions.map(t => [S(t.date), S(t.account), S(t.type), S(t.payee), S(t.category), S(t.amount)]),
+        { colWidths: [0.9, 1.5, 1.4, 2.8, 1.5, 1.2], align: ["left", "left", "left", "left", "left", "right"] });
+
+      pdf.sectionTitle("Review with the Person (Form C)");
+      if (!data.formC) pdf.paragraph("The review hasn't been recorded yet.", { muted: true });
+      else {
+        pdf.fieldRow([
+          { label: "Review date", value: S(data.formC.reviewDate) },
+          { label: "How", value: S(data.formC.mode) },
+          { label: "Attended", value: S(data.formC.attendees) },
+        ]);
+        if (data.formC.comments) pdf.paragraph(S(`The Person's comments: "${data.formC.comments}"`));
+        if (data.formC.exception) pdf.calloutBox("Not signed by the Person", S(data.formC.exception), { tone: "warn" });
+        if (data.formC.signatures.length === 0 && !data.formC.exception) await pdf.recordedSignature({ heading: "Form C - The Person or guardian", pending: true });
+        for (const s of data.formC.signatures) await pdf.recordedSignature({ heading: S(`Form C - ${s.role}`), ...SG(s) });
+      }
+
+      pdf.sectionTitle("Administrative review (Form D)");
+      if (!data.formD) pdf.paragraph("The administrative review hasn't been completed yet.", { muted: true });
+      else {
+        pdf.tableSimple(["Checklist item", "Confirmed", "Note"],
+          data.formD.checklist.map(c => [S(c.item), c.confirmed ? "Yes" : "No", S(c.note)]),
+          { colWidths: [3.4, 1, 3.4] });
+        if (data.formD.findings.length === 0) pdf.paragraph("No findings.", { muted: true });
+        else data.formD.findings.forEach(f => pdf.paragraph(S(`Finding: ${f.text}${f.response ? ` - Response: ${f.response}` : " - response pending"}`)));
+        await pdf.recordedSignature({ heading: "Form D - Administrative review", ...SG(data.formD.signature), pending: !data.formD.signature });
+      }
+      return pdf.finalize();
+    }
+
+    // The sample report for Support Coordinators: fictitious, downloaded, never saved.
+    async function downloadSampleFormG(brand, addToast) {
+      try {
+        const data = await pbaSampleFormGData();
+        const bytes = await buildFormGPdf(data, brand);
+        const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+        const a = document.createElement("a");
+        a.href = url; a.download = "SAMPLE-PBA-Form-G.pdf";
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+      } catch (e) {
+        addToast(e.message || "Couldn't build the sample report", "error");
+      }
+    }
+
     function PbaCloseModals({ modal, setModal, setMd, busy, run, upload, padRef, clientId, client, d, m, month, ms, acctName, txnLabel, addToast, effectOn }) {
+      const { brand } = useAuth(); // v20.0.37 — Form G carries the provider's branding
       const close = () => setModal(null);
       const done = async (fn, args, msg) => { if (await run(fn, args, msg)) setModal(null); };
       const footer = (onSave, label = "Save") => (
@@ -20652,42 +20938,11 @@
       );
 
       if (modal.kind === "formG") {
-        // the package: Form G with Forms B, C and D enclosed (R2-6)
+        // the package: Form G with Forms B, C and D enclosed (R2-6) — v20.0.37: the branded report
         const build = async () => {
           try {
-            const doc = new jspdf.jsPDF();
-            let y = 16;
-            const line = (t, size = 10, bold = false) => { doc.setFontSize(size); doc.setFont(undefined, bold ? "bold" : "normal");
-              doc.splitTextToSize(String(t), 180).forEach(s => { if (y > 280) { doc.addPage(); y = 16; } doc.text(s, 14, y); y += size * 0.5 + 1.5; }); };
-            line("Personal Budget Assistance — Monthly Financial Report (Form G)", 14, true);
-            line(`${clientName} · ${pbaMonthLabel(month)} · prepared ${new Date().toLocaleDateString()}`);
-            y += 2; line("Accounts (Form B — reconciliation)", 12, true);
-            ((m.fb?.summary?.accounts) || []).forEach(a => line(`${a.label || "Account"}: ledger ${pbaMoney(a.ledger_closing)}${a.statement_closing != null ? ` · statement ${pbaMoney(a.statement_closing)}` : ""}${a.counted != null ? ` · counted ${pbaMoney(a.counted)}` : ""}${Number(a.outstanding || 0) ? ` · outstanding ${pbaMoney(a.outstanding)}` : ""}`));
-            line(`Countable assets at the close: ${pbaMoney(m.fb?.countable)} (SSI resource limit $2,000)`);
-            const sigB = d.sigs.find(s => s.form_type === "form_b" && s.form_id === m.fb?.id);
-            if (sigB) line(`Reconciled and signed by ${sigB.signer_name} on ${new Date(sigB.signed_at).toLocaleDateString()}`);
-            y += 2; line("Transactions", 12, true);
-            const tx = d.txns.filter(t => (t.entry_date || "").slice(0, 7) === month).slice().sort((a, b) => a.entry_date.localeCompare(b.entry_date));
-            if (tx.length === 0) line("None.");
-            tx.forEach(t => line(`${fmtD(t.entry_date)}  ${pbaTypeLabel(t.type)}  ${t.payee || ""}  ${pbaCatLabel(t.category)}  ${t.status !== "active" ? "(voided) " : ""}${t.reverses_id ? "(reversal) " : ""}${pbaMoney(t.amount)}${t.beneficiary === "other" ? `  for ${t.beneficiary_name}` : ""}`, 9));
-            y += 2; line("Review with the Person (Form C)", 12, true);
-            if (m.fc) {
-              line(`${fmtD(m.fc.review_date)} · ${m.fc.mode === "virtual" ? "virtual" : "in person"}${m.fc.attendees ? ` · attended: ${m.fc.attendees}` : ""}`);
-              if (m.fc.person_comments) line(`The Person's comments: "${m.fc.person_comments}"`);
-              const ps = d.sigs.filter(s => s.form_type === "form_c" && s.form_id === m.fc.id);
-              ps.forEach(s => line(`Signed by ${s.signer_name} (${s.capacity}) on ${new Date(s.signed_at).toLocaleDateString()}`));
-              if (m.fc.exception_reason && !ps.some(s => s.capacity === "person" || s.capacity === "guardian")) line(`Not signed by the Person: ${m.fc.exception_reason}`);
-            }
-            y += 2; line("Administrative review (Form D)", 12, true);
-            if (m.fd) {
-              const pre = m.fd.checklist?.prechecks || {}; const rv = m.fd.checklist?.reviewer || {};
-              Object.keys(pre).forEach(k => line(`${rv[k]?.confirmed ? "✓" : "✗"} ${pre[k].detail}${rv[k]?.note ? ` — ${rv[k].note}` : ""}`, 9));
-              const sd = d.sigs.find(s => s.form_type === "form_d" && s.form_id === m.fd.id);
-              if (sd) line(`Reviewed and signed by ${sd.signer_name} on ${new Date(sd.signed_at).toLocaleDateString()}`);
-              line(m.finds.length ? "Findings:" : "No findings.", 10, true);
-              m.finds.forEach(f => line(`• ${f.finding}${f.response ? ` — Response: ${f.response}` : " — response pending"}`, 9));
-            }
-            const blob = doc.output("blob");
+            const bytes = await buildFormGPdf(await pbaFormGData({ clientName, month, d, m }), brand);
+            const blob = new Blob([bytes], { type: "application/pdf" });
             const file = new File([blob], `PBA-${month}-Form-G.pdf`, { type: "application/pdf" });
             const up = await upload("document", file); if (!up) return;
             const url = URL.createObjectURL(blob); window.open(url, "_blank", "noopener");
@@ -20831,6 +21086,18 @@
       );
     }
 
+    // v20.0.37 — the sample Form G for Support Coordinators (fictitious, downloaded, never saved)
+    function SampleFormGButton() {
+      const { brand } = useAuth();
+      const { addToast } = useToast();
+      const [busy, setBusy] = useState(false);
+      return (
+        <SecondaryButton onClick={async () => { setBusy(true); await downloadSampleFormG(brand, addToast); setBusy(false); }}>
+          {busy ? "Building…" : "Download sample Form G"}
+        </SecondaryButton>
+      );
+    }
+
     // Dashboard / Compliance: every Person's open close steps (owner and Compliance Director)
     function PbaCyclesCard({ onNavigate, compact }) {
       const [rows, setRows] = useState(null);
@@ -20840,7 +21107,10 @@
       const stepLabel = (k) => PBA_STEPS.find(s => s.key === k)?.label || k;
       return (
         <div style={{ background: CB.white, borderRadius: 16, padding: 20, border: `1px solid ${CB.border}`, marginBottom: 20 }}>
-          <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, marginBottom: 8 }}>PBA Monthly Close {compact ? "— due soon or overdue" : ""}</h3>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
+            <h3 style={{ fontSize: 15, fontWeight: 700, color: CB.navy, margin: 0 }}>PBA Monthly Close {compact ? "— due soon or overdue" : ""}</h3>
+            {!compact && <SampleFormGButton />}
+          </div>
           {list.length === 0 ? <div style={{ fontSize: 13, color: CB.textLight }}>Every close is up to date.</div> : list.slice(0, compact ? 8 : 200).map((r, i) => (
             <button key={i} onClick={() => onNavigate && onNavigate("client-profile", { type: "client", id: r.o_person_id, profileTab: "pba" })}
               style={{ display: "flex", gap: 10, alignItems: "center", width: "100%", textAlign: "left", padding: "8px 10px", borderRadius: 10, border: `1px solid ${CB.border}`, background: CB.cream, marginBottom: 6, cursor: "pointer", fontFamily: "inherit" }}>
@@ -22550,6 +22820,20 @@
             </div>
           </div>
 
+          {/* v20.0.37 — the sample PBA report, so the provider can see its branding on Form G */}
+          <div style={card}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+              <div style={{ flex: 1, minWidth: 220 }}>
+                <h3 style={{ fontSize: 16, fontWeight: 700, color: CB.navy, margin: "0 0 4px" }}>Sample PBA report (Form G)</h3>
+                <p style={{ fontSize: 13, color: CB.textMid, margin: 0, lineHeight: 1.5 }}>
+                  A full monthly report built from fictitious data, with your logo and colors, marked "SAMPLE - FICTITIOUS DATA" on every page.
+                  Share it with Support Coordinators who ask what your reports look like. Nothing is saved.
+                </p>
+              </div>
+              <SampleFormGButton />
+            </div>
+          </div>
+
           {/* Branding Details — edit-mode toggle */}
           <BrandingDetailsEditor />
         </div>
@@ -23065,7 +23349,7 @@
     // one unified document set. v19.5 — was createHopeHavenPDF; renamed
     // and parameterized by brand so any tenant gets their own header.
     // ──────────────────────────────────────────────────────────────────
-    async function createBrandedPDF({ title, subtitle, brand = DEFAULT_BRAND }) {
+    async function createBrandedPDF({ title, subtitle, brand = DEFAULT_BRAND, watermark = null }) { // v20.0.37 — optional watermark
       // Lazy-fail if pdf-lib didn't load (CDN issue, offline, etc)
       if (typeof PDFLib === "undefined") {
         throw new Error("pdf-lib not loaded — check your internet connection");
@@ -23153,7 +23437,22 @@
         pageNum += 1;
         drawHeader();
         drawFooter();
+        if (watermark) drawWatermark(); // v20.0.37
         cursorY = MARGIN.top + 6;
+      }
+
+      // v20.0.37 — a watermark on every page (e.g. "SAMPLE - FICTITIOUS DATA"): large and faint across the
+      // middle, plus a line under the header and one in the footer, so no page can be mistaken for real.
+      function drawWatermark() {
+        const red = rgb(0.81, 0.15, 0.12);
+        const big = 34;
+        const w = fontBold.widthOfTextAtSize(watermark, big);
+        page.drawText(watermark, { x: (PAGE.w - w * 0.82) / 2, y: PAGE.h / 2 - w * 0.29, size: big, font: fontBold,
+          color: red, opacity: 0.12, rotate: PDFLib.degrees(35) });
+        const bw = fontBold.widthOfTextAtSize(watermark, 9);
+        page.drawText(watermark, { x: (PAGE.w - bw) / 2, y: yFromTop(MARGIN.top - 6), size: 9, font: fontBold, color: red });
+        const fw = fontBold.widthOfTextAtSize(watermark, 7.5);
+        page.drawText(watermark, { x: (PAGE.w - fw) / 2, y: 28, size: 7.5, font: fontBold, color: red });
       }
 
       function drawHeader() {
@@ -23332,9 +23631,15 @@
         ensureSpace(headerH + 6);
         // Header
         page.drawRectangle({ x: MARGIN.left, y: yFromTop(cursorY + headerH), width: CONTENT.w, height: headerH, color: navy });
+        // v20.0.37 — opts.align: per-column "left" (default) or "right" (amounts)
+        const alignOf = (i) => (Array.isArray(opts.align) && opts.align[i] === "right") ? "right" : "left";
+        const cellX = (i, text, font, size) => alignOf(i) === "right"
+          ? MARGIN.left + colOffsets[i] + colWidths[i] - 6 - font.widthOfTextAtSize(text, size)
+          : MARGIN.left + colOffsets[i] + 6;
         headers.forEach((h, i) => {
-          page.drawText(String(h).toUpperCase(), {
-            x: MARGIN.left + colOffsets[i] + 6, y: yFromTop(cursorY + headerH - 5),
+          const ht = String(h).toUpperCase();
+          page.drawText(ht, {
+            x: cellX(i, ht, fontBold, 8), y: yFromTop(cursorY + headerH - 5),
             size: 8, font: fontBold, color: rgb(1, 1, 1),
           });
         });
@@ -23350,7 +23655,7 @@
             const maxChars = charsForCol(i);
             const truncated = text.length > maxChars ? text.slice(0, Math.max(1, maxChars - 1)) + "…" : text;
             page.drawText(truncated, {
-              x: MARGIN.left + colOffsets[i] + 6, y: yFromTop(cursorY + rowH - 5),
+              x: cellX(i, truncated, fontRegular, 8.5), y: yFromTop(cursorY + rowH - 5),
               size: 8.5, font: fontRegular, color: navy,
             });
           });
@@ -23455,6 +23760,50 @@
         spacer(6);
       }
 
+      // v20.0.37 — a row of figure tiles (e.g. opening balance, deposits, expenses, closing balance)
+      function summaryTiles(items) {
+        const h = 46, gap = 8, n = items.length || 1;
+        keepTogether(h + 10);
+        const w = (CONTENT.w - gap * (n - 1)) / n;
+        items.forEach((it, i) => {
+          const x = MARGIN.left + i * (w + gap);
+          page.drawRectangle({ x, y: yFromTop(cursorY + h), width: w, height: h, color: cream, borderColor: border, borderWidth: 0.6 });
+          page.drawRectangle({ x, y: yFromTop(cursorY + 3), width: w, height: 3, color: it.accent ? teal : navy });
+          page.drawText(String(it.label || "").toUpperCase(), { x: x + 8, y: yFromTop(cursorY + 17), size: 7, font: fontBold, color: textMid });
+          page.drawText(String(it.value == null ? "—" : it.value), { x: x + 8, y: yFromTop(cursorY + 37), size: 14, font: fontBold, color: navy });
+        });
+        cursorY += h;
+        spacer(8);
+      }
+
+      // v20.0.37 — a signature that was recorded in Provly: the drawn signature (when there is one), who
+      // signed, in what capacity and when. pending → "Not yet signed" over an empty line.
+      async function recordedSignature({ heading, name, role, signedAt, image, pending } = {}) {
+        const boxH = 74;
+        keepTogether(boxH + 8);
+        const left = MARGIN.left + 14;
+        page.drawRectangle({ x: MARGIN.left, y: yFromTop(cursorY + boxH), width: CONTENT.w, height: boxH, color: rgb(1, 1, 1), borderColor: border, borderWidth: 0.8 });
+        page.drawRectangle({ x: MARGIN.left, y: yFromTop(cursorY + boxH), width: 3, height: boxH, color: teal });
+        page.drawText(String(heading || "Signature").toUpperCase(), { x: left, y: yFromTop(cursorY + 14), size: 7.5, font: fontBold, color: textMid });
+        const lineY = cursorY + 46;
+        if (image && !pending) {
+          try {
+            const img = await pdfDoc.embedPng(image);
+            const sc = Math.min(26 / img.height, 190 / img.width, 1);
+            page.drawImage(img, { x: left, y: yFromTop(lineY - 2), width: img.width * sc, height: img.height * sc });
+          } catch (_) { /* a signature image that can't be read never stops the report */ }
+        }
+        page.drawLine({ start: { x: left, y: yFromTop(lineY) }, end: { x: left + 250, y: yFromTop(lineY) }, thickness: 0.8, color: navy });
+        if (pending) {
+          page.drawText("Not yet signed", { x: left, y: yFromTop(lineY + 13), size: 9, font: fontItalic, color: textMid });
+        } else {
+          page.drawText(`${name || ""}${role ? "  ·  " + role : ""}`, { x: left, y: yFromTop(lineY + 13), size: 9, font: fontBold, color: navy });
+          page.drawText(`Signed electronically in Provly${signedAt ? "  ·  " + signedAt : ""}`, { x: left, y: yFromTop(lineY + 24), size: 8, font: fontRegular, color: textMid });
+        }
+        cursorY += boxH;
+        spacer(6);
+      }
+
       function signatureBlock(label = "Signature") {
         ensureSpace(54);
         spacer(8);
@@ -23510,7 +23859,8 @@
 
       newPage();
 
-      return { newPage, sectionTitle, fieldRow, paragraph, spacer, tableSimple, signatureBlock, keepTogether, fitText, calloutBox, finalize, downloadAs };
+      return { newPage, sectionTitle, fieldRow, paragraph, spacer, tableSimple, signatureBlock, keepTogether, fitText, calloutBox, finalize, downloadAs,
+               summaryTiles, recordedSignature }; // v20.0.37
     }
 
     // ──────────────────────────────────────────────────────────────────
