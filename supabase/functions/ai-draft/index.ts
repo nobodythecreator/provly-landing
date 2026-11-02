@@ -30,6 +30,7 @@
 // logged as its status only — never its body, which could echo note text.
 
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { twoFactorOk, TWO_FACTOR_REFUSAL } from "../_shared/mfa.ts"; // v20.0.38
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -105,6 +106,10 @@ Deno.serve(async (req) => {
     if (!AI_ROLES.includes(member.role)) {
       return json({ error: "AI drafting is available to owners, admins and the compliance director" }, 403);
     }
+    // v20.0.38 — notes are read under the caller's own login (which the database already gates on
+    // two-factor), but the audit row is written with the service key; refuse up front so nothing is
+    // recorded or sent for an unverified Owner / Compliance Director session.
+    if (!(await twoFactorOk(jwt))) return json({ error: TWO_FACTOR_REFUSAL, code: "mfa_required" }, 403);
 
     let body: Record<string, unknown>;
     try { body = await req.json(); } catch { return json({ error: "Invalid request" }, 400); }

@@ -72,6 +72,7 @@
 import Stripe from "https://esm.sh/stripe@17.7.0?target=deno";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, json, PRICE_TO_TIER } from "../_shared/stripe.ts";
+import { twoFactorOk, TWO_FACTOR_REFUSAL } from "../_shared/mfa.ts"; // v20.0.38
 
 const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
   apiVersion: "2026-04-22.dahlia",
@@ -162,6 +163,9 @@ Deno.serve(async (req) => {
     if (memberErr) throw memberErr;
     if (!member) return json({ error: "You can only manage billing for your own organization" }, 403);
     if (member.role !== "owner") return json({ error: "Only the account owner can change billing" }, 403);
+    // v20.0.38 — the service key skips the database's two-factor rule, so it is applied here: the
+    // owner's session must be verified with an authenticator code before billing changes.
+    if (!(await twoFactorOk(token))) return json({ error: TWO_FACTOR_REFUSAL, code: "mfa_required" }, 403);
 
     // ── Org + census ───────────────────────────────────────────────────
     const { data: org, error: orgErr } = await supabaseAdmin

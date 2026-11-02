@@ -21,6 +21,9 @@
 -- RUN IN SUPABASE (SQL editor), ONCE. One transaction: preflight → wrap the helpers →
 -- self-test (no writes) → COMMIT → verification table.
 -- Emergency only: sql/v20.0.38-undo.sql puts the helpers back exactly as they were.
+-- r1 (Greptile round 1, before this file ran): the self-test's signed-in tokens carry the organization
+--   claim real sessions carry (org_id() reads it); mfa_ok() lets server functions that use the service
+--   key (send-invite, create-checkout-session) apply the same two-factor rule before doing any work.
 -- =====================================================================================
 
 begin;
@@ -68,6 +71,13 @@ returns boolean language sql stable security definer set search_path = public, p
                    and m.xmin::text = (pg_current_xact_id_if_assigned()::xid)::text)
 $$;
 
+-- For server functions (Edge Functions) that act with the service key: may this caller proceed?
+-- Called with the caller's own token, so the answer is the same rule every database request follows.
+create function public.mfa_ok()
+returns boolean language sql stable security definer set search_path = public, pg_temp as $$
+  select public._mfa_satisfied()
+$$;
+
 -- For the app: does the signed-in user need to give a code? (Their own roles only.)
 create function public.mfa_required()
 returns boolean language sql stable security definer set search_path = public, pg_temp as $$
@@ -111,6 +121,8 @@ begin
   revoke all on function public._mfa_satisfied() from public, anon, authenticated;
   revoke all on function public.mfa_required() from public, anon;
   grant execute on function public.mfa_required() to authenticated;
+  revoke all on function public.mfa_ok() from public, anon;
+  grant execute on function public.mfa_ok() to authenticated;
 end
 $grant$;
 
@@ -132,26 +144,35 @@ begin
   end if;
 
   -- 1. Owner, password only (aal1): every helper answers NULL — no access anywhere
-  perform set_config('request.jwt.claims', json_build_object('sub', v_owner, 'role', 'authenticated', 'aal', 'aal1')::text, true);
+  perform set_config('request.jwt.claims', json_build_object('sub', v_owner, 'role', 'authenticated', 'aal', 'aal1', 'org_id', v_org,
+                                                    'app_metadata', json_build_object('org_id', v_org))::text, true);
   if public.org_id() is not null or public.member_role() is not null or public.access_tier() is not null or public.my_staff_id() is not null then
     raise exception 'SELFTEST FAIL 1: an Owner without two-factor still got an answer';
   end if;
   if not public.mfa_required() then
     raise exception 'SELFTEST FAIL 1b: mfa_required() is false for an Owner';
   end if;
+  if public.mfa_ok() then
+    raise exception 'SELFTEST FAIL 1c: mfa_ok() lets an Owner without two-factor through';
+  end if;
 
   -- 2. Owner, verified (aal2): every helper answers exactly as before
-  perform set_config('request.jwt.claims', json_build_object('sub', v_owner, 'role', 'authenticated', 'aal', 'aal2')::text, true);
+  perform set_config('request.jwt.claims', json_build_object('sub', v_owner, 'role', 'authenticated', 'aal', 'aal2', 'org_id', v_org,
+                                                    'app_metadata', json_build_object('org_id', v_org))::text, true);
   if public.org_id() is distinct from public._org_id_base()
      or public.member_role()::text is distinct from public._member_role_base()::text or public.member_role() is null
      or public.access_tier()::text is distinct from public._access_tier_base()::text
      or public.my_staff_id() is distinct from public._my_staff_id_base() then
     raise exception 'SELFTEST FAIL 2: a verified Owner did not get the same answers as before';
   end if;
+  if not public.mfa_ok() then
+    raise exception 'SELFTEST FAIL 2b: mfa_ok() refuses a verified Owner';
+  end if;
 
   -- 3. A member whose role doesn't require two-factor, password only: unchanged (skipped if none exists)
   if v_other is not null then
-    perform set_config('request.jwt.claims', json_build_object('sub', v_other, 'role', 'authenticated', 'aal', 'aal1')::text, true);
+    perform set_config('request.jwt.claims', json_build_object('sub', v_other, 'role', 'authenticated', 'aal', 'aal1', 'org_id', v_org,
+                                                      'app_metadata', json_build_object('org_id', v_org))::text, true);
     if public.member_role()::text is distinct from public._member_role_base()::text
        or public.access_tier()::text is distinct from public._access_tier_base()::text
        or public.org_id() is distinct from public._org_id_base()
@@ -191,6 +212,9 @@ select n, check_name, got, want, case when got = want then '✅' else '❌' end 
   union all select 4, 'mfa_required() for signed-in users (not anon)',
     (has_function_privilege('authenticated', 'public.mfa_required()', 'EXECUTE')
      and not has_function_privilege('anon', 'public.mfa_required()', 'EXECUTE'))::text, 'true'
+  union all select 6, 'mfa_ok() for server functions (signed-in callers, not anon)',
+    (has_function_privilege('authenticated', 'public.mfa_ok()', 'EXECUTE')
+     and not has_function_privilege('anon', 'public.mfa_ok()', 'EXECUTE'))::text, 'true'
   union all select 5, 'Roles that require two-factor',
     array_to_string(public._mfa_roles(), ', '), 'owner, compliance_director'
 ) t

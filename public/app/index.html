@@ -40,6 +40,7 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.38 r1 (Greptile r1): a failed two-factor check no longer counts as "no code needed" — the sign-in shows "Couldn't check two-factor" with Retry (only a database that hasn't had the v20.0.38 SQL skips the code); an answer that arrives after a sign-out can no longer change the next person's sign-in screen; Send Invite and the billing (Stripe) checkout require the same verified code on the server. -->
   <!-- v20.0.38 (two-factor sign-in — Owner and Compliance Director): after signing in, these two roles must verify with an authenticator app before Provly loads. First sign-in: scan a QR code, enter a code, then add a backup (a second device or a password manager). Every later sign-in: enter a code. The database enforces it (sql/v20.0.38_two_factor.sql) — without a verified code these roles get no data at all; the app only asks for the code. Lost phone and backup: reset in the Supabase dashboard (no reset button in Provly). Other roles sign in exactly as before. -->
   <!-- v20.0.37 r2 (Greptile r2): text longer than a page is never lost — a table row taller than the space left continues on the next page (header repeated), paragraphs break line by line across pages and split words too long for the line, and Form G shows the Person, attendees and the reason the Person didn't sign as wrapping text rather than in fixed boxes. -->
   <!-- v20.0.37 r1 (Greptile r1): real Form G builds again (the record's files are an id-keyed map); balances come from the Person's complete ledger fetched for the report, not the screen's newest 2,000 entries, and every account's closing must equal the figure signed on Form B or the report refuses to build; the month's last day is never dropped (month ends from pbaMonthEnd); tables wrap instead of cutting amounts, statements and notes; provider names and addresses are made PDF-safe for every branded PDF; purchases for someone else show who benefited; outstanding items are shown; the sample's last entry falls on the month's real last day. -->
@@ -720,41 +721,44 @@
         }
       };
 
-      // v20.0.38 — does this sign-in need a code, and where is it in setup?
-      //   not required (or the v20.0.38 SQL hasn't run) → ok
+      // v20.0.38 — does this sign-in need a code, and where is it in setup? Returns the answer; the
+      // caller applies it only if the sign-in it belongs to is still current (r1).
+      //   not required, or the v20.0.38 SQL hasn't run (the function is missing) → ok
+      //   the check itself failed → error (Retry) — never treated as "no code needed" (r1)
       //   verified session: two authenticators → ok; only one → add the backup
       //   not verified: an authenticator exists → enter a code; none → set one up
+      const mfaMissing = (e) => e?.code === "PGRST202" || /could not find the function|does not exist/i.test(e?.message || "");
       const checkMfa = async () => {
         let req = await supabase.rpc("mfa_required");
-        if (req.error && !/mfa_required|does not exist|schema cache/i.test(req.error.message || "")) {
+        if (req.error && !mfaMissing(req.error)) {
           await new Promise(r => setTimeout(r, 1500));      // a passing network error: try once more
           req = await supabase.rpc("mfa_required");
         }
-        if (req.error || req.data !== true) { setMfa({ status: "ok" }); return true; }
-        const [{ data: aal }, { data: list }] = await Promise.all([
+        if (req.error) return mfaMissing(req.error) ? { status: "ok" } : { status: "error", message: req.error.message };
+        if (req.data !== true) return { status: "ok" };
+        const [aalRes, listRes] = await Promise.all([
           supabase.auth.mfa.getAuthenticatorAssuranceLevel(),
           supabase.auth.mfa.listFactors(),
         ]);
-        const verified = (list?.all || []).filter(f => f.factor_type === "totp" && f.status === "verified");
-        if (aal?.currentLevel === "aal2") {
-          if (verified.length >= 2) { setMfa({ status: "ok" }); return true; }
-          setMfa({ status: "backup" }); return false;
-        }
-        setMfa({ status: verified.length ? "challenge" : "setup", factors: verified });
-        return false;
+        if (aalRes.error || listRes.error) return { status: "error", message: (aalRes.error || listRes.error).message };
+        const verified = (listRes.data?.all || []).filter(f => f.factor_type === "totp" && f.status === "verified");
+        if (aalRes.data?.currentLevel === "aal2") return verified.length >= 2 ? { status: "ok" } : { status: "backup" };
+        return { status: verified.length ? "challenge" : "setup", factors: verified };
       };
 
       // v20.0.38 — sign-in hydration: two-factor first, then the organization and identity as before.
       const hydrate = async () => {
         const epoch = brandFetchEpoch;
-        let ok = true;
-        try { ok = await checkMfa(); } catch (_) { setMfa({ status: "ok" }); ok = true; } // the database still decides
-        if (epoch !== brandFetchEpoch) return;              // signed out or switched user meanwhile
-        if (!ok) { setBrandReady(true); return; }
+        let result;
+        try { result = await checkMfa(); }
+        catch (e) { result = { status: "error", message: e?.message || "Couldn't check two-factor" }; }
+        if (epoch !== brandFetchEpoch) return;              // r1 — signed out or switched user meanwhile: discard
+        setMfa(result);
+        if (result.status !== "ok") { setBrandReady(true); return; }
         fetchOrgId();
         fetchStaffProfile();
       };
-      // after a code is verified (or the backup saved): check again and load
+      // after a code is verified (or the backup saved), or Retry: check again and load
       const completeMfa = () => { setMfa({ status: "pending" }); setBrandReady(false); hydrate(); };
 
       const fetchStaffProfile = async () => {
@@ -25272,6 +25276,13 @@
 
     function MfaGate() {
       const { mfa, completeMfa } = useAuth();
+      if (mfa.status === "error") return (
+        // r1 — the check failed: never assume no code is needed; try again
+        <MfaShell title="Couldn't check two-factor" subtitle="Provly couldn't confirm whether your sign-in needs a code. Check your connection and try again.">
+          {mfa.message && <div style={{ fontSize: 11, color: CB.textLight, marginBottom: 12, wordBreak: "break-word" }}>{mfa.message}</div>}
+          <PrimaryButton onClick={completeMfa} color={CB.navy}>Retry</PrimaryButton>
+        </MfaShell>
+      );
       if (mfa.status === "challenge") return <MfaChallenge factors={mfa.factors || []} onDone={completeMfa} />;
       return <MfaEnroll key={mfa.status} kind={mfa.status === "backup" ? "backup" : "primary"} onDone={completeMfa} />;
     }
@@ -25312,7 +25323,7 @@
       if (inviteToken && joinInProgress) return <SignupPage inviteToken={inviteToken} />;
 
       // v20.0.38 — two-factor comes before the workspace for the roles that need it
-      if (user && !loading && ["setup", "backup", "challenge"].includes(mfa.status)) return <MfaGate />;
+      if (user && !loading && ["setup", "backup", "challenge", "error"].includes(mfa.status)) return <MfaGate />;
 
       // v20.0.12 — also wait for identity (membership) to resolve. Before this
       // the pending window rendered the owner fallback's chrome for everyone.

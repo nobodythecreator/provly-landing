@@ -11,6 +11,7 @@
 // link. Nothing else, ever.
 
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { twoFactorOk, TWO_FACTOR_REFUSAL } from "../_shared/mfa.ts"; // v20.0.38
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -109,6 +110,9 @@ Deno.serve(async (req) => {
     if (!CAN_INVITE.includes(member.role)) {
       return json({ error: "Only owners and admins can send invites" }, 403);
     }
+    // v20.0.38 — the service key skips the database's two-factor rule, so it is applied here: an
+    // Owner (or any role that needs two-factor) must have verified this session with a code.
+    if (!(await twoFactorOk(jwt))) return json({ error: TWO_FACTOR_REFUSAL, code: "mfa_required" }, 403);
     const { data: callerStaffRow } = await admin
       .from("staff")
       .select("first_name, last_name")
