@@ -22,6 +22,8 @@
 --   restore it; a marked deposit can't be changed, voided or reversed until its mark is removed; marking or
 --   removing back pay takes the Person's lock and is refused while a month it affects is sealed; reopening
 --   keeps every asset response for the month.
+-- r2 (Greptile round 2, before this file ran): the pool is also checked the day after an account closes,
+--   the first day it leaves the balance; verification check 2 looks where the opening-date rule now lives.
 --
 -- RUN IN SUPABASE (SQL editor), ONCE. One transaction: preflight → changes → rolled-back self-test on
 -- synthetic Persons (2099 dates) → COMMIT → verification table.
@@ -178,6 +180,7 @@ BEGIN
                  WHERE t.person_id = p_person AND t.entry_date BETWEEN v_first AND p_day
       UNION ALL SELECT a.opening_date FROM pba_accounts a WHERE a.person_id = p_person AND a.opening_date IS NOT NULL
       UNION ALL SELECT a.closed_on FROM pba_accounts a WHERE a.person_id = p_person AND a.closed_on IS NOT NULL
+      UNION ALL SELECT a.closed_on + 1 FROM pba_accounts a WHERE a.person_id = p_person AND a.closed_on IS NOT NULL  -- r2: the first day it leaves the balance
       UNION ALL SELECT p_day
     ) z WHERE dd BETWEEN v_first AND p_day
   ) y;
@@ -690,6 +693,10 @@ DECLARE
   v_d2     uuid := gen_random_uuid();
   v_d4     uuid := gen_random_uuid();
   v_fb4    uuid;
+  v_p3     uuid;
+  v_c3     uuid := gen_random_uuid();
+  v_e3     uuid := gen_random_uuid();
+  v_k3     uuid := gen_random_uuid();
 BEGIN
   SELECT m.org_id, s.id INTO v_org, v_owner
     FROM org_members m JOIN staff s ON s.user_id = m.user_id AND s.org_id = m.org_id AND s.is_active
@@ -773,6 +780,22 @@ BEGIN
     VALUES (gen_random_uuid(), v_org, v_p2, v_a2, v_b2, date '2099-06-10', 'transfer', 450);
     IF public._pba_countable(v_p2, date '2099-06-30') <> 400 THEN
       RAISE EXCEPTION 'SELFTEST FAIL 4f: a transfer between the Person''s accounts changed back pay (countable %)', public._pba_countable(v_p2, date '2099-06-30');
+    END IF;
+
+    -- 4i. an account that closes holding back pay takes it out of the pool: later ordinary money counts
+    v_p3 := pg_temp.v20039_test_insert('persons', jsonb_build_object('org_id', v_org, 'first_name', 'V20039', 'last_name', 'Third',
+                                                                        'identification_number', '099999937', 'is_active', true));
+    INSERT INTO pba_accounts (id, org_id, person_id, kind, titling, opening_balance, opening_date, closed_on, not_provider_funds_attested)
+    VALUES (v_c3, v_org, v_p3, 'bank', 'V20039 Third C', 0, date '2099-08-01', date '2099-08-10', true),
+           (v_e3, v_org, v_p3, 'bank', 'V20039 Third E', 0, date '2099-08-01', NULL, true);
+    INSERT INTO pba_transactions (id, org_id, person_id, account_id, entry_date, type, amount)
+    VALUES (v_k3, v_org, v_p3, v_c3, date '2099-08-02', 'deposit', 100);
+    INSERT INTO pba_resource_exclusions (org_id, person_id, transaction_id, kind, amount, received_on, excluded_through, created_by)
+    VALUES (v_org, v_p3, v_k3, 'retro_rsdi', 100, date '2099-08-02', date '2100-05-31', v_owner);
+    INSERT INTO pba_transactions (id, org_id, person_id, account_id, entry_date, type, amount)
+    VALUES (gen_random_uuid(), v_org, v_p3, v_e3, date '2099-08-12', 'deposit', 100);
+    IF public._pba_countable(v_p3, date '2099-08-31') <> 100 THEN
+      RAISE EXCEPTION 'SELFTEST FAIL 4i: back pay outlived its closed account (countable %, expected 100)', public._pba_countable(v_p3, date '2099-08-31');
     END IF;
 
     -- 4g. a marked deposit can't be changed or reversed until the mark is removed
@@ -885,8 +908,9 @@ SELECT n, check_name, got, want, CASE WHEN got = want THEN '✅' ELSE '❌' END 
   SELECT 1 n, 'Entries before an account''s opening date are refused' check_name,
     (SELECT count(*) FROM pg_trigger WHERE tgname IN ('pba_txn_after_opening', 'pba_account_opening_guard') AND NOT tgisinternal)::text got, '2' want
   UNION ALL SELECT 2, 'Countable assets: tracked accounts only, less excluded back pay',
-    (position('_pba_excluded_at' IN pg_get_functiondef('public._pba_countable(uuid, date)'::regprocedure)) > 0
-     AND position('opening_date' IN pg_get_functiondef('public._pba_countable(uuid, date)'::regprocedure)) > 0)::text, 'true'
+    (position('_pba_tracked_balance' IN pg_get_functiondef('public._pba_countable(uuid, date)'::regprocedure)) > 0
+     AND position('_pba_excluded_at' IN pg_get_functiondef('public._pba_countable(uuid, date)'::regprocedure)) > 0
+     AND position('opening_date' IN pg_get_functiondef('public._pba_tracked_balance(uuid, date)'::regprocedure)) > 0)::text, 'true'
   UNION ALL SELECT 3, 'Back-pay and reopen tables with RLS',
     (SELECT count(*) FROM pg_class WHERE relname IN ('pba_resource_exclusions', 'pba_reopened_months') AND relrowsecurity)::text, '2'
   UNION ALL SELECT 4, 'Clients cannot write them directly',
@@ -903,7 +927,7 @@ SELECT n, check_name, got, want, CASE WHEN got = want THEN '✅' ELSE '❌' END 
     ((position('back_pay_notice' IN pg_get_functiondef('public._pba_flags(uuid, date)'::regprocedure)) > 0)
      AND (position('entry_before_opening' IN pg_get_functiondef('public._pba_flags(uuid, date)'::regprocedure)) > 0))::text, 'true'
   UNION ALL SELECT 8, 'Self-test leftovers (synthetic Persons)',
-    (SELECT count(*) FROM persons WHERE identification_number IN ('099999939', '099999938'))::text, '0'
+    (SELECT count(*) FROM persons WHERE identification_number IN ('099999939', '099999938', '099999937'))::text, '0'
   UNION ALL SELECT 10, 'Marked deposits locked until the mark is removed',
     (SELECT count(*) FROM pg_trigger WHERE tgname = 'pba_back_pay_guard' AND NOT tgisinternal)::text, '1'
   UNION ALL SELECT 9, 'Entries already dated before their account''s opening date (corrected by 39a or by hand)',
