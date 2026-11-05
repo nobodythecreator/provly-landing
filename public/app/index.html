@@ -40,6 +40,9 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.39b r1 (Greptile r1): an attached statement lands only in the dialog it was chosen in — if that dialog was closed or another opened while the file was uploading, the file is not attached to the new one. -->
+  <!-- v20.0.39b: PDF bank statements — "Enter from a PDF statement" (was "Enter manually") now attaches the bank's PDF (or a photo) to the statement, and a statement with a file shows View statement; the CSV importer is labeled as the online-banking export it reads. Includes r2's Form G rule: "Amended" only when an earlier report for the month was sent. -->
+  <!-- v20.0.39 r2: Form G says "Amended" only when an earlier Form G for that month was actually recorded as sent — reopening a month whose report was never sent (as with Nicole's September) produces a normal report. -->
   <!-- v20.0.39 r1 (Greptile r1): the sealed-month, back-pay and reopened-month reads are tolerated as empty only while those tables don't exist yet (before the v20.0.39 SQL); any other failure is shown as a load error with Retry, so a Form G is never built without its Amended history. -->
   <!-- v20.0.39 (PBA ledger fixes): an account's opening balance only counts from its opening date, and an entry can't be dated before it (the database refuses it, and older ones are flagged); countable assets leave out back pay the way SSA does — a deposit (or part of one) marked as SSI or Social Security back pay isn't counted for the 9 months after the month it arrived, other money is treated as spent first, and a flag stays until the SSA notice is uploaded; the Owner or Compliance Director can reopen the newest sealed month with a reason (the original close is kept and shown), and a Form G sent afterwards is labeled Amended; in a sealed month the ledger offers Reverse only, and says why. Database side: sql/v20.0.39_pba_ledger_fixes.sql. -->
   <!-- v20.0.38 r1 (Greptile r1): a failed two-factor check no longer counts as "no code needed" — the sign-in shows "Couldn't check two-factor" with Retry (only a database that hasn't had the v20.0.38 SQL skips the code); an answer that arrives after a sign-out can no longer change the next person's sign-in screen; Send Invite and the billing (Stripe) checkout require the same verified code on the server. -->
@@ -1947,7 +1950,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.39</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.39b</span>
               </div>
             </button>
             {isMobile && (
@@ -20323,10 +20326,10 @@
                 {!st && isManager && !sealed && (
                   <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
                     <label style={{ fontSize: 13, color: CB.blue, cursor: "pointer", fontWeight: 600 }}>
-                      {icons.upload({ size: 13 })} Import statement file (CSV)
+                      {icons.upload({ size: 13 })} Import CSV from online banking
                       <input type="file" accept=".csv,text/csv" style={{ display: "none" }} onChange={ev => { startImport(acc, ev.target.files?.[0]); ev.target.value = ""; }} />
                     </label>
-                    <SecondaryButton onClick={() => setModal({ kind: "manual", acc, id: newId(), period_start: ms, period_end: me, opening: "", closing: "", lines: [{ date: "", description: "", amount: "" }] })}>Enter manually</SecondaryButton>
+                    <SecondaryButton onClick={() => setModal({ kind: "manual", acc, id: newId(), period_start: ms, period_end: me, opening: "", closing: "", file: null, lines: [{ date: "", description: "", amount: "" }] })}>Enter from a PDF statement</SecondaryButton>
                   </div>
                 )}
                 {st && (
@@ -20334,6 +20337,11 @@
                     <div style={{ fontSize: 12, color: CB.textMid, marginTop: 4 }}>
                       Statement {fmtD(st.period_start)} – {fmtD(st.period_end)} · {pbaMoney(st.opening_balance)} → {pbaMoney(st.closing_balance)} · ledger {pbaMoney(r.ledger_closing)}
                       {Number(r.outstanding || 0) !== 0 && ` · outstanding ${pbaMoney(r.outstanding)}`}
+                      {st.file_id && d.files?.[st.file_id] && (
+                        // v20.0.39b — the statement's own file (the bank's PDF, or the imported CSV)
+                        <button onClick={() => openPbaFile(d.files[st.file_id].storage_path, addToast)}
+                          style={{ background: "none", border: "none", color: CB.blue, cursor: "pointer", fontSize: 12, padding: 0, marginLeft: 8, fontFamily: "inherit", fontWeight: 600 }}>View statement</button>
+                      )}
                     </div>
                     {isManager && !sealed && exact.length > 0 && <div style={{ marginTop: 8 }}><SecondaryButton onClick={async () => {
                       // r1: report what actually matched; stop at the first failure and say so
@@ -20624,7 +20632,8 @@
       const sigsC = m.fc ? sigs.filter(s => s.form_type === "form_c" && s.form_id === m.fc.id) : [];
       const sigD = m.fd ? sigs.find(s => s.form_type === "form_d" && s.form_id === m.fd.id) : null;
       const pre = m.fd?.checklist?.prechecks || {}; const rv = m.fd?.checklist?.reviewer || {};
-      const reopened = (d.reopens || []).filter(r => r.month === ms);                     // v20.0.39
+      // v20.0.39 r2 — "Amended" only if a Form G for this month had already been recorded as sent
+      const reopened = (d.reopens || []).filter(r => r.month === ms && r.had_form_g);
       return {
         sample: false,
         amended: reopened.length > 0,
@@ -20837,7 +20846,29 @@
               <FormField label="Beginning balance" required half><input type="number" step="0.01" style={fieldStyle} value={modal.opening} onChange={e => setMd({ opening: e.target.value })} /></FormField>
               <FormField label="Ending balance" required half><input type="number" step="0.01" style={fieldStyle} value={modal.closing} onChange={e => setMd({ closing: e.target.value })} /></FormField>
             </FormRow>
-            <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 6 }}>Each line as printed: money in as a positive amount, money out as negative.</div>
+            {/* v20.0.39b — keep the bank's statement with the record */}
+            <FormField label="The bank's statement (PDF or photo)">
+              {modal.file ? (
+                <div style={{ fontSize: 12, color: CB.text, display: "flex", gap: 10, alignItems: "center" }}>
+                  ✓ Attached
+                  <button onClick={() => setMd({ file: null })} style={{ background: "none", border: "none", color: CB.textLight, cursor: "pointer", fontSize: 12, fontFamily: "inherit" }}>Remove</button>
+                </div>
+              ) : (
+                <label style={{ fontSize: 13, color: CB.blue, cursor: "pointer", fontWeight: 600 }}>
+                  {icons.upload({ size: 13 })} Attach the statement
+                  <input type="file" accept="application/pdf,image/*" style={{ display: "none" }} disabled={busy} onChange={async e => {
+                    const f = e.target.files?.[0]; e.target.value = "";
+                    if (!f) return;
+                    const forDialog = modal.id;   // r1 — the dialog (and account) this file was chosen for
+                    const up = await upload("statement", f);
+                    // r1 — attach only if that same dialog is still open, never to one opened meanwhile
+                    if (up) setModal(cur => (cur && cur.kind === "manual" && cur.id === forDialog) ? { ...cur, file: up } : cur);
+                  }} />
+                </label>
+              )}
+              {!modal.file && <div style={{ fontSize: 11, color: CB.amber, marginTop: 4 }}>Attach it so reviewers can check the figures against the bank's own statement.</div>}
+            </FormField>
+            <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 6 }}>Type the beginning and ending balances and each line as printed: money in as a positive amount, money out as negative.</div>
             {modal.lines.map((l, i) => (
               <div key={i} style={{ display: "grid", gridTemplateColumns: "140px 1fr 110px 30px", gap: 6, marginBottom: 6 }}>
                 <input type="date" style={fieldStyle} value={l.date} onChange={e => setLine(i, "date", e.target.value)} />
@@ -20851,7 +20882,7 @@
               const lines = modal.lines.filter(l => l.date || l.amount).map(l => ({ date: l.date, description: l.description, amount: Number(l.amount) }));
               if (modal.opening === "" || modal.closing === "") return addToast("Enter the beginning and ending balances", "error");
               if (lines.some(l => !l.date || !l.amount)) return addToast("Every line needs a date and an amount", "error");
-              done("pba_import_statement", { p_id: modal.id, p_account: modal.acc.id, p_month: ms, p_data: { source: "manual", period_start: modal.period_start,
+              done("pba_import_statement", { p_id: modal.id, p_account: modal.acc.id, p_month: ms, p_data: { source: "manual", file_id: modal.file?.id || null, period_start: modal.period_start,
                 period_end: modal.period_end, opening_balance: Number(modal.opening), closing_balance: Number(modal.closing), lines } }, "Statement entered");
             })}
           </>
@@ -21268,7 +21299,7 @@
             // v20.0.39 — sealed months, back pay and reopened months (empty if the SQL hasn't run)
             soft(supabase.from("pba_month_closes").select("month").eq("person_id", clientId)),
             soft(supabase.from("pba_resource_exclusions").select("*").eq("person_id", clientId).is("removed_at", null)),
-            soft(supabase.from("pba_reopened_months").select("id, month, reason, original_countable, reopened_by, reopened_at").eq("person_id", clientId).order("reopened_at")),
+            soft(supabase.from("pba_reopened_months").select("id, month, reason, original_countable, reopened_by, reopened_at, had_form_g:snapshot->form_g").eq("person_id", clientId).order("reopened_at")),
           ]);
           if (mine !== seq.current) return;
           setD({ closedMonths: (closes || []).map(c => c.month), exclusions: exclusions || [], reopens: reopens || [],
