@@ -16,8 +16,15 @@
 --      asset response are kept, exactly as they were, in pba_reopened_months; the month is open again to
 --      reconcile and sign. A Form G sent afterwards is labeled "Amended" (app).
 --
--- RUN IN SUPABASE (SQL editor), ONCE. One transaction: preflight → changes → rolled-back self-test on a
--- synthetic Person (2099 dates) → COMMIT → verification table.
+-- r1 (Greptile round 1, before this file ran): back pay is tracked as ONE pool across the Person's counted
+--   accounts, day by day — several marked deposits share it, transfers between their own accounts leave it
+--   whole, spending reduces it once (the soonest-ending exclusion first), later ordinary deposits never
+--   restore it; a marked deposit can't be changed, voided or reversed until its mark is removed; marking or
+--   removing back pay takes the Person's lock and is refused while a month it affects is sealed; reopening
+--   keeps every asset response for the month.
+--
+-- RUN IN SUPABASE (SQL editor), ONCE. One transaction: preflight → changes → rolled-back self-test on
+-- synthetic Persons (2099 dates) → COMMIT → verification table.
 -- Then, separately: sql/v20.0.39a_nicole_correction.sql (the one Person whose record needs correcting).
 -- =====================================================================================
 
@@ -110,47 +117,139 @@ CREATE TABLE public.pba_resource_exclusions (
 CREATE UNIQUE INDEX pba_excl_one_active ON public.pba_resource_exclusions (transaction_id) WHERE removed_at IS NULL;
 CREATE INDEX pba_excl_person ON public.pba_resource_exclusions (person_id);
 
--- How much of a Person's money is excluded back pay on p_day. Per account: each exclusion keeps the
--- lowest balance its account has had since it arrived (other money is spent first, SSA's operating
--- assumption), never more than its own amount; the account's total never exceeds its balance on p_day.
--- Only accounts counted toward resources and tracked on p_day; an exclusion covers days before its
--- excluded_through (the month-end figure for the 9th month is the next month's first moment, when it counts).
-CREATE FUNCTION public._pba_excluded_at(p_person uuid, p_day date)
+-- The Person's money in counted accounts that Provly tracks on p_day (bank, pay card, cash; opened by
+-- that day and not closed before it).
+CREATE FUNCTION public._pba_tracked_balance(p_person uuid, p_day date)
 RETURNS numeric
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'public' AS $$
-  SELECT coalesce(sum(x.excl), 0) FROM (
-    SELECT greatest(least(sum(e.remaining), public._pba_balance_at(e.account_id, p_day)), 0) AS excl
-      FROM (
-        SELECT t.account_id,
-               least(ex.amount,
-                     (SELECT min(public._pba_balance_at(t.account_id, d.day))
-                        FROM (SELECT ex.received_on AS day
-                              UNION
-                              SELECT tt.entry_date FROM pba_transactions tt
-                               WHERE (tt.account_id = t.account_id OR tt.to_account_id = t.account_id)
-                                 AND tt.entry_date > ex.received_on AND tt.entry_date <= p_day) d)) AS remaining
-          FROM pba_resource_exclusions ex
-          JOIN pba_transactions t ON t.id = ex.transaction_id AND t.status = 'active'
-          JOIN pba_accounts a ON a.id = t.account_id
-         WHERE ex.person_id = p_person AND ex.removed_at IS NULL
-           AND ex.received_on <= p_day AND p_day < ex.excluded_through
-           AND a.kind IN ('bank', 'pay_card', 'cash')
-           AND (a.closed_on IS NULL OR a.closed_on >= p_day)
-           AND (a.opening_date IS NULL OR a.opening_date <= p_day)
-      ) e
-     GROUP BY e.account_id
-  ) x
-$$;
-
--- Countable assets on p_day: the accounts Provly tracks that day, less excluded back pay.
-CREATE OR REPLACE FUNCTION public._pba_countable(p_person uuid, p_day date)
-RETURNS numeric
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'public' AS $$
-  SELECT greatest(coalesce(sum(public._pba_balance_at(acc.id, p_day)), 0) - public._pba_excluded_at(p_person, p_day), 0)
+  SELECT coalesce(sum(public._pba_balance_at(acc.id, p_day)), 0)
     FROM pba_accounts acc
    WHERE acc.person_id = p_person AND acc.kind IN ('bank', 'pay_card', 'cash')
      AND (acc.closed_on IS NULL OR acc.closed_on >= p_day)
      AND (acc.opening_date IS NULL OR acc.opening_date <= p_day)
+$$;
+
+-- How much of that money is excluded back pay on p_day (SSA POMS SI 01130.700). Back pay is one pool per
+-- Person, followed day by day from the first marked deposit: each marked amount joins the pool on the day
+-- it arrived and leaves it when its window ends (excluded_through, the first day it counts). Whenever the
+-- tracked balance drops below the pool, the pool drops to the balance — other money is spent first — and
+-- the reduction comes from the exclusion that ends soonest, leaving as much excluded as possible. Moving
+-- money between the Person's own counted accounts doesn't change the balance, so it doesn't touch the pool;
+-- later ordinary deposits raise the balance but never restore spent back pay.
+CREATE FUNCTION public._pba_excluded_at(p_person uuid, p_day date)
+RETURNS numeric
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO 'public' AS $$
+DECLARE
+  ex_amt  numeric[];
+  ex_recv date[];
+  ex_thru date[];
+  ex_left numeric[];
+  n       integer;
+  i       integer;
+  v_first date;
+  v_dates date[];
+  d       date;
+  v_bal   numeric;
+  v_over  numeric;
+  v_take  numeric;
+BEGIN
+  -- marked deposits into counted accounts, received by p_day; ordered soonest-ending first
+  SELECT array_agg(e.amount ORDER BY e.excluded_through, e.received_on, e.id),
+         array_agg(e.received_on ORDER BY e.excluded_through, e.received_on, e.id),
+         array_agg(e.excluded_through ORDER BY e.excluded_through, e.received_on, e.id)
+    INTO ex_amt, ex_recv, ex_thru
+    FROM pba_resource_exclusions e
+    JOIN pba_transactions t ON t.id = e.transaction_id AND t.status = 'active'
+    JOIN pba_accounts a ON a.id = t.account_id AND a.kind IN ('bank', 'pay_card', 'cash')
+   WHERE e.person_id = p_person AND e.removed_at IS NULL AND e.received_on <= p_day;
+  IF ex_amt IS NULL THEN
+    RETURN 0;
+  END IF;
+  n := array_length(ex_amt, 1);
+  ex_left := array_fill(0::numeric, ARRAY[n]);
+  SELECT min(x) INTO v_first FROM unnest(ex_recv) x;
+
+  -- every day on which the pool or the balance can change, through p_day
+  SELECT array_agg(dd ORDER BY dd) INTO v_dates FROM (
+    SELECT DISTINCT dd FROM (
+      SELECT unnest(ex_recv) AS dd
+      UNION ALL SELECT unnest(ex_thru)
+      UNION ALL SELECT t.entry_date FROM pba_transactions t
+                 WHERE t.person_id = p_person AND t.entry_date BETWEEN v_first AND p_day
+      UNION ALL SELECT a.opening_date FROM pba_accounts a WHERE a.person_id = p_person AND a.opening_date IS NOT NULL
+      UNION ALL SELECT a.closed_on FROM pba_accounts a WHERE a.person_id = p_person AND a.closed_on IS NOT NULL
+      UNION ALL SELECT p_day
+    ) z WHERE dd BETWEEN v_first AND p_day
+  ) y;
+
+  FOREACH d IN ARRAY v_dates LOOP
+    FOR i IN 1..n LOOP
+      IF ex_recv[i] = d THEN ex_left[i] := ex_amt[i]; END IF;     -- arrives
+      IF ex_thru[i] <= d THEN ex_left[i] := 0; END IF;           -- its window is over: it counts from here
+    END LOOP;
+    v_bal := greatest(public._pba_tracked_balance(p_person, d), 0);
+    SELECT coalesce(sum(x), 0) INTO v_over FROM unnest(ex_left) x;
+    v_over := v_over - v_bal;
+    IF v_over > 0 THEN
+      FOR i IN 1..n LOOP
+        EXIT WHEN v_over <= 0;
+        v_take := least(ex_left[i], v_over);
+        ex_left[i] := ex_left[i] - v_take;
+        v_over := v_over - v_take;
+      END LOOP;
+    END IF;
+  END LOOP;
+
+  RETURN (SELECT coalesce(sum(x), 0) FROM unnest(ex_left) x);
+END;
+$$;
+
+-- Countable assets on p_day: the tracked balance less excluded back pay.
+CREATE OR REPLACE FUNCTION public._pba_countable(p_person uuid, p_day date)
+RETURNS numeric
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'public' AS $$
+  SELECT greatest(public._pba_tracked_balance(p_person, p_day) - public._pba_excluded_at(p_person, p_day), 0)
+$$;
+
+-- A marked deposit stays exactly as it was marked: no change to its amount, date, type, account or status,
+-- and no reversal, until the mark is removed (the exclusion was measured against that deposit).
+CREATE FUNCTION public.trg_pba_back_pay_guard()
+RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'public' AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.reverses_id IS NOT NULL
+       AND EXISTS (SELECT 1 FROM pba_resource_exclusions e WHERE e.transaction_id = NEW.reverses_id AND e.removed_at IS NULL) THEN
+      RAISE EXCEPTION 'That deposit is marked as back pay — remove the back-pay mark before reversing it';
+    END IF;
+  ELSIF EXISTS (SELECT 1 FROM pba_resource_exclusions e WHERE e.transaction_id = NEW.id AND e.removed_at IS NULL)
+        AND (NEW.amount, NEW.entry_date, NEW.type, NEW.account_id, NEW.status)
+            IS DISTINCT FROM (OLD.amount, OLD.entry_date, OLD.type, OLD.account_id, OLD.status) THEN
+    RAISE EXCEPTION 'This deposit is marked as back pay — remove the back-pay mark before changing or voiding it';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER pba_back_pay_guard BEFORE INSERT OR UPDATE ON public.pba_transactions
+  FOR EACH ROW EXECUTE FUNCTION public.trg_pba_back_pay_guard();
+
+-- Marking or removing back pay changes countable assets from the month it arrived onward, so it waits
+-- for any sealed month from then on to be reopened. (Uses the Person's lock, like every close step.)
+CREATE FUNCTION public._pba_back_pay_seal_check(p_person uuid, p_from date)
+RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'public' AS $$
+DECLARE
+  v_sealed date;
+BEGIN
+  PERFORM public._pba_lock_person(p_person);
+  SELECT min(c.month) INTO v_sealed FROM pba_month_closes c
+   WHERE c.person_id = p_person AND c.month >= date_trunc('month', p_from)::date;
+  IF v_sealed IS NOT NULL THEN
+    RAISE EXCEPTION '% is sealed, and back pay changes its countable assets — reopen the sealed months from % on first (newest first)',
+      to_char(v_sealed, 'FMMonth YYYY'), to_char(v_sealed, 'FMMonth YYYY');
+  END IF;
+END;
 $$;
 
 CREATE FUNCTION public._pba_mark_back_pay(p_txn uuid, p_kind text, p_amount numeric, p_note text, p_actor uuid, p_actor_role text)
@@ -163,6 +262,7 @@ BEGIN
   IF NOT FOUND THEN RAISE EXCEPTION 'That entry doesn''t exist'; END IF;
   SELECT * INTO a FROM public._pba_access(t.person_id, p_actor, p_actor_role);
   IF NOT a.o_write THEN RAISE EXCEPTION 'Only this Person''s PBA Manager can mark back pay'; END IF;
+  PERFORM public._pba_back_pay_seal_check(t.person_id, t.entry_date);
   IF t.type <> 'deposit' OR t.status <> 'active' OR t.reverses_id IS NOT NULL THEN
     RAISE EXCEPTION 'Only an active deposit can be marked as back pay';
   END IF;
@@ -216,6 +316,7 @@ BEGIN
   SELECT * INTO a FROM public._pba_access(e.person_id, p_actor, p_actor_role);
   IF NOT a.o_write THEN RAISE EXCEPTION 'Only this Person''s PBA Manager can remove a back-pay mark'; END IF;
   IF length(btrim(coalesce(p_reason, ''))) = 0 THEN RAISE EXCEPTION 'Give a reason for removing the back-pay mark'; END IF;
+  PERFORM public._pba_back_pay_seal_check(e.person_id, e.received_on);
   UPDATE pba_resource_exclusions SET removed_at = now(), removed_by = p_actor, removed_reason = btrim(p_reason) WHERE id = p_exclusion;
   PERFORM public._pba_audit(e.org_id, 'pba_back_pay_removed', 'pba_resource_exclusions', p_exclusion, to_jsonb(e),
                             (SELECT to_jsonb(x) FROM pba_resource_exclusions x WHERE x.id = p_exclusion));
@@ -278,7 +379,8 @@ BEGIN
     'form_d',         (SELECT to_jsonb(f) FROM pba_form_d f WHERE f.id = v_fd_id),
     'form_g',         (SELECT to_jsonb(f) FROM pba_form_g f WHERE f.person_id = p_person AND f.month = v_month),
     'findings',       (SELECT coalesce(jsonb_agg(to_jsonb(x)), '[]'::jsonb) FROM pba_findings x WHERE x.form_d_id = v_fd_id),
-    'asset_response', (SELECT to_jsonb(r) FROM pba_asset_responses r WHERE r.person_id = p_person AND r.month = v_month),
+    'asset_responses', (SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY r.created_at), '[]'::jsonb) FROM pba_asset_responses r
+                         WHERE r.person_id = p_person AND r.month = v_month),
     'signatures',     (SELECT coalesce(jsonb_agg(to_jsonb(s)), '[]'::jsonb) FROM pba_signatures s
                         WHERE s.person_id = p_person AND s.form_id IN (v_fb.id, v_fc_id, v_fd_id)));
 
@@ -510,6 +612,7 @@ BEGIN
     SELECT p.oid::regprocedure AS sig, p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
      WHERE n.nspname = 'public'
        AND p.proname IN ('trg_pba_txn_after_opening', 'trg_pba_account_opening_guard', '_pba_excluded_at', '_pba_countable',
+                         '_pba_tracked_balance', 'trg_pba_back_pay_guard', '_pba_back_pay_seal_check',
                          '_pba_mark_back_pay', '_pba_back_pay_notice', '_pba_remove_back_pay', '_pba_reopen_month', '_pba_flags',
                          'pba_mark_back_pay', 'pba_back_pay_notice', 'pba_remove_back_pay', 'pba_reopen_month')
   LOOP
@@ -579,6 +682,14 @@ DECLARE
   v_dep    uuid := gen_random_uuid();
   v_n      numeric;
   v_hist   uuid;
+  v_p2     uuid;
+  v_mgr    uuid;
+  v_a2     uuid := gen_random_uuid();
+  v_b2     uuid := gen_random_uuid();
+  v_d1     uuid := gen_random_uuid();
+  v_d2     uuid := gen_random_uuid();
+  v_d4     uuid := gen_random_uuid();
+  v_fb4    uuid;
 BEGIN
   SELECT m.org_id, s.id INTO v_org, v_owner
     FROM org_members m JOIN staff s ON s.user_id = m.user_id AND s.org_id = m.org_id AND s.is_active
@@ -638,19 +749,84 @@ BEGIN
       RAISE EXCEPTION 'SELFTEST FAIL 4d: back pay stayed excluded after its 9 months';
     END IF;
 
-    -- 5. marking back pay needs the PBA Manager
+    -- 4e. several marked deposits share one pool: $100 + $100 marked, $100 spent, $400 ordinary → $400 counts
+    v_p2 := pg_temp.v20039_test_insert('persons', jsonb_build_object('org_id', v_org, 'first_name', 'V20039', 'last_name', 'Second',
+                                                                        'identification_number', '099999938', 'is_active', true));
+    INSERT INTO pba_accounts (id, org_id, person_id, kind, titling, opening_balance, opening_date, not_provider_funds_attested)
+    VALUES (v_a2, v_org, v_p2, 'bank', 'V20039 Second A', 0, date '2099-06-01', true),
+           (v_b2, v_org, v_p2, 'bank', 'V20039 Second B', 0, date '2099-06-01', true);
+    INSERT INTO pba_transactions (id, org_id, person_id, account_id, entry_date, type, amount)
+    VALUES (v_d1, v_org, v_p2, v_a2, date '2099-06-02', 'deposit', 100),
+           (v_d2, v_org, v_p2, v_a2, date '2099-06-03', 'deposit', 100);
+    INSERT INTO pba_resource_exclusions (org_id, person_id, transaction_id, kind, amount, received_on, excluded_through, created_by)
+    VALUES (v_org, v_p2, v_d1, 'retro_rsdi', 100, date '2099-06-02', date '2100-03-31', v_owner),
+           (v_org, v_p2, v_d2, 'retro_ssi',  100, date '2099-06-03', date '2100-03-31', v_owner);
+    INSERT INTO pba_transactions (id, org_id, person_id, account_id, entry_date, type, amount)
+    VALUES (gen_random_uuid(), v_org, v_p2, v_a2, date '2099-06-04', 'withdrawal', 100),
+           (v_d4, v_org, v_p2, v_a2, date '2099-06-05', 'deposit', 400);
+    IF public._pba_countable(v_p2, date '2099-06-30') <> 400 THEN
+      RAISE EXCEPTION 'SELFTEST FAIL 4e: spent back pay came back (countable %, expected 400)', public._pba_countable(v_p2, date '2099-06-30');
+    END IF;
+
+    -- 4f. moving money between the Person's own accounts leaves back pay whole
+    INSERT INTO pba_transactions (id, org_id, person_id, account_id, to_account_id, entry_date, type, amount)
+    VALUES (gen_random_uuid(), v_org, v_p2, v_a2, v_b2, date '2099-06-10', 'transfer', 450);
+    IF public._pba_countable(v_p2, date '2099-06-30') <> 400 THEN
+      RAISE EXCEPTION 'SELFTEST FAIL 4f: a transfer between the Person''s accounts changed back pay (countable %)', public._pba_countable(v_p2, date '2099-06-30');
+    END IF;
+
+    -- 4g. a marked deposit can't be changed or reversed until the mark is removed
     BEGIN
-      PERFORM public._pba_mark_back_pay(v_dep, 'retro_rsdi', 100, NULL, v_owner, 'owner');
+      UPDATE pba_transactions SET amount = 50 WHERE id = v_d1;
+      RAISE EXCEPTION 'SELFTEST FAIL 4g: a marked deposit''s amount was changed';
+    EXCEPTION WHEN raise_exception THEN
+      IF SQLERRM LIKE 'SELFTEST%' THEN RAISE; END IF;
+    END;
+    BEGIN
+      INSERT INTO pba_transactions (id, org_id, person_id, account_id, entry_date, type, amount, reverses_id)
+      VALUES (gen_random_uuid(), v_org, v_p2, v_a2, date '2099-06-20', 'deposit', 100, v_d1);
+      RAISE EXCEPTION 'SELFTEST FAIL 4h: a marked deposit was reversed';
+    EXCEPTION WHEN raise_exception THEN
+      IF SQLERRM LIKE 'SELFTEST%' THEN RAISE; END IF;
+    END;
+
+    -- 5. marking back pay needs the PBA Manager, and waits while a month it affects is sealed
+    BEGIN
+      PERFORM public._pba_mark_back_pay(v_d4, 'retro_rsdi', 100, NULL, v_owner, 'owner');
       RAISE EXCEPTION 'SELFTEST FAIL 5: someone other than the PBA Manager marked back pay';
     EXCEPTION WHEN raise_exception THEN
       IF SQLERRM LIKE 'SELFTEST%' THEN RAISE; END IF;
     END;
+    v_mgr := pg_temp.v20039_test_insert('staff', jsonb_build_object('org_id', v_org, 'first_name', 'V20039', 'last_name', 'Manager'));
+    PERFORM public._pba_start(v_p2, 'voluntary', v_owner, 'owner');
+    PERFORM public._pba_assign_role(v_p2, v_mgr, 'manager', v_owner, 'compliance_director');
+    INSERT INTO pba_month_closes (org_id, person_id, month, closed_by) VALUES (v_org, v_p2, date '2099-07-01', v_owner);
+    BEGIN
+      PERFORM public._pba_mark_back_pay(v_d4, 'retro_rsdi', 100, NULL, v_mgr, 'dsp');
+      RAISE EXCEPTION 'SELFTEST FAIL 5b: back pay was marked while a later month was sealed';
+    EXCEPTION WHEN raise_exception THEN
+      IF SQLERRM LIKE 'SELFTEST%' THEN RAISE; END IF;
+      IF SQLERRM NOT LIKE '%sealed%' THEN RAISE EXCEPTION 'SELFTEST FAIL 5b: refused for another reason: %', SQLERRM; END IF;
+    END;
+    PERFORM public._pba_reopen_month(v_p2, date '2099-07-01', 'self-test', v_owner, 'owner');
+    PERFORM public._pba_mark_back_pay(v_d4, 'retro_rsdi', 100, NULL, v_mgr, 'dsp');
+    IF NOT EXISTS (SELECT 1 FROM pba_resource_exclusions WHERE transaction_id = v_d4 AND removed_at IS NULL
+                   AND excluded_through = date '2100-03-31') THEN
+      RAISE EXCEPTION 'SELFTEST FAIL 5c: the PBA Manager could not mark back pay, or its window is wrong';
+    END IF;
+    PERFORM public._pba_remove_back_pay((SELECT id FROM pba_resource_exclusions WHERE transaction_id = v_d4 AND removed_at IS NULL),
+                                        'self-test', v_mgr, 'dsp');
 
     -- 6. reopening: Owner / Compliance Director only, a reason, newest first; the close is kept in history
     INSERT INTO pba_month_closes (org_id, person_id, month, closed_by) VALUES (v_org, v_person, date '2099-03-01', v_owner);
     INSERT INTO pba_form_b (org_id, person_id, month, summary, countable, created_by) VALUES (v_org, v_person, date '2099-03-01', '{"accounts": []}', 111, v_owner);
     INSERT INTO pba_month_closes (org_id, person_id, month, closed_by) VALUES (v_org, v_person, date '2099-04-01', v_owner);
-    INSERT INTO pba_form_b (org_id, person_id, month, summary, countable, created_by) VALUES (v_org, v_person, date '2099-04-01', '{"accounts": []}', 222, v_owner);
+    INSERT INTO pba_form_b (org_id, person_id, month, summary, countable, created_by) VALUES (v_org, v_person, date '2099-04-01', '{"accounts": []}', 222, v_owner)
+    RETURNING id INTO v_fb4;
+    -- two asset responses for April: one to the live warning, one to the close-time alert
+    INSERT INTO pba_asset_responses (org_id, person_id, month, countable, notices, plan_type, plan_detail, target_date, created_by, form_b_id)
+    VALUES (v_org, v_person, date '2099-04-01', 222, '{"person": true, "residential": true, "sc": true}', 'other', 'self-test', date '2099-05-01', v_owner, NULL),
+           (v_org, v_person, date '2099-04-01', 222, '{"person": true, "residential": true, "sc": true}', 'other', 'self-test', date '2099-05-01', v_owner, v_fb4);
     BEGIN
       PERFORM public._pba_reopen_month(v_person, date '2099-03-01', 'self-test', v_owner, 'owner');
       RAISE EXCEPTION 'SELFTEST FAIL 6: an older month reopened before the newest';
@@ -675,8 +851,12 @@ BEGIN
       RAISE EXCEPTION 'SELFTEST FAIL 6d: the reopened month is still sealed';
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pba_reopened_months WHERE id = v_hist AND original_countable = 222
-                   AND (snapshot -> 'form_b' ->> 'countable')::numeric = 222 AND snapshot ? 'month_close') THEN
-      RAISE EXCEPTION 'SELFTEST FAIL 6e: the superseded close was not kept';
+                   AND (snapshot -> 'form_b' ->> 'countable')::numeric = 222 AND snapshot ? 'month_close'
+                   AND jsonb_array_length(snapshot -> 'asset_responses') = 2) THEN
+      RAISE EXCEPTION 'SELFTEST FAIL 6e: the superseded close (with both asset responses) was not kept';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pba_asset_responses WHERE person_id = v_person AND month = date '2099-04-01') THEN
+      RAISE EXCEPTION 'SELFTEST FAIL 6e2: asset responses for the reopened month are still live';
     END IF;
     PERFORM public._pba_reopen_month(v_person, date '2099-03-01', 'self-test', v_owner, 'compliance_director');
     IF public._pba_month_closed(v_person, date '2099-03-15') THEN
@@ -716,13 +896,16 @@ SELECT n, check_name, got, want, CASE WHEN got = want THEN '✅' ELSE '❌' END 
     (SELECT count(*) FROM pg_proc WHERE proname IN ('pba_mark_back_pay', 'pba_back_pay_notice', 'pba_remove_back_pay', 'pba_reopen_month')
        AND has_function_privilege('authenticated', oid, 'EXECUTE') AND NOT has_function_privilege('anon', oid, 'EXECUTE'))::text, '4'
   UNION ALL SELECT 6, 'Internal functions callable by clients',
-    (SELECT count(*) FROM pg_proc WHERE proname IN ('_pba_excluded_at', '_pba_mark_back_pay', '_pba_back_pay_notice', '_pba_remove_back_pay', '_pba_reopen_month')
+    (SELECT count(*) FROM pg_proc WHERE proname IN ('_pba_excluded_at', '_pba_tracked_balance', '_pba_back_pay_seal_check', '_pba_mark_back_pay',
+                                                    '_pba_back_pay_notice', '_pba_remove_back_pay', '_pba_reopen_month')
        AND (has_function_privilege('authenticated', oid, 'EXECUTE') OR has_function_privilege('anon', oid, 'EXECUTE')))::text, '0'
   UNION ALL SELECT 7, 'New flags: back-pay notice, entry before opening',
     ((position('back_pay_notice' IN pg_get_functiondef('public._pba_flags(uuid, date)'::regprocedure)) > 0)
      AND (position('entry_before_opening' IN pg_get_functiondef('public._pba_flags(uuid, date)'::regprocedure)) > 0))::text, 'true'
-  UNION ALL SELECT 8, 'Self-test leftovers (synthetic Person)',
-    (SELECT count(*) FROM persons WHERE identification_number = '099999939')::text, '0'
+  UNION ALL SELECT 8, 'Self-test leftovers (synthetic Persons)',
+    (SELECT count(*) FROM persons WHERE identification_number IN ('099999939', '099999938'))::text, '0'
+  UNION ALL SELECT 10, 'Marked deposits locked until the mark is removed',
+    (SELECT count(*) FROM pg_trigger WHERE tgname = 'pba_back_pay_guard' AND NOT tgisinternal)::text, '1'
   UNION ALL SELECT 9, 'Entries already dated before their account''s opening date (corrected by 39a or by hand)',
     (SELECT count(DISTINCT t.id) FROM pba_transactions t JOIN pba_accounts a ON a.id IN (t.account_id, t.to_account_id)
       WHERE t.status = 'active' AND a.opening_date IS NOT NULL AND t.entry_date < a.opening_date)::text,

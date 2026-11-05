@@ -22,7 +22,8 @@
 -- payment dated 10/30 shows as outstanding), and continue the close as normal.
 --
 -- RUN IN SUPABASE (SQL editor), ONCE. It stops without changing anything if the record isn't exactly as
--- described above (for example, if it was already corrected by hand).
+-- described above (for example, if it was already corrected by hand) — both deposits must be present.
+-- r1 (Greptile round 1, before this file ran): the 10/2 deposit is required too.
 -- =====================================================================================
 
 BEGIN;
@@ -71,6 +72,7 @@ BEGIN
   SELECT id INTO v_oct FROM pba_transactions
    WHERE person_id = v_person AND account_id = v_acc AND entry_date = date '2026-10-02'
      AND type = 'deposit' AND amount = 1172.00 AND status = 'active' AND reverses_id IS NULL;
+  IF v_oct IS NULL THEN RAISE EXCEPTION 'v20.0.39a: the 10/2 deposit of $1,172.00 was not found. Nothing was changed.'; END IF;
 
   IF NOT EXISTS (SELECT 1 FROM pba_month_closes WHERE person_id = v_person AND month = date '2026-09-01') THEN
     RAISE EXCEPTION 'v20.0.39a: September is not sealed. Nothing was changed.';
@@ -98,12 +100,10 @@ BEGIN
   UPDATE pba_transactions SET payee = 'Social Security (SSDI) — back pay', updated_at = now() WHERE id = v_dep;
   PERFORM public._pba_audit(v_org, 'pba_txn_relabeled', 'pba_transactions', v_dep, v_old,
                             (SELECT to_jsonb(t) FROM pba_transactions t WHERE t.id = v_dep));
-  IF v_oct IS NOT NULL THEN
-    SELECT to_jsonb(t) INTO v_old FROM pba_transactions t WHERE t.id = v_oct;
-    UPDATE pba_transactions SET payee = 'Social Security (SSDI)', updated_at = now() WHERE id = v_oct;
-    PERFORM public._pba_audit(v_org, 'pba_txn_relabeled', 'pba_transactions', v_oct, v_old,
-                              (SELECT to_jsonb(t) FROM pba_transactions t WHERE t.id = v_oct));
-  END IF;
+  SELECT to_jsonb(t) INTO v_old FROM pba_transactions t WHERE t.id = v_oct;
+  UPDATE pba_transactions SET payee = 'Social Security (SSDI)', updated_at = now() WHERE id = v_oct;
+  PERFORM public._pba_audit(v_org, 'pba_txn_relabeled', 'pba_transactions', v_oct, v_old,
+                            (SELECT to_jsonb(t) FROM pba_transactions t WHERE t.id = v_oct));
 
   -- 4. the 9/25 deposit is back pay: not counted through June 30, 2027 (SSA notice to be uploaded in the app)
   INSERT INTO pba_resource_exclusions (org_id, person_id, transaction_id, kind, amount, received_on, excluded_through, note, created_by)
