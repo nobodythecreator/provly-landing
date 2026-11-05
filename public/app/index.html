@@ -40,6 +40,7 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.39b r1 (Greptile r1): an attached statement lands only in the dialog it was chosen in — if that dialog was closed or another opened while the file was uploading, the file is not attached to the new one. -->
   <!-- v20.0.39b: PDF bank statements — "Enter from a PDF statement" (was "Enter manually") now attaches the bank's PDF (or a photo) to the statement, and a statement with a file shows View statement; the CSV importer is labeled as the online-banking export it reads. Includes r2's Form G rule: "Amended" only when an earlier report for the month was sent. -->
   <!-- v20.0.39 r2: Form G says "Amended" only when an earlier Form G for that month was actually recorded as sent — reopening a month whose report was never sent (as with Nicole's September) produces a normal report. -->
   <!-- v20.0.39 r1 (Greptile r1): the sealed-month, back-pay and reopened-month reads are tolerated as empty only while those tables don't exist yet (before the v20.0.39 SQL); any other failure is shown as a load error with Retry, so a Form G is never built without its Amended history. -->
@@ -20858,8 +20859,10 @@
                   <input type="file" accept="application/pdf,image/*" style={{ display: "none" }} disabled={busy} onChange={async e => {
                     const f = e.target.files?.[0]; e.target.value = "";
                     if (!f) return;
+                    const forDialog = modal.id;   // r1 — the dialog (and account) this file was chosen for
                     const up = await upload("statement", f);
-                    if (up) setMd({ file: up });
+                    // r1 — attach only if that same dialog is still open, never to one opened meanwhile
+                    if (up) setModal(cur => (cur && cur.kind === "manual" && cur.id === forDialog) ? { ...cur, file: up } : cur);
                   }} />
                 </label>
               )}
