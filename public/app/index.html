@@ -40,6 +40,8 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.39 r1 (Greptile r1): the sealed-month, back-pay and reopened-month reads are tolerated as empty only while those tables don't exist yet (before the v20.0.39 SQL); any other failure is shown as a load error with Retry, so a Form G is never built without its Amended history. -->
+  <!-- v20.0.39 (PBA ledger fixes): an account's opening balance only counts from its opening date, and an entry can't be dated before it (the database refuses it, and older ones are flagged); countable assets leave out back pay the way SSA does — a deposit (or part of one) marked as SSI or Social Security back pay isn't counted for the 9 months after the month it arrived, other money is treated as spent first, and a flag stays until the SSA notice is uploaded; the Owner or Compliance Director can reopen the newest sealed month with a reason (the original close is kept and shown), and a Form G sent afterwards is labeled Amended; in a sealed month the ledger offers Reverse only, and says why. Database side: sql/v20.0.39_pba_ledger_fixes.sql. -->
   <!-- v20.0.38 r1 (Greptile r1): a failed two-factor check no longer counts as "no code needed" — the sign-in shows "Couldn't check two-factor" with Retry (only a database that hasn't had the v20.0.38 SQL skips the code); an answer that arrives after a sign-out can no longer change the next person's sign-in screen; Send Invite and the billing (Stripe) checkout require the same verified code on the server. -->
   <!-- v20.0.38 (two-factor sign-in — Owner and Compliance Director): after signing in, these two roles must verify with an authenticator app before Provly loads. First sign-in: scan a QR code, enter a code, then add a backup (a second device or a password manager). Every later sign-in: enter a code. The database enforces it (sql/v20.0.38_two_factor.sql) — without a verified code these roles get no data at all; the app only asks for the code. Lost phone and backup: reset in the Supabase dashboard (no reset button in Provly). Other roles sign in exactly as before. -->
   <!-- v20.0.37 r2 (Greptile r2): text longer than a page is never lost — a table row taller than the space left continues on the next page (header repeated), paragraphs break line by line across pages and split words too long for the line, and Form G shows the Person, attendees and the reason the Person didn't sign as wrapping text rather than in fixed boxes. -->
@@ -1945,7 +1947,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.38</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.39</span>
               </div>
             </button>
             {isMobile && (
@@ -19948,6 +19950,7 @@
       step_overdue: "Close step overdue", asset_alert: "Asset alert", asset_warning: "Asset warning", person_did_not_sign: "Person did not sign",
       finding_open: "Review finding open", spenddown_overdue: "Spend-down overdue", payee_report_overdue: "SSA payee report overdue",
       reviewer_billed: "Reviewer billed PBA time",
+      back_pay_notice: "Back-pay notice missing", entry_before_opening: "Entry before account opening", // v20.0.39
     };
     const pbaMoney = (n) => `$${Number(n || 0).toFixed(2)}`;
     const pbaRoleLabel = (r) => PBA_ROLES.find(x => x.value === r)?.label || r;
@@ -20210,6 +20213,8 @@
       if (!m) return <PbaCard title={`Monthly Close — ${pbaMonthLabel(month)}`}><div style={{ display: "flex", justifyContent: "center", padding: 20 }}><Spinner size={20} /></div></PbaCard>;
 
       const sealed = !!m.fb;
+      const reopensHere = (d.reopens || []).filter(r => r.month === ms);                       // v20.0.39
+      const canReopen = sealed && !!(access?.owner || access?.compliance);
       const stmtFor = (accId) => m.stmts.find(s => s.account_id === accId);
       const stepStatus = (k) => m.cycle.find(c => c.o_step === k);
       const effectOn = (t, accId) => pbaSign(t, accId) * Number(t.amount);
@@ -20235,7 +20240,40 @@
       };
 
       return (
-        <PbaCard title={`Monthly Close — ${pbaMonthLabel(month)}`} actions={sealed ? <Badge text="Sealed" color={CB.green} /> : null}>
+        <PbaCard title={`Monthly Close — ${pbaMonthLabel(month)}`} actions={sealed ? <span style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
+            <Badge text="Sealed" color={CB.green} />
+            {canReopen && <SecondaryButton onClick={() => setModal({ kind: "reopen", reason: "" })}>Reopen month</SecondaryButton>}
+          </span> : null}>
+          {reopensHere.length > 0 && (
+            // v20.0.39 — a reopened close stays on the record, with who, when and why
+            <div style={{ fontSize: 12, color: CB.textMid, background: `${CB.amber}12`, border: `1px solid ${CB.amber}40`, borderRadius: 10, padding: "8px 10px", marginBottom: 12, lineHeight: 1.5 }}>
+              {reopensHere.map(r => (
+                <div key={r.id}>
+                  <strong>Reopened {new Date(r.reopened_at).toLocaleDateString()}</strong>
+                  {(() => { const who = d.staff.find(x => x.id === r.reopened_by); return who ? ` by ${who.first_name} ${who.last_name}` : ""; })()}
+                  {" — "}{r.reason}{r.original_countable != null ? ` · the original close (countable ${pbaMoney(r.original_countable)}) is kept in the record` : ""}
+                </div>
+              ))}
+            </div>
+          )}
+          <Modal open={modal?.kind === "reopen"} onClose={() => setModal(null)} title={`Reopen ${pbaMonthLabel(month)}`}
+            subtitle="The signed close stays in the record as superseded. The month opens to reconcile and sign again; any later step for it is redone.">
+            {modal?.kind === "reopen" && (
+              <>
+                <FormField label="Why is this month being reopened?" required>
+                  <textarea style={{ ...fieldStyle, minHeight: 80 }} value={modal.reason} onChange={ev => setMd({ reason: ev.target.value })}
+                    placeholder="e.g., the account's opening balance was entered with the wrong date" />
+                </FormField>
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 10 }}>
+                  <SecondaryButton onClick={() => setModal(null)}>Cancel</SecondaryButton>
+                  <PrimaryButton loading={busy} color={CB.amber} onClick={async () => {
+                    if (!(modal.reason || "").trim()) return addToast("Give a reason", "error");
+                    if (await run("pba_reopen_month", { p_person: clientId, p_month: ms, p_reason: modal.reason.trim() }, "Month reopened — reconcile it and sign Form B again")) setModal(null);
+                  }}>Reopen month</PrimaryButton>
+                </div>
+              </>
+            )}
+          </Modal>
           {/* the four steps */}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 8, marginBottom: 14 }}>
             {PBA_STEPS.map(s => {
@@ -20586,8 +20624,11 @@
       const sigsC = m.fc ? sigs.filter(s => s.form_type === "form_c" && s.form_id === m.fc.id) : [];
       const sigD = m.fd ? sigs.find(s => s.form_type === "form_d" && s.form_id === m.fd.id) : null;
       const pre = m.fd?.checklist?.prechecks || {}; const rv = m.fd?.checklist?.reviewer || {};
+      const reopened = (d.reopens || []).filter(r => r.month === ms);                     // v20.0.39
       return {
         sample: false,
+        amended: reopened.length > 0,
+        amendedReason: reopened.length ? reopened[reopened.length - 1].reason : null,
         personName: clientName,
         monthLabel: pbaMonthLabel(month),
         preparedOn: fgDate(new Date().toISOString()),
@@ -20617,12 +20658,16 @@
       // every name that reaches the page goes through pdfSafe, signatures included
       const SG = (x) => x ? { ...x, name: S(x.name), role: S(x.role), signedAt: S(x.signedAt) } : {};
       const pdf = await createBrandedPDF({
-        title: "PBA Monthly Report - Form G",
+        title: data.amended ? "PBA Monthly Report - Form G (Amended)" : "PBA Monthly Report - Form G",
         subtitle: S(`${data.personName}  ·  ${data.monthLabel}`),
         brand,
         watermark: data.sample ? "SAMPLE - FICTITIOUS DATA" : null,
       });
       pdf.tableWrap(["Person", "Month", "Prepared"], [[S(data.personName), S(data.monthLabel), S(data.preparedOn)]], { colWidths: [2, 1.2, 1] });
+      if (data.amended) {
+        // v20.0.39 — this month was reopened and re-signed
+        pdf.calloutBox("Amended report", S(`This report replaces the one previously prepared for ${data.monthLabel}. The month was reopened: ${data.amendedReason || "see the record"}.`), { tone: "warn" });
+      }
 
       pdf.sectionTitle("Summary for the month");
       pdf.summaryTiles([
@@ -20690,6 +20735,7 @@
 
     function PbaCloseModals({ modal, setModal, setMd, busy, run, upload, padRef, clientId, client, d, m, month, ms, acctName, txnLabel, addToast, effectOn }) {
       const { brand } = useAuth(); // v20.0.37 — Form G carries the provider's branding
+      if (modal?.kind === "reopen") return null; // v20.0.39 — the reopen dialog is drawn by PbaMonthlyClose itself
       const close = () => setModal(null);
       const done = async (fn, args, msg) => { if (await run(fn, args, msg)) setModal(null); };
       const footer = (onSave, label = "Save") => (
@@ -21203,7 +21249,10 @@
         setLoadError(null);
         const q = (p) => p.then(r => { if (r.error) throw new Error(r.error.message); return r.data; });
         try {
-          const [enr, formA, sigs, roles, accounts, balances, txns, affs, reqs, files, flags, staff] = await Promise.all([
+          // v20.0.39 r1 — empty only while the table doesn't exist yet (before the SQL); any other failure is a load error
+          const tableMissing = (e) => e?.code === "42P01" || e?.code === "PGRST205" || /does not exist|schema cache|could not find the table/i.test(e?.message || "");
+          const soft = (p) => p.then(r => { if (!r.error) return r.data || []; if (tableMissing(r.error)) return []; throw new Error(r.error.message); });
+          const [enr, formA, sigs, roles, accounts, balances, txns, affs, reqs, files, flags, staff, closes, exclusions, reopens] = await Promise.all([
             q(supabase.from("pba_enrollments").select("*").eq("person_id", clientId).limit(1)),
             q(supabase.from("pba_natural_support_determinations").select("*").eq("person_id", clientId).order("version", { ascending: false }).limit(1)),
             q(supabase.from("pba_signatures").select("*").eq("person_id", clientId)),
@@ -21216,9 +21265,14 @@
             q(supabase.from("pba_files").select("id, purpose, storage_path, uploaded_at").eq("person_id", clientId)),
             q(supabase.rpc("pba_flags", { p_person: clientId })),
             q(supabase.from("staff_directory_v").select("id, first_name, last_name, role").order("last_name")),
+            // v20.0.39 — sealed months, back pay and reopened months (empty if the SQL hasn't run)
+            soft(supabase.from("pba_month_closes").select("month").eq("person_id", clientId)),
+            soft(supabase.from("pba_resource_exclusions").select("*").eq("person_id", clientId).is("removed_at", null)),
+            soft(supabase.from("pba_reopened_months").select("id, month, reason, original_countable, reopened_by, reopened_at").eq("person_id", clientId).order("reopened_at")),
           ]);
           if (mine !== seq.current) return;
-          setD({ enrollment: enr?.[0] || null, formA: formA?.[0] || null, sigs: sigs || [], roles: roles || [], accounts: accounts || [],
+          setD({ closedMonths: (closes || []).map(c => c.month), exclusions: exclusions || [], reopens: reopens || [],
+                 enrollment: enr?.[0] || null, formA: formA?.[0] || null, sigs: sigs || [], roles: roles || [], accounts: accounts || [],
                  balances: Object.fromEntries((balances || []).map(b => [b.o_account_id, Number(b.o_balance)])),
                  txns: txns || [], affs: affs || [], reqs: reqs || [], files: Object.fromEntries((files || []).map(f => [f.id, f])),
                  flags: flags || [], staff: staff || [] });
@@ -21460,6 +21514,9 @@
                       const sigs = aff ? affSigs(aff.id) : [];
                       const reversed = d.txns.some(x => x.reverses_id === t.id && x.status === "active");
                       const needs = t.status === "active" && !t.reverses_id && !reversed && t.type === "withdrawal" && Number(t.amount) > 50;
+                      const monthSealed = (d.closedMonths || []).includes(`${String(t.entry_date).slice(0, 7)}-01`); // v20.0.39
+                      const backPay = (d.exclusions || []).find(e => e.transaction_id === t.id);                    // v20.0.39
+                      const canBackPay = isManager && t.type === "deposit" && t.status === "active" && !t.reverses_id && !reversed;
                       const td = { fontSize: 13, padding: "8px", borderBottom: `1px solid ${CB.border}`, verticalAlign: "top", textDecoration: voided ? "line-through" : "none", color: voided ? CB.textLight : CB.text };
                       return (
                         <tr key={t.id}>
@@ -21468,6 +21525,24 @@
                             <div><strong>{pbaTypeLabel(t.type)}</strong>{t.payee ? ` · ${t.payee}` : ""} · {pbaCatLabel(t.category)}</div>
                             {t.beneficiary === "other" && <div style={{ fontSize: 12 }}>For <strong>{t.beneficiary_name}</strong>{t.beneficiary_relationship ? ` (${t.beneficiary_relationship})` : ""}</div>}
                             {t.type === "transfer" && <div style={{ fontSize: 12, color: CB.textMid }}>to {accountName(t.to_account_id)}</div>}
+                            {backPay && (
+                              // v20.0.39 — back pay: not counted toward the SSI limit until its window ends
+                              <div style={{ fontSize: 12, marginTop: 3, color: CB.textMid }}>
+                                <strong style={{ color: CB.teal }}>Back pay</strong> ({backPay.kind === "retro_ssi" ? "SSI" : "Social Security"}) · {pbaMoney(backPay.amount)} not counted through {fmtD(backPay.excluded_through)}
+                                {!backPay.notice_file_id && <span style={{ color: CB.amber, fontWeight: 600 }}> · SSA notice missing</span>}
+                                {isManager && !backPay.notice_file_id && (
+                                  <label style={{ color: CB.blue, cursor: "pointer", fontWeight: 600, marginLeft: 6 }}>
+                                    Upload notice
+                                    <input type="file" accept="image/*,application/pdf" style={{ display: "none" }} disabled={busy} onChange={async ev => {
+                                      const f = await upload("document", ev.target.files?.[0]); ev.target.value = "";
+                                      if (f) run("pba_back_pay_notice", { p_exclusion: backPay.id, p_file: f.id }, "SSA notice attached");
+                                    }} />
+                                  </label>
+                                )}
+                                {isManager && <button onClick={() => setModal({ kind: "backpayRemove", exclusion: backPay.id, reason: "" })}
+                                  style={{ background: "none", border: "none", color: CB.textLight, cursor: "pointer", fontSize: 12, padding: 0, marginLeft: 8, fontFamily: "inherit" }}>Remove</button>}
+                              </div>
+                            )}
                             {t.handed_to && <div style={{ fontSize: 12, color: CB.textMid }}>Handed to {t.handed_to === "person" ? clientName : (t.handed_to_staff_id ? staffName(t.handed_to_staff_id) : t.handed_to_name)} — {t.purpose}</div>}
                             {t.reverses_id && <div style={{ fontSize: 12, color: CB.amber }}>Reversing entry</div>}
                             {reversed && <div style={{ fontSize: 12, color: CB.amber }}>Reversed</div>}
@@ -21504,13 +21579,16 @@
                                 {needs && !hasReceipt && !aff && <button onClick={() => setModal({ kind: "affidavit", id: newId(), txn: t.id,
                                   f: { purchaser_staff_id: t.purchased_by_staff_id || "", store: t.payee || "", statement_line_ref: "", reason: "" } })}
                                   style={{ background: "none", border: "none", color: CB.blue, cursor: "pointer", fontSize: 12, padding: 0, fontFamily: "inherit", fontWeight: 600 }}>Lost receipt</button>}
-                                {!t.reverses_id && !reversed && <button onClick={() => setModal({ kind: "txn", id: t.id, isNew: false, reason: "", f: {
+                                {canBackPay && !backPay && <button onClick={() => setModal({ kind: "backpay", txn: t.id, max: Number(t.amount), amount: String(t.amount), backKind: "retro_rsdi", note: "" })}
+                                  style={{ background: "none", border: "none", color: CB.teal, cursor: "pointer", fontSize: 12, padding: 0, fontFamily: "inherit", fontWeight: 600 }}>Back pay</button>}
+                                {monthSealed && <span style={{ fontSize: 11, color: CB.textLight }} title="This month is sealed. A Reverse entry, dated today, corrects it in an open month.">Sealed month</span>}
+                                {!monthSealed && !t.reverses_id && !reversed && <button onClick={() => setModal({ kind: "txn", id: t.id, isNew: false, reason: "", f: {
                                   type: t.type, account_id: t.account_id, to_account_id: t.to_account_id || "", entry_date: t.entry_date, amount: String(t.amount), payee: t.payee || "",
                                   category: t.category || "", beneficiary: t.beneficiary, beneficiary_name: t.beneficiary_name || "", beneficiary_relationship: t.beneficiary_relationship || "",
                                   purchased_by: t.purchased_by || "", purchased_by_staff_id: t.purchased_by_staff_id || "", handed_to: t.handed_to || "", handed_to_staff_id: t.handed_to_staff_id || "",
                                   handed_to_name: t.handed_to_name || "", purpose: t.purpose || "", request_id: t.request_id || "", notes: t.notes || "" } })}
                                   style={{ background: "none", border: "none", color: CB.blue, cursor: "pointer", fontSize: 12, padding: 0, fontFamily: "inherit" }}>Edit</button>}
-                                <button onClick={() => setModal({ kind: "void", txn: t.id, reason: "" })} style={{ background: "none", border: "none", color: CB.red, cursor: "pointer", fontSize: 12, padding: 0, fontFamily: "inherit" }}>Void</button>
+                                {!monthSealed && <button onClick={() => setModal({ kind: "void", txn: t.id, reason: "" })} style={{ background: "none", border: "none", color: CB.red, cursor: "pointer", fontSize: 12, padding: 0, fontFamily: "inherit" }}>Void</button>}
                                 {!t.reverses_id && !reversed && <button onClick={() => setModal({ kind: "reverse", txn: t.id, newId: newId(), reason: "" })} style={{ background: "none", border: "none", color: CB.amber, cursor: "pointer", fontSize: 12, padding: 0, fontFamily: "inherit" }}>Reverse</button>}
                               </div>
                             )}
@@ -21532,7 +21610,8 @@
           <Modal open={!!modal && modal.kind !== "start"} onClose={() => setModal(null)} width={modal?.kind === "txn" ? 640 : 540}
             title={{ formA: "Natural Support Determination (Form A)", sign: "Sign", role: "Assign a PBA Role", account: modal?.isNew ? "Add Account" : "Edit Account",
                      request: "New Purchase Request", decide: "Decide the Request", txn: modal?.isNew ? "Add Ledger Entry" : "Edit Ledger Entry",
-                     affidavit: "Lost Receipt Affidavit (Form F)", void: "Void Entry", reverse: "Reverse Entry", resolve: "Resolve Flag" }[modal?.kind] || ""}
+                     affidavit: "Lost Receipt Affidavit (Form F)", void: "Void Entry", reverse: "Reverse Entry", resolve: "Resolve Flag",
+                     backpay: "Mark as Back Pay", backpayRemove: "Remove Back-Pay Mark" }[modal?.kind] || ""}
             subtitle={modal?.kind === "txn" && !modal?.isNew ? "Editable until the month closes. Every change is logged with your reason." : modal?.kind === "sign" ? "Your signature locks this form." : ""}>
             {modal && (() => {
               const f = modal.f || {};
@@ -21805,6 +21884,43 @@
                 </>
               );
 
+              // v20.0.39 — back pay (SSA POMS SI 01130.600): not counted for the 9 months after the month received
+              if (modal.kind === "backpay") return (
+                <>
+                  <div style={{ fontSize: 13, marginBottom: 10, lineHeight: 1.5 }}>
+                    Back pay is money SSA paid late for earlier months. SSA doesn't count it toward the $2,000 limit for the
+                    9 months after the month it arrives, and treats other money as spent first. Upload the SSA notice for it
+                    when you have it — until then a flag stays on this Person.
+                  </div>
+                  <FormRow>
+                    <FormField label="Benefit" required half>
+                      <select style={fieldStyle} value={modal.backKind} onChange={ev => setM({ backKind: ev.target.value })}>
+                        <option value="retro_rsdi">Social Security (SSDI / RSDI)</option>
+                        <option value="retro_ssi">SSI</option>
+                      </select>
+                    </FormField>
+                    <FormField label="Back-pay amount" required half>
+                      <input style={fieldStyle} inputMode="decimal" value={modal.amount} onChange={ev => setM({ amount: ev.target.value })} />
+                    </FormField>
+                  </FormRow>
+                  <div style={{ fontSize: 11, color: CB.textLight, marginTop: -4, marginBottom: 8 }}>If the deposit also included the current month's regular benefit, enter only the back-pay part (the SSA notice shows the split).</div>
+                  <FormField label="Note">
+                    <input style={fieldStyle} value={modal.note} onChange={ev => setM({ note: ev.target.value })} placeholder="e.g., June–August benefits paid together" />
+                  </FormField>
+                  {footer(() => {
+                    const amt = Number(modal.amount);
+                    if (!(amt > 0) || amt > modal.max) return addToast(`Enter an amount between $0.01 and ${pbaMoney(modal.max)}`, "error");
+                    done("pba_mark_back_pay", { p_txn: modal.txn, p_kind: modal.backKind, p_amount: amt, p_note: (modal.note || "").trim() || null }, "Marked as back pay");
+                  }, "Mark as back pay")}
+                </>
+              );
+              if (modal.kind === "backpayRemove") return (
+                <>
+                  <div style={{ fontSize: 13, marginBottom: 10 }}>The deposit will count toward the SSI limit again. The mark and your reason stay in the audit trail.</div>
+                  {reasonField()}
+                  {footer(() => (modal.reason || "").trim() ? done("pba_remove_back_pay", { p_exclusion: modal.exclusion, p_reason: modal.reason.trim() }, "Back-pay mark removed") : addToast("Give a reason", "error"), "Remove", true)}
+                </>
+              );
               if (modal.kind === "void") return (
                 <>
                   <div style={{ fontSize: 13, marginBottom: 10 }}>The entry stays visible, struck through, with your reason. Only possible before the month closes.</div>
