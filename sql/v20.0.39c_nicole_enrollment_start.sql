@@ -16,6 +16,8 @@
 --
 -- RUN IN SUPABASE (SQL editor), ONCE. It stops without changing anything unless the enrollment still
 -- starts on 2026-10-26.
+-- r1 (Greptile round 1, before this file ran): the verification checks that both D and G are tracked;
+--   their current status is shown as information, not as a pass/fail.
 -- =====================================================================================
 
 BEGIN;
@@ -60,17 +62,18 @@ WITH p AS (
   SELECT id FROM persons WHERE org_id = '00000000-0000-0000-0000-000000000001'
      AND first_name ILIKE 'nicole%' AND last_name ILIKE 'hyden%' LIMIT 1
 )
-SELECT n, check_name, got, want, CASE WHEN got = want THEN '✅' ELSE '❌' END AS ok FROM (
+SELECT n, check_name, got, want,
+       CASE WHEN want = '(information)' THEN 'ℹ️' WHEN got = want THEN '✅' ELSE '❌' END AS ok FROM (
   SELECT 1 n, 'Enrollment starts' check_name,
     (SELECT e.started_on::text FROM pba_enrollments e JOIN p ON e.person_id = p.id) got, '2026-09-01' want
   UNION ALL SELECT 2, 'September is part of her cycle (4 steps)',
     (SELECT count(*)::text FROM p, public._pba_cycle(p.id) c WHERE c.o_month = date '2026-09-01'), '4'
   UNION ALL SELECT 3, 'September Form B and Form C show done',
     (SELECT count(*)::text FROM p, public._pba_cycle(p.id) c WHERE c.o_month = date '2026-09-01' AND c.o_step IN ('B', 'C') AND c.o_status = 'done'), '2'
-  UNION ALL SELECT 4, 'September Forms D and G (status until completed)',
-    (SELECT string_agg(c.o_step || ' ' || c.o_status, ', ' ORDER BY c.o_step) FROM p, public._pba_cycle(p.id) c
-      WHERE c.o_month = date '2026-09-01' AND c.o_step IN ('D', 'G')),
-    (SELECT string_agg(c.o_step || ' ' || c.o_status, ', ' ORDER BY c.o_step) FROM p, public._pba_cycle(p.id) c
-      WHERE c.o_month = date '2026-09-01' AND c.o_step IN ('D', 'G'))
+  UNION ALL SELECT 4, 'September Forms D and G are both tracked',
+    (SELECT count(DISTINCT c.o_step)::text FROM p, public._pba_cycle(p.id) c WHERE c.o_month = date '2026-09-01' AND c.o_step IN ('D', 'G')), '2'
+  UNION ALL SELECT 5, 'September Forms D and G — current status',
+    (SELECT coalesce(string_agg(c.o_step || ' ' || c.o_status, ', ' ORDER BY c.o_step), 'none') FROM p, public._pba_cycle(p.id) c
+      WHERE c.o_month = date '2026-09-01' AND c.o_step IN ('D', 'G')), '(information)'
 ) t
 ORDER BY n;
