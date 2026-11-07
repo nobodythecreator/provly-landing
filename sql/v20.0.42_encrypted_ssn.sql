@@ -20,6 +20,12 @@
 --   Deletion  _ssn_purge_due() deletes the number 90 days after the Person's PBA ends (daily, when
 --             pg_cron is enabled); the last four stay. A viewer can delete one sooner, with a reason.
 --
+-- r1 (Greptile round 1, before this file ran): deleting requires the actor to be active staff of the
+--   Person's organization (as entering and viewing already did); every public SSN function first checks
+--   the caller can see that Person (can_see_person), so a hidden Person's last four never leak; views are
+--   serialized per person viewing, so parallel requests can't get past the 10-an-hour limit; refused
+--   deletions and refused role changes are logged like refused views.
+--
 -- RUN IN SUPABASE (SQL editor), ONCE. One transaction: preflight → changes → rolled-back self-test on a
 -- synthetic Person → COMMIT → verification table.
 -- =====================================================================================
@@ -35,6 +41,9 @@ BEGIN
   END IF;
   IF to_regclass('public.organizations') IS NULL THEN
     RAISE EXCEPTION 'v20.0.42 preflight: public.organizations not found';
+  END IF;
+  IF to_regprocedure('public.can_see_person(uuid)') IS NULL THEN
+    RAISE EXCEPTION 'v20.0.42 preflight: public.can_see_person(uuid) not found (Person visibility rules)';
   END IF;
   IF to_regprocedure('public._mfa_satisfied()') IS NULL THEN
     RAISE EXCEPTION 'v20.0.42 preflight: v20.0.38 (two-factor) has not run';
@@ -226,6 +235,9 @@ BEGIN
     PERFORM public._ssn_log(v_org, p_person, p_actor, p_role, 'denied', false, p_reason, 'reveal: no fresh authenticator code');
     RETURN jsonb_build_object('ok', false, 'needs_code', true, 'error', 'Enter a fresh code from your authenticator app');
   END IF;
+  -- r1 — one view at a time per person viewing, held until this transaction ends (through the log write),
+  -- so parallel requests can't all count the same nine
+  PERFORM pg_advisory_xact_lock(hashtext('provly-ssn-reveal'), hashtext(p_actor::text));
   SELECT count(*) INTO v_n FROM ssn_access_log
    WHERE actor_staff_id = p_actor AND action = 'reveal' AND ok AND at > clock_timestamp() - interval '1 hour';
   IF v_n >= 10 THEN
@@ -253,12 +265,20 @@ DECLARE
 BEGIN
   SELECT org_id INTO v_org FROM persons WHERE id = p_person;
   IF v_org IS NULL THEN RETURN jsonb_build_object('ok', false, 'error', 'Not permitted'); END IF;
-  IF p_actor IS NULL OR NOT public._ssn_is_viewer(v_org, p_role) THEN
+  -- r1 — the actor must be active staff of this Person's organization, as for entering and viewing
+  IF p_actor IS NULL OR NOT public._ssn_is_viewer(v_org, p_role)
+     OR NOT EXISTS (SELECT 1 FROM staff s WHERE s.id = p_actor AND s.org_id = v_org AND s.is_active) THEN
     PERFORM public._ssn_log(v_org, p_person, p_actor, p_role, 'denied', false, p_reason, 'delete: role not permitted');
     RETURN jsonb_build_object('ok', false, 'error', 'Your role can''t delete Social Security numbers');
   END IF;
-  IF length(btrim(coalesce(p_reason, ''))) < 3 THEN RETURN jsonb_build_object('ok', false, 'error', 'Give a reason for deleting the number'); END IF;
-  IF NOT public._ssn_fresh_code() THEN RETURN jsonb_build_object('ok', false, 'needs_code', true, 'error', 'Enter a fresh code from your authenticator app'); END IF;
+  IF length(btrim(coalesce(p_reason, ''))) < 3 THEN
+    PERFORM public._ssn_log(v_org, p_person, p_actor, p_role, 'denied', false, p_reason, 'delete: no reason');
+    RETURN jsonb_build_object('ok', false, 'error', 'Give a reason for deleting the number');
+  END IF;
+  IF NOT public._ssn_fresh_code() THEN
+    PERFORM public._ssn_log(v_org, p_person, p_actor, p_role, 'denied', false, p_reason, 'delete: no fresh authenticator code');
+    RETURN jsonb_build_object('ok', false, 'needs_code', true, 'error', 'Enter a fresh code from your authenticator app');
+  END IF;
   SELECT * INTO v_row FROM person_ssn WHERE person_id = p_person FOR UPDATE;
   IF NOT FOUND OR v_row.secret_id IS NULL THEN RETURN jsonb_build_object('ok', false, 'error', 'No Social Security number is on file'); END IF;
   DELETE FROM vault.secrets WHERE id = v_row.secret_id;
@@ -300,10 +320,16 @@ DECLARE
   v_old text;
   v_new text[];
 BEGIN
-  IF p_org IS NULL OR p_actor IS NULL OR p_role IS DISTINCT FROM 'owner' THEN
+  IF p_org IS NULL THEN RETURN jsonb_build_object('ok', false, 'error', 'Not permitted'); END IF;
+  IF p_actor IS NULL OR p_role IS DISTINCT FROM 'owner'
+     OR NOT EXISTS (SELECT 1 FROM staff s WHERE s.id = p_actor AND s.org_id = p_org AND s.is_active) THEN
+    PERFORM public._ssn_log(p_org, NULL, p_actor, p_role, 'denied', false, NULL, 'roles: not the Owner');
     RETURN jsonb_build_object('ok', false, 'error', 'Only the Owner can change who sees Social Security numbers');
   END IF;
-  IF NOT public._ssn_fresh_code() THEN RETURN jsonb_build_object('ok', false, 'needs_code', true, 'error', 'Enter a fresh code from your authenticator app'); END IF;
+  IF NOT public._ssn_fresh_code() THEN
+    PERFORM public._ssn_log(p_org, NULL, p_actor, p_role, 'denied', false, NULL, 'roles: no fresh authenticator code');
+    RETURN jsonb_build_object('ok', false, 'needs_code', true, 'error', 'Enter a fresh code from your authenticator app');
+  END IF;
   SELECT array_agg(DISTINCT r ORDER BY r) INTO v_new FROM unnest(coalesce(p_roles, ARRAY[]::text[])) r WHERE r ~ '^[a-z_]{2,40}$';
   IF v_new IS NULL OR NOT ('owner' = ANY (v_new)) THEN
     RETURN jsonb_build_object('ok', false, 'error', 'The Owner always keeps access');
@@ -327,12 +353,34 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'public', 'pg_temp' AS $
 $$;
 
 -- ── 9. Public functions (identity from the access helpers, so two-factor applies) ──────
+-- r1 — every public SSN function first checks the caller can see this Person (the same rule as reading
+-- the Person); a hidden or another organization's Person gets "not permitted", logged for that Person.
+CREATE FUNCTION public._ssn_hidden(p_person uuid, p_what text)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'public' AS $$
+DECLARE
+  v_org uuid;
+BEGIN
+  IF public.can_see_person(p_person) THEN RETURN NULL; END IF;
+  SELECT org_id INTO v_org FROM persons WHERE id = p_person;
+  IF v_org IS NOT NULL AND p_what IS NOT NULL THEN
+    PERFORM public._ssn_log(v_org, p_person, public.my_staff_id(), public.member_role()::text, 'denied', false, NULL, p_what || ': Person not visible');
+  END IF;
+  RETURN jsonb_build_object('ok', false, 'error', 'Not permitted');
+END;
+$$;
 CREATE FUNCTION public.ssn_set(p_person uuid, p_ssn text) RETURNS jsonb
-LANGUAGE sql SECURITY DEFINER SET search_path TO 'public' AS $$ SELECT public._ssn_set(p_person, p_ssn, public.my_staff_id(), public.member_role()::text) $$;
+LANGUAGE sql SECURITY DEFINER SET search_path TO 'public' AS $$
+  SELECT coalesce(public._ssn_hidden(p_person, 'enter'), public._ssn_set(p_person, p_ssn, public.my_staff_id(), public.member_role()::text))
+$$;
 CREATE FUNCTION public.ssn_reveal(p_person uuid, p_reason text) RETURNS jsonb
-LANGUAGE sql SECURITY DEFINER SET search_path TO 'public' AS $$ SELECT public._ssn_reveal(p_person, p_reason, public.my_staff_id(), public.member_role()::text) $$;
+LANGUAGE sql SECURITY DEFINER SET search_path TO 'public' AS $$
+  SELECT coalesce(public._ssn_hidden(p_person, 'reveal'), public._ssn_reveal(p_person, p_reason, public.my_staff_id(), public.member_role()::text))
+$$;
 CREATE FUNCTION public.ssn_delete(p_person uuid, p_reason text) RETURNS jsonb
-LANGUAGE sql SECURITY DEFINER SET search_path TO 'public' AS $$ SELECT public._ssn_delete(p_person, p_reason, public.my_staff_id(), public.member_role()::text) $$;
+LANGUAGE sql SECURITY DEFINER SET search_path TO 'public' AS $$
+  SELECT coalesce(public._ssn_hidden(p_person, 'delete'), public._ssn_delete(p_person, p_reason, public.my_staff_id(), public.member_role()::text))
+$$;
 CREATE FUNCTION public.ssn_viewer_roles_set(p_roles text[]) RETURNS jsonb
 LANGUAGE sql SECURITY DEFINER SET search_path TO 'public' AS $$ SELECT public._ssn_set_viewer_roles(p_roles, public.my_staff_id(), public.member_role()::text, public.org_id()) $$;
 
@@ -349,7 +397,9 @@ DECLARE
   a       record;
   v_write boolean := false;
 BEGIN
-  IF v_org IS NULL OR NOT EXISTS (SELECT 1 FROM persons p WHERE p.id = p_person AND p.org_id = v_org) THEN
+  -- r1 — only for a Person this caller can see
+  IF v_org IS NULL OR NOT EXISTS (SELECT 1 FROM persons p WHERE p.id = p_person AND p.org_id = v_org)
+     OR NOT public.can_see_person(p_person) THEN
     RETURN jsonb_build_object('ok', false);
   END IF;
   SELECT * INTO v_row FROM person_ssn WHERE person_id = p_person;
@@ -396,7 +446,7 @@ BEGIN
      WHERE n.nspname = 'public'
        AND p.proname IN ('trg_ssn_viewer_roles_seed', 'trg_ssn_access_log_append_only', '_ssn_is_viewer', '_ssn_fresh_code', '_ssn_log',
                          '_ssn_valid', '_ssn_set', '_ssn_reveal', '_ssn_delete', '_ssn_purge_due', '_ssn_set_viewer_roles', '_mfa_required_for',
-                         'ssn_set', 'ssn_reveal', 'ssn_delete', 'ssn_viewer_roles_set', 'ssn_status')
+                         'ssn_set', 'ssn_reveal', 'ssn_delete', 'ssn_viewer_roles_set', 'ssn_status', '_ssn_hidden')
   LOOP
     EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC, anon, authenticated', f.sig);
     -- _ssn_is_viewer is used by the access-log policy, which runs as the signed-in user (it reveals nothing)
@@ -551,6 +601,15 @@ BEGIN
       IF SQLERRM LIKE 'SELFTEST%' THEN RAISE; END IF;
     END;
 
+    -- 6a. deleting: someone not on this organization's staff can't, even with the Owner role; a
+    --     refused deletion (no reason) is logged
+    r := public._ssn_delete(v_person, 'self-test', gen_random_uuid(), 'owner');
+    IF (r ->> 'ok')::boolean THEN RAISE EXCEPTION 'SELFTEST FAIL 6a: someone outside the organization deleted a number'; END IF;
+    r := public._ssn_delete(v_person, '', v_owner, 'owner');
+    IF (r ->> 'ok')::boolean OR NOT EXISTS (SELECT 1 FROM ssn_access_log WHERE person_id = v_person AND action = 'denied' AND detail = 'delete: no reason') THEN
+      RAISE EXCEPTION 'SELFTEST FAIL 6b: a refused deletion was not logged';
+    END IF;
+
     -- 6. deleting with a reason removes it from Vault; the last four stay
     SELECT secret_id INTO v_secret FROM person_ssn WHERE person_id = v_person;
     r := public._ssn_delete(v_person, 'self-test', v_owner, 'owner');
@@ -610,7 +669,7 @@ SELECT n, check_name, got, want,
        AND has_function_privilege('authenticated', oid, 'EXECUTE') AND NOT has_function_privilege('anon', oid, 'EXECUTE'))::text, '5'
   UNION ALL SELECT 6, 'Internal SSN functions callable by clients',
     (SELECT count(*) FROM pg_proc WHERE proname IN ('_ssn_fresh_code', '_ssn_log', '_ssn_valid', '_ssn_set', '_ssn_reveal',
-                                                    '_ssn_delete', '_ssn_purge_due', '_ssn_set_viewer_roles')
+                                                    '_ssn_delete', '_ssn_purge_due', '_ssn_set_viewer_roles', '_ssn_hidden')
        AND (has_function_privilege('authenticated', oid, 'EXECUTE') OR has_function_privilege('anon', oid, 'EXECUTE')))::text, '0'
   UNION ALL SELECT 7, 'Roles allowed to see SSNs (Hope Haven)',
     (SELECT string_agg(role, ', ' ORDER BY role) FROM ssn_viewer_roles WHERE org_id = '00000000-0000-0000-0000-000000000001'), 'compliance_director, owner'
@@ -619,6 +678,11 @@ SELECT n, check_name, got, want,
   UNION ALL SELECT 9, 'Self-test leftovers (synthetic Person / numbers in Vault)',
     ((SELECT count(*) FROM persons WHERE identification_number = '099999942')::text || '/' ||
      (SELECT count(*) FROM vault.secrets WHERE description = 'Provly: Social Security number')::text), '0/0'
+  UNION ALL SELECT 11, 'Views serialized per person viewing (hourly limit holds)',
+    (position('pg_advisory_xact_lock' IN pg_get_functiondef('public._ssn_reveal(uuid, text, uuid, text)'::regprocedure)) > 0)::text, 'true'
+  UNION ALL SELECT 12, 'Public SSN functions check Person visibility',
+    ((SELECT count(*) FROM pg_proc WHERE proname IN ('ssn_set', 'ssn_reveal', 'ssn_delete') AND position('_ssn_hidden' IN pg_get_functiondef(oid)) > 0)
+     + (SELECT count(*) FROM pg_proc WHERE proname = 'ssn_status' AND position('can_see_person' IN pg_get_functiondef(oid)) > 0))::text, '4'
   UNION ALL SELECT 10, 'Daily 90-day purge scheduled (needs pg_cron enabled)',
     (SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN 'scheduled' ELSE 'pg_cron not enabled' END), '(information)'
 ) t
