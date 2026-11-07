@@ -40,6 +40,7 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.41 r2 (Greptile r2): a refresh after clock-in, clock-out or a fix always loads the month on screen now, never the one that was selected when the button was pressed. -->
   <!-- v20.0.41 r1 (Greptile r1): the month list refreshes after a clock-in or clock-out on the card, so a finished punch shows its hours at once; the CSV makes any cell that starts like a spreadsheet formula (=, +, -, @) plain text; client names come from the punches themselves, so earlier punches keep the name of a client who is no longer active. -->
   <!-- v20.0.41 (time punches by month): the Time clock card lists every punch for a chosen month — who, what work, client and code, in and out (Mountain time), hours, and whether it was corrected — with Fix on each for managers and supervisors, a month total, and Download CSV for payroll. Front-line logins see their own punches. Corrected punches show their corrected times, so a fix lands back in the list and the download. The Utah EVV file stays EVV-only. -->
   <!-- v20.0.40 r1 (Greptile r1): Save waits while a statement is being read and attached, so a statement can't be saved without the PDF that was chosen; a successfully read PDF always replaces the lines, even when it has none, so earlier rows can't be saved with another statement. -->
@@ -9808,6 +9809,11 @@
         setMonthRows(rows); setMonthPeople(people); setMonthStatus("ok"); setMonthError(null);
       }, [month, canFix, myStaffId]);
       useEffect(() => { setMonthRows([]); loadMonth(); }, [loadMonth]);
+      // r2 — refreshes that happen after a wait (clock in/out, a fix) go through the latest loader, so they
+      // always load the month on screen — never the month that was selected when the button was pressed
+      const loadMonthRef = useRef(loadMonth);
+      loadMonthRef.current = loadMonth;
+      const refreshMonth = () => loadMonthRef.current();
       useEffect(() => {
         const onChange = () => loadMonth();
         window.addEventListener(TIME_PUNCH_EVENT, onChange);
@@ -9890,7 +9896,7 @@
           setShowIn(false);
           setForm(emptyForm);
           load();
-          loadMonth(); // r1 — the month list shows the new or finished punch
+          refreshMonth(); // r1/r2 — the month on screen shows the new or finished punch
         } catch (e) {
           addToast(e.message || "Could not clock in", "error");
         } finally {
@@ -9911,7 +9917,7 @@
           addToast("Clocked out", "success");
           checkReleaseNotice("punch", punchId); // v20.0.35
           load();
-          loadMonth(); // r1 — the month list shows the new or finished punch
+          refreshMonth(); // r1/r2 — the month on screen shows the new or finished punch
         } catch (e) {
           addToast(e.message || "Could not clock out", "error");
         } finally {
@@ -9940,7 +9946,7 @@
           addToast("Time punch corrected", "success");
           setFixing(null);
           load();
-          loadMonth(); // v20.0.41 — the corrected times show in the month list and the download
+          refreshMonth(); // v20.0.41 r2 — the corrected times show in the month on screen
         } catch (e) {
           addToast(e.message || "Could not correct the punch", "error");
         } finally {
