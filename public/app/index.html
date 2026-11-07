@@ -40,6 +40,8 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.42 r1 (Greptile r1): a viewed number is cleared 30 seconds after it appeared by the clock, not by counting timer ticks, and at once if the page is hidden (another tab, the screen locks, the laptop sleeps). Server-side: deleting requires membership of the Person's organization; SSN status and actions require being able to see the Person; views are serialized per person viewing; refused deletions are logged. -->
+  <!-- v20.0.42 (encrypted SSN): a Person's Social Security number is stored encrypted in Supabase Vault — the Overview shows only the last four; the PBA Manager and the roles allowed to see SSNs can enter or replace it (typed twice, never shown back); viewing it takes one of those roles, a written reason and a fresh authenticator code, and it shows for 30 seconds; every entry, view, deletion and refused attempt goes into an access log nobody can change (Settings → Social Security numbers, by month, with a CSV); the Owner decides which roles may see SSNs, and those roles sign in with two-factor; numbers are deleted 90 days after PBA ends. The never-saved last-four box is gone from the client form; the face sheet shows the last four. -->
   <!-- v20.0.41 r2 (Greptile r2): a refresh after clock-in, clock-out or a fix always loads the month on screen now, never the one that was selected when the button was pressed. -->
   <!-- v20.0.41 r1 (Greptile r1): the month list refreshes after a clock-in or clock-out on the card, so a finished punch shows its hours at once; the CSV makes any cell that starts like a spreadsheet formula (=, +, -, @) plain text; client names come from the punches themselves, so earlier punches keep the name of a client who is no longer active. -->
   <!-- v20.0.41 (time punches by month): the Time clock card lists every punch for a chosen month — who, what work, client and code, in and out (Mountain time), hours, and whether it was corrected — with Fix on each for managers and supervisors, a month total, and Download CSV for payroll. Front-line logins see their own punches. Corrected punches show their corrected times, so a fix lands back in the list and the download. The Utah EVV file stays EVV-only. -->
@@ -1955,7 +1957,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.41</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.42</span>
               </div>
             </button>
             {isMobile && (
@@ -15010,12 +15012,13 @@
           else if (tmpl.id === "client_face_sheet") {
             const { data: client } = await supabase.from("persons").select("*").eq("id", entityId).single();
             const { data: auths } = await supabase.from(AUTH_VIEW).select(AUTH_SELECT).eq("person_id", entityId); // v20.0.26 — the 1056 columns
+            const { data: ssnRow } = await supabase.from("person_ssn").select("last4, deleted_at").eq("person_id", entityId).maybeSingle(); // v20.0.42
             const doc = new jsPDF();
             let y = pdfHeader(doc, "Client Face Sheet — Tab 1", `${client.first_name} ${client.last_name}`);
             doc.setFontSize(10);
             const fields = [
               ["Full Name", `${client.first_name} ${client.last_name}`], ["Date of Birth", client.date_of_birth || "N/A"],
-              ["Medicaid #", client.medicaid_number || "N/A"], ["SSN", client.ssn ? "On file" : "N/A"],
+              ["Medicaid #", client.medicaid_number || "N/A"], ["SSN", ssnRow && !ssnRow.deleted_at ? `XXX-XX-${ssnRow.last4}` : "Not on file"],
               ["Address", client.address || "N/A"], ["Phone", client.phone || "N/A"],
               ["Emergency Contact", client.emergency_contact_name || "N/A"], ["Emergency Phone", client.emergency_contact_phone || "N/A"],
               ["Physician", client.physician_name || "N/A"], ["Physician Phone", client.physician_phone || "N/A"],
@@ -16264,9 +16267,6 @@
                   </FormField>
                 </FormRow>
                 <FormRow>
-                  <FormField label="SSN (Last 4 digits)" half>
-                    <input style={fieldStyle} value={form.ssn_last4} onChange={e => set("ssn_last4", e.target.value.replace(/\D/g, "").slice(0, 4))} placeholder="XXXX" maxLength={4} />
-                  </FormField>
                   <FormField label="Primary Language" half>
                     <input style={fieldStyle} value={form.primary_language} onChange={e => set("primary_language", e.target.value)} placeholder="English" />
                   </FormField>
@@ -18508,6 +18508,370 @@
     // CLIENT PROFILE PAGE
     // ═══════════════════════════════════════════════════════════════
 
+    // ═══════════════════════════════════════════════════════════════
+    // v20.0.42 — SOCIAL SECURITY NUMBERS (encrypted in Supabase Vault)
+    // The full number never sits in Provly's tables or in this page's saved state: the server keeps it
+    // in Vault and only the last four outside. Entering it never shows it back. Viewing it takes a role
+    // allowed to see SSNs, a written reason and a fresh authenticator code; it shows for 30 seconds,
+    // then it's cleared. Every view, and every refused attempt, is in an access log nobody can change.
+    // ═══════════════════════════════════════════════════════════════
+    const ssnDigits = (v) => String(v || "").replace(/\D/g, "").slice(0, 9);
+    const ssnValid = (d) => /^\d{9}$/.test(d) && !["000", "666"].includes(d.slice(0, 3)) && d[0] !== "9" && d.slice(3, 5) !== "00" && d.slice(5) !== "0000";
+    const ssnRpcMissing = (e) => e?.code === "PGRST202" || e?.code === "42883" || /could not find the function|schema cache/i.test(e?.message || "");
+    const ssnActionLabel = { enter: "Entered", replace: "Replaced", reveal: "Viewed", denied: "Refused", blocked: "Blocked (too many)", delete: "Deleted", purge: "Deleted (90 days after PBA)", roles_changed: "Changed who can see SSNs" };
+
+    // A fresh code from the authenticator app; the server accepts it for 5 minutes.
+    function FreshCodeStep({ onVerified, busyOuter }) {
+      const [factors, setFactors] = useState(null);
+      const [factorId, setFactorId] = useState("");
+      const [code, setCode] = useState("");
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState(null);
+      useEffect(() => {
+        let alive = true;
+        supabase.auth.mfa.listFactors().then(({ data, error: e }) => {
+          if (!alive) return;
+          if (e) { setError(e.message); setFactors([]); return; }
+          const f = (data?.totp || []).filter(x => x.status === "verified");
+          setFactors(f); setFactorId(f[0]?.id || "");
+        });
+        return () => { alive = false; };
+      }, []);
+      const verify = async () => {
+        if (mfaClean(code).length !== 6) return setError("Enter the 6-digit code from your authenticator app.");
+        setBusy(true); setError(null);
+        try {
+          const { error: e } = await supabase.auth.mfa.challengeAndVerify({ factorId, code: mfaClean(code) });
+          if (e) throw e;
+          setCode("");
+          await onVerified();
+        } catch (e) {
+          setError(mfaError(e));
+        } finally {
+          setBusy(false);
+        }
+      };
+      if (factors === null) return <div style={{ fontSize: 12, color: CB.textLight }}>Loading{"\u2026"}</div>;
+      if (factors.length === 0) return <div style={{ fontSize: 12, color: CB.red }}>{error || "Set up two-factor sign-in first — sign out and back in to set it up."}</div>;
+      return (
+        <>
+          {factors.length > 1 && (
+            <FormField label="Authenticator">
+              <select style={fieldStyle} value={factorId} onChange={e => setFactorId(e.target.value)}>
+                {factors.map(f => <option key={f.id} value={f.id}>{f.friendly_name || "Authenticator"}</option>)}
+              </select>
+            </FormField>
+          )}
+          <FormField label="A fresh 6-digit code from your authenticator app" required>
+            <input style={mfaCodeStyle} inputMode="numeric" autoComplete="one-time-code" autoFocus value={code}
+              onChange={e => setCode(mfaClean(e.target.value))} onKeyDown={e => { if (e.key === "Enter") verify(); }} placeholder="000000" />
+          </FormField>
+          {error && <div style={{ fontSize: 12, color: CB.red, margin: "6px 0 10px", lineHeight: 1.5 }}>{error}</div>}
+          <PrimaryButton onClick={verify} loading={busy || busyOuter} color={CB.navy}>Verify</PrimaryButton>
+        </>
+      );
+    }
+
+    // Enter or replace: typed twice, never shown back
+    function SsnEntryModal({ clientId, replacing, onClose, onSaved }) {
+      const { addToast } = useToast();
+      const [a, setA] = useState("");
+      const [b, setB] = useState("");
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState(null);
+      useEffect(() => () => { setA(""); setB(""); }, []);
+      const save = async () => {
+        const d = ssnDigits(a);
+        if (d !== ssnDigits(b)) return setError("The two entries don't match.");
+        if (!ssnValid(d)) return setError("That isn't a valid Social Security number — check the digits.");
+        setBusy(true); setError(null);
+        const { data, error: e } = await supabase.rpc("ssn_set", { p_person: clientId, p_ssn: d });
+        setBusy(false);
+        if (e) return setError(e.message);
+        if (!data?.ok) return setError(data?.error || "Couldn't save the number");
+        setA(""); setB("");
+        addToast(`Social Security number saved — ending ${data.last4}`, "success");
+        onSaved();
+        onClose();
+      };
+      const box = { ...fieldStyle, letterSpacing: 3, fontFamily: "monospace" };
+      return (
+        <Modal open onClose={onClose} title={replacing ? "Replace Social Security number" : "Enter Social Security number"}
+          subtitle="Encrypted as soon as it's saved. After that only the last four show; the full number takes a role allowed to see SSNs, a reason and a fresh code.">
+          <FormField label="Social Security number" required>
+            <input type="password" style={box} inputMode="numeric" autoComplete="off" value={a} onChange={e => setA(ssnDigits(e.target.value))} placeholder="9 digits" />
+          </FormField>
+          <FormField label="Type it again" required>
+            <input type="password" style={box} inputMode="numeric" autoComplete="off" value={b} onChange={e => setB(ssnDigits(e.target.value))} placeholder="9 digits" />
+          </FormField>
+          {error && <div style={{ fontSize: 12, color: CB.red, marginBottom: 10 }}>{error}</div>}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+            <SecondaryButton onClick={onClose}>Cancel</SecondaryButton>
+            <PrimaryButton onClick={save} loading={busy}>Save</PrimaryButton>
+          </div>
+        </Modal>
+      );
+    }
+
+    // View (30 seconds) or delete: a reason, then a fresh code, then the server decides
+    function SsnActionModal({ clientId, action, onClose, onChanged }) {
+      const [step, setStep] = useState("reason");
+      const [reason, setReason] = useState("");
+      const [ssn, setSsn] = useState(null);
+      const [left, setLeft] = useState(30);
+      const expiresAt = useRef(0);                                    // r1 — a fixed time, not a tick count
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState(null);
+      useEffect(() => () => setSsn(null), []);                       // cleared when the dialog closes
+      // r1 — the number is cleared 30 seconds after it appeared by the clock (a sleeping tab can't stretch
+      // that), and at once whenever the page is hidden: another tab, the screen locking, the laptop closing
+      useEffect(() => {
+        if (step !== "shown") return;
+        const tick = () => setLeft(Math.max(Math.ceil((expiresAt.current - Date.now()) / 1000), 0));
+        const hide = () => { if (document.visibilityState === "hidden") setLeft(0); };
+        tick();
+        const t = setInterval(tick, 250);
+        document.addEventListener("visibilitychange", hide);
+        window.addEventListener("pagehide", hide);
+        window.addEventListener("focus", tick);
+        return () => { clearInterval(t); document.removeEventListener("visibilitychange", hide); window.removeEventListener("pagehide", hide); window.removeEventListener("focus", tick); };
+      }, [step]);
+      useEffect(() => { if (step === "shown" && left === 0) { setSsn(null); onClose(); } }, [step, left]);
+      const callServer = async () => {
+        setBusy(true); setError(null);
+        const { data, error: e } = await supabase.rpc(action === "reveal" ? "ssn_reveal" : "ssn_delete", { p_person: clientId, p_reason: reason.trim() });
+        setBusy(false);
+        if (e) return setError(e.message);
+        if (!data?.ok) { setError(data?.error || "Not permitted"); if (!data?.needs_code) setStep("reason"); return; }
+        if (action === "reveal") { expiresAt.current = Date.now() + 30000; setLeft(30); setSsn(data.ssn); setStep("shown"); }
+        else { onChanged(); onClose(); }
+      };
+      const title = action === "reveal" ? "View Social Security number" : "Delete Social Security number";
+      return (
+        <Modal open onClose={() => { setSsn(null); onClose(); }} title={title}
+          subtitle={action === "reveal" ? "This view is recorded in the access log with your reason." : "The number is removed from encrypted storage for good; the last four stay for reference."}>
+          {step === "reason" && (
+            <>
+              <FormField label={action === "reveal" ? "Why do you need the full number?" : "Why is it being deleted?"} required>
+                <input style={fieldStyle} value={reason} onChange={e => setReason(e.target.value)} autoFocus
+                  placeholder={action === "reveal" ? "e.g. SSA-11 for representative payee application" : "e.g. Person no longer served"} />
+              </FormField>
+              {error && <div style={{ fontSize: 12, color: CB.red, marginBottom: 10 }}>{error}</div>}
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+                <SecondaryButton onClick={onClose}>Cancel</SecondaryButton>
+                <PrimaryButton onClick={() => reason.trim().length < 3 ? setError("Give a reason (a few words).") : (setError(null), setStep("code"))}>Continue</PrimaryButton>
+              </div>
+            </>
+          )}
+          {step === "code" && (
+            <>
+              {error && <div style={{ fontSize: 12, color: CB.red, marginBottom: 10 }}>{error}</div>}
+              <FreshCodeStep onVerified={callServer} busyOuter={busy} />
+            </>
+          )}
+          {step === "shown" && ssn && (
+            <div style={{ textAlign: "center", padding: "10px 0" }}>
+              <div style={{ fontSize: 30, fontWeight: 800, letterSpacing: 4, fontFamily: "monospace", color: CB.text, userSelect: "all" }}>{ssn}</div>
+              <div style={{ fontSize: 12, color: CB.textMid, marginTop: 8 }}>Hidden in {left} second{left === 1 ? "" : "s"}</div>
+              <div style={{ marginTop: 14 }}><SecondaryButton onClick={() => { setSsn(null); onClose(); }}>Hide now</SecondaryButton></div>
+            </div>
+          )}
+        </Modal>
+      );
+    }
+
+    // The Person's profile: last four, and what this login may do
+    function PersonSsnCard({ clientId }) {
+      const [st, setSt] = useState(null);
+      const [state, setState] = useState("loading");
+      const [err, setErr] = useState(null);
+      const [mode, setMode] = useState(null);
+      const seq = useRef(0);
+      const load = useCallback(async () => {
+        const mine = ++seq.current;
+        const { data, error } = await supabase.rpc("ssn_status", { p_person: clientId });
+        if (mine !== seq.current) return;                           // another Person opened meanwhile
+        if (error) { if (ssnRpcMissing(error)) { setState("hidden"); return; } setErr(error.message); setState("error"); return; }
+        if (!data?.ok) { setState("hidden"); return; }
+        setSt(data); setState("ok");
+      }, [clientId]);
+      useEffect(() => { setSt(null); setState("loading"); setMode(null); load(); }, [load]);
+      if (state === "hidden" || state === "loading") return null;
+      const btn = { border: `1px solid ${CB.border}`, background: CB.white, borderRadius: 8, padding: "4px 10px", fontSize: 12, cursor: "pointer", fontFamily: "inherit" };
+      return (
+        <div style={{ background: CB.white, border: `1px solid ${CB.border}`, borderRadius: 12, padding: "12px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          {icons.shield({ size: 16, color: CB.navy })}
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: CB.textLight, textTransform: "uppercase", letterSpacing: 0.5 }}>Social Security number</div>
+            {state === "error" ? (
+              <div style={{ fontSize: 12, color: CB.red, marginTop: 2 }}>Couldn{"\u2019"}t load ({err}). <button style={btn} onClick={load}>Retry</button></div>
+            ) : (
+              <div style={{ fontSize: 14, fontWeight: 600, color: CB.text, marginTop: 2, fontFamily: "monospace", letterSpacing: 1 }}>
+                {st.on_file ? `•••-••-${st.last4}` : st.deleted_at ? <span style={{ fontFamily: "inherit", color: CB.textMid, fontWeight: 500 }}>Deleted {new Date(st.deleted_at).toLocaleDateString()}{st.last4 ? ` (ended ${st.last4})` : ""}</span>
+                  : <span style={{ fontFamily: "inherit", color: CB.textMid, fontWeight: 500 }}>Not on file</span>}
+              </div>
+            )}
+          </div>
+          {state === "ok" && st.can_enter && <button style={btn} onClick={() => setMode("enter")}>{st.on_file ? "Replace" : "Enter"}</button>}
+          {state === "ok" && st.can_reveal && st.on_file && <button style={btn} onClick={() => setMode("reveal")}>View</button>}
+          {state === "ok" && st.can_reveal && st.on_file && <button style={{ ...btn, color: CB.red }} onClick={() => setMode("delete")}>Delete</button>}
+          {mode === "enter" && <SsnEntryModal clientId={clientId} replacing={st.on_file} onClose={() => setMode(null)} onSaved={load} />}
+          {(mode === "reveal" || mode === "delete") && <SsnActionModal clientId={clientId} action={mode} onClose={() => setMode(null)} onChanged={load} />}
+        </div>
+      );
+    }
+
+    // Settings → Social Security numbers: who may see them (the Owner decides) and the access log
+    function SsnSettings() {
+      const { addToast } = useToast();
+      const { role } = useAuth();
+      const [roles, setRoles] = useState(null);
+      const [draft, setDraft] = useState([]);
+      const [saving, setSaving] = useState(false);
+      const [savingStep, setSavingStep] = useState(false);
+      const [rolesErr, setRolesErr] = useState(null);
+      const [month, setMonth] = useState(tcThisMonth());
+      const [rows, setRows] = useState([]);
+      const [logState, setLogState] = useState("loading");
+      const [logErr, setLogErr] = useState(null);
+      const [names, setNames] = useState({ staff: {}, people: {} });
+      const seq = useRef(0);
+      const loadRoles = useCallback(async () => {
+        const { data, error } = await supabase.from("ssn_viewer_roles").select("role");
+        if (error) { setRolesErr(ssnRpcMissing(error) || /does not exist/i.test(error.message || "") ? "Available once the v20.0.42 SQL has run." : error.message); return; }
+        const r = (data || []).map(x => x.role).sort();
+        setRoles(r); setDraft(r); setRolesErr(null);
+      }, []);
+      useEffect(() => { loadRoles(); }, [loadRoles]);
+      const isViewer = (roles || []).includes(role);
+      const loadLog = useCallback(async () => {
+        if (!isViewer) return;
+        const mine = ++seq.current;
+        setLogState("loading");
+        const [y, mo] = month.split("-").map(Number);
+        const fromIso = tcMonthStartIso(y, mo), toIso = mo === 12 ? tcMonthStartIso(y + 1, 1) : tcMonthStartIso(y, mo + 1);
+        const out = [];
+        for (let from = 0; ; from += 1000) {
+          const r = await supabase.from("ssn_access_log").select("id, person_id, actor_staff_id, actor_role, action, ok, reason, detail, at")
+            .gte("at", fromIso).lt("at", toIso).order("at", { ascending: false }).order("id").range(from, from + 999);
+          if (mine !== seq.current) return;
+          if (r.error) { setLogErr(r.error.message); setLogState("error"); return; }
+          out.push(...(r.data || []));
+          if (!r.data || r.data.length < 1000) break;
+        }
+        const staffIds = [...new Set(out.map(x => x.actor_staff_id).filter(Boolean))];
+        const personIds = [...new Set(out.map(x => x.person_id).filter(Boolean))];
+        const staff = {}, people = {};
+        for (let i = 0; i < staffIds.length; i += 100) {
+          const s = await supabase.from("staff_directory_v").select("id, first_name, last_name").in("id", staffIds.slice(i, i + 100));
+          if (mine !== seq.current) return;
+          (s.data || []).forEach(x => { staff[x.id] = `${x.first_name} ${x.last_name}`; });
+        }
+        for (let i = 0; i < personIds.length; i += 100) {
+          const p = await supabase.from("persons").select("id, first_name, last_name").in("id", personIds.slice(i, i + 100));
+          if (mine !== seq.current) return;
+          (p.data || []).forEach(x => { people[x.id] = `${x.first_name} ${x.last_name}`; });
+        }
+        setRows(out); setNames({ staff, people }); setLogState("ok"); setLogErr(null);
+      }, [month, isViewer]);
+      useEffect(() => { setRows([]); loadLog(); }, [loadLog]);
+
+      const saveRoles = async () => {
+        setSaving(true);
+        const { data, error } = await supabase.rpc("ssn_viewer_roles_set", { p_roles: draft });
+        setSaving(false);
+        if (error) return addToast(error.message, "error");
+        if (!data?.ok) return addToast(data?.error || "Couldn't save", "error");
+        addToast("Saved — those roles also need two-factor at their next sign-in", "success");
+        setSavingStep(false);
+        loadRoles(); loadLog();
+      };
+
+      const downloadCsv = () => {
+        const esc = (v) => {
+          let t = String(v == null ? "" : v);
+          if (/^[=+\-@\t\r]/.test(t) && !/^-?\d+(\.\d+)?$/.test(t)) t = "'" + t;
+          return /[",\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+        };
+        const head = ["When (Mountain)", "Who", "Role", "Action", "Allowed", "Person", "Reason", "Detail"];
+        const body = rows.map(r => [tcCsvTime(r.at), names.staff[r.actor_staff_id] || (r.actor_staff_id ? "" : "Provly (automatic)"), r.actor_role || "",
+          ssnActionLabel[r.action] || r.action, r.ok ? "Yes" : "No", names.people[r.person_id] || "", r.reason || "", r.detail || ""]);
+        const csv = [head, ...body].map(x => x.map(esc).join(",")).join("\n");
+        const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+        const el = document.createElement("a"); el.href = url; el.download = `ssn-access-${month}.csv`;
+        document.body.appendChild(el); el.click(); document.body.removeChild(el);
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+      };
+
+      const card = { background: CB.white, border: `1px solid ${CB.border}`, borderRadius: 12, padding: "16px 20px", marginBottom: 16, boxShadow: CB.cardShadow };
+      const roleLabel = (v) => (STAFF_ROLES.find(r => r.value === v) || {}).label || v;
+      const changed = roles && (draft.slice().sort().join(",") !== roles.join(","));
+      return (
+        <div>
+          <div style={card}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: CB.text, marginBottom: 4 }}>Who can see full Social Security numbers</div>
+            <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 12 }}>Everyone else sees only the last four. These roles also sign in with two-factor. Only the Owner can change this list.</div>
+            {rolesErr ? <div style={{ fontSize: 12, color: CB.textLight }}>{rolesErr}</div> : !roles ? <Spinner size={18} /> : (
+              <>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 12 }}>
+                  {STAFF_ROLES.map(r => {
+                    const on = draft.includes(r.value);
+                    const locked = r.value === "owner" || role !== "owner";
+                    return (
+                      <label key={r.value} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, color: locked && !on ? CB.textLight : CB.text, cursor: locked ? "default" : "pointer" }}>
+                        <input type="checkbox" checked={on} disabled={locked}
+                          onChange={() => setDraft(d => on ? d.filter(x => x !== r.value) : [...d, r.value])} /> {r.label}
+                      </label>
+                    );
+                  })}
+                </div>
+                {role === "owner" && changed && !savingStep && <PrimaryButton onClick={() => setSavingStep(true)}>Save changes</PrimaryButton>}
+                {role === "owner" && savingStep && (
+                  <div style={{ maxWidth: 360 }}>
+                    <FreshCodeStep onVerified={saveRoles} busyOuter={saving} />
+                    <div style={{ marginTop: 8 }}><SecondaryButton onClick={() => { setSavingStep(false); setDraft(roles); }}>Cancel</SecondaryButton></div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          <div style={card}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: CB.text }}>Access log</div>
+                <div style={{ fontSize: 12, color: CB.textMid }}>Every number entered, viewed or deleted, and every refused attempt. It can't be changed or deleted.</div>
+              </div>
+              {isViewer && (
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <input type="month" value={month} onChange={e => e.target.value && setMonth(e.target.value)} style={{ ...fieldStyle, padding: "5px 8px", width: "auto", fontSize: 12 }} />
+                  <button disabled={logState !== "ok" || rows.length === 0} onClick={downloadCsv}
+                    style={{ border: `1px solid ${CB.border}`, background: CB.white, borderRadius: 8, padding: "5px 10px", fontSize: 12, cursor: "pointer", opacity: (logState !== "ok" || rows.length === 0) ? 0.5 : 1 }}>Download CSV</button>
+                </div>
+              )}
+            </div>
+            {!isViewer ? <div style={{ fontSize: 12, color: CB.textLight }}>Only the roles above can see the access log.</div> : (
+              <>
+                {logState === "loading" && rows.length === 0 && <div style={{ fontSize: 12, color: CB.textLight }}>Loading{"\u2026"}</div>}
+                {logState === "error" && <div style={{ fontSize: 12, color: CB.red }}>Couldn{"\u2019"}t load the log ({logErr}). <button onClick={loadLog} style={{ border: `1px solid ${CB.border}`, background: CB.white, borderRadius: 8, padding: "2px 10px", fontSize: 12, cursor: "pointer" }}>Retry</button></div>}
+                {logState === "ok" && rows.length === 0 && <div style={{ fontSize: 12, color: CB.textLight }}>Nothing this month.</div>}
+                {rows.map(r => (
+                  <div key={r.id} style={{ display: "flex", gap: 10, padding: "6px 0", borderBottom: `1px solid ${CB.border}`, fontSize: 12, flexWrap: "wrap",
+                                           color: r.action === "blocked" ? CB.red : !r.ok ? CB.amber : CB.text }}>
+                    <span style={{ minWidth: 130, color: CB.textMid }}>{tcFmt(r.at)}</span>
+                    <span style={{ minWidth: 130, fontWeight: 600 }}>{names.staff[r.actor_staff_id] || (r.actor_staff_id ? "—" : "Provly (automatic)")}</span>
+                    <span style={{ minWidth: 150 }}>{ssnActionLabel[r.action] || r.action}</span>
+                    <span style={{ minWidth: 120 }}>{names.people[r.person_id] || ""}</span>
+                    <span style={{ flex: 1, color: CB.textMid }}>{[r.reason, r.detail].filter(Boolean).join(" · ")}</span>
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+        </div>
+      );
+    }
+
     function ClientOverviewTab({ client }) {
       const fmtDate = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString() : null;
       const age = client.date_of_birth ? Math.floor((new Date() - new Date(client.date_of_birth + "T00:00:00")) / (365.25 * 86400000)) : null;
@@ -18552,6 +18916,7 @@
 
       return (
         <div>
+          <PersonSsnCard clientId={client.id} />{/* v20.0.42 */}
           <ProfileSection title="Identity">
             <ProfileField label="Full Name" value={`${client.first_name} ${client.last_name}`} />
             <ProfileField label="Date of Birth" value={fmtDate(client.date_of_birth)} />
@@ -23079,6 +23444,7 @@
         { key: "org",         label: "Org Structure",          icon: icons.dashboard, desc: "Programs, sites, and reporting hierarchy" },
         { key: "branding",    label: "Branding",               icon: icons.image    || icons.fileText, desc: "Logo for PDFs and audit forms" },
         { key: "enforcement", label: "Compliance Enforcement", icon: icons.shield,    desc: "Role permissions and training rules" },
+        { key: "ssn",         label: "Social Security numbers", icon: icons.shield,   desc: "Who can see them, and the access log" }, // v20.0.42
         ...(permissions.viewSubscription ? [{ key: "subscription", label: "Subscription", icon: icons.dollar, desc: "Plan, billing, and usage" }] : []),
       ];
 
@@ -23136,6 +23502,7 @@
               {tab === "org" && <OrgUnitsPageEmbedded />}
               {tab === "branding" && <BrandingSettings />}
               {tab === "enforcement" && <EnforcementSettings />}
+              {tab === "ssn" && <SsnSettings />}
               {tab === "subscription" && permissions.viewSubscription && <SubscriptionSettings />}
             </div>
           </div>
