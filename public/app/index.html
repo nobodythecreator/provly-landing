@@ -40,6 +40,8 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.43 r1 (Greptile r1): each opening of an ID document carries its own number from the moment its dialog opens, so a code verified for a dialog that was closed can never open a different document; the file list loads whether each file is locked, so locked proof shows "ID document". Server-side: storage serves a PBA file only once it's registered (an upload in progress is readable only by its uploader). -->
+  <!-- v20.0.43 (ID documents): uploading an SSA notice or payee proof asks whether it shows a full Social Security number; if it does, the file is locked like the SSN itself — it opens only for the roles allowed to see SSNs, with a reason and a fresh authenticator code (storage refuses it otherwise), and every opening is in the SSN access log. Everyone else still sees the file is there. A file already on record can be locked with "Lock as ID document"; only an SSN role can unlock one. -->
   <!-- v20.0.42 r1 (Greptile r1): a viewed number is cleared 30 seconds after it appeared by the clock, not by counting timer ticks, and at once if the page is hidden (another tab, the screen locks, the laptop sleeps). Server-side: deleting requires membership of the Person's organization; SSN status and actions require being able to see the Person; views are serialized per person viewing; refused deletions are logged. -->
   <!-- v20.0.42 (encrypted SSN): a Person's Social Security number is stored encrypted in Supabase Vault — the Overview shows only the last four; the PBA Manager and the roles allowed to see SSNs can enter or replace it (typed twice, never shown back); viewing it takes one of those roles, a written reason and a fresh authenticator code, and it shows for 30 seconds; every entry, view, deletion and refused attempt goes into an access log nobody can change (Settings → Social Security numbers, by month, with a CSV); the Owner decides which roles may see SSNs, and those roles sign in with two-factor; numbers are deleted 90 days after PBA ends. The never-saved last-four box is gone from the client form; the face sheet shows the last four. -->
   <!-- v20.0.41 r2 (Greptile r2): a refresh after clock-in, clock-out or a fix always loads the month on screen now, never the one that was selected when the button was pressed. -->
@@ -1957,7 +1959,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.42</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.43</span>
               </div>
             </button>
             {isMobile && (
@@ -20462,7 +20464,7 @@
       return Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2, "0")).join("");
     }
     // upload to {org}/{person}/{folder}/{uuid}.{ext}, then register it (the database checks the object exists)
-    async function uploadPbaFile({ orgId, personId, purpose, file }) {
+    async function uploadPbaFile({ orgId, personId, purpose, file, identity = false }) {
       const id = newId();
       const folder = purpose === "receipt" ? "receipts" : purpose === "signature" ? "signatures" : purpose === "statement" ? "statements" : "documents";
       const fromName = file.name && file.name.includes(".") ? file.name.split(".").pop() : "";
@@ -20471,16 +20473,104 @@
       const sha = await pbaSha256(file);
       const { error: upErr } = await supabase.storage.from("pba").upload(path, file, { upsert: false, contentType: file.type || undefined });
       if (upErr) throw new Error(upErr.message || "Upload failed");
-      const { error } = await supabase.rpc("pba_register_file", {
+      // v20.0.43 — an ID document is registered already locked, in one step
+      const { error } = await supabase.rpc(identity ? "pba_register_identity_file" : "pba_register_file", {
         p_id: id, p_person: personId, p_purpose: purpose, p_path: path, p_sha256: sha, p_mime: file.type || null, p_bytes: file.size || null,
       });
       if (error) throw new Error(error.message);
       return { id, path, sha };
     }
+    // v20.0.43 — ID documents: asked at upload, opened only through the locked flow
+    const PBA_IDENTITY_OPEN_EVENT = "provly-pba-identity-open";
+    const PBA_IDENTITY_ASK_EVENT = "provly-pba-identity-ask";
+    // Does this upload show a full SSN? true / false, or null when the person cancels the upload
+    const pbaAskIdentity = () => new Promise(resolve => window.dispatchEvent(new CustomEvent(PBA_IDENTITY_ASK_EVENT, { detail: { resolve } })));
     async function openPbaFile(path, addToast) {
+      const meta = await supabase.from("pba_files").select("id, is_identity").eq("storage_path", path).maybeSingle();
+      if (!meta.error && meta.data?.is_identity) {
+        window.dispatchEvent(new CustomEvent(PBA_IDENTITY_OPEN_EVENT, { detail: { fileId: meta.data.id } }));
+        return;
+      }
       const { data, error } = await supabase.storage.from("pba").createSignedUrl(path, 300);
       if (error || !data?.signedUrl) return addToast(error?.message || "Couldn't open the file", "error");
       window.open(data.signedUrl, "_blank", "noopener");
+    }
+
+    function PbaIdentityHost() {
+      const [ask, setAsk] = useState(null);          // { resolve }
+      const [open, setOpen] = useState(null);        // { fileId, step, reason, url, error, busy }
+      const seq = useRef(0);
+      useEffect(() => {
+        const onAsk = (e) => setAsk(cur => { cur?.resolve(null); return { resolve: e.detail.resolve }; });
+        // r1 — each opening is numbered when its dialog opens; everything later checks that number
+        const onOpen = (e) => { const n = ++seq.current; setOpen({ seq: n, fileId: e.detail.fileId, step: "reason", reason: "", url: null, error: null, busy: false }); };
+        window.addEventListener(PBA_IDENTITY_ASK_EVENT, onAsk);
+        window.addEventListener(PBA_IDENTITY_OPEN_EVENT, onOpen);
+        return () => { window.removeEventListener(PBA_IDENTITY_ASK_EVENT, onAsk); window.removeEventListener(PBA_IDENTITY_OPEN_EVENT, onOpen); };
+      }, []);
+      const answer = (v) => { ask?.resolve(v); setAsk(null); };
+      // r1 — called with the opening's own number, file and reason (bound when its dialog rendered): a code
+      // verified for a dialog that has since closed is turned away before anything is asked of the server
+      const grant = async (mine, fileId, reasonText) => {
+        if (mine !== seq.current) return;
+        const reason = String(reasonText || "").trim();
+        const same = (o) => o && o.seq === mine;
+        setOpen(o => same(o) ? { ...o, busy: true, error: null } : o);
+        const { data, error } = await supabase.rpc("pba_identity_open", { p_file: fileId, p_reason: reason });
+        if (mine !== seq.current) return;
+        if (error || !data?.ok) {
+          setOpen(o => same(o) ? { ...o, busy: false, error: error?.message || data?.error || "Not permitted", step: data?.needs_code ? "code" : "reason" } : o);
+          return;
+        }
+        const su = await supabase.storage.from("pba").createSignedUrl(data.path, 60);
+        if (mine !== seq.current) return;
+        if (su.error || !su.data?.signedUrl) { setOpen(o => same(o) ? { ...o, busy: false, error: su.error?.message || "Couldn't open the file" } : o); return; }
+        setOpen(o => same(o) ? { ...o, busy: false, step: "ready", url: su.data.signedUrl } : o);
+      };
+      const closeOpen = () => { seq.current++; setOpen(null); };
+      return (
+        <>
+          {ask && (
+            <Modal open onClose={() => answer(null)} title="Does this file show a full Social Security number?"
+              subtitle="An SSA letter or a copy of the card usually does. If it does, it's locked like the SSN: only the roles allowed to see SSNs can open it, with a reason and a fresh code, and every opening is logged.">
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, flexWrap: "wrap" }}>
+                <SecondaryButton onClick={() => answer(null)}>Cancel upload</SecondaryButton>
+                <SecondaryButton onClick={() => answer(false)}>No</SecondaryButton>
+                <PrimaryButton onClick={() => answer(true)}>{icons.shield({ size: 13, color: CB.white })} Yes — lock it</PrimaryButton>
+              </div>
+            </Modal>
+          )}
+          {open && (
+            <Modal open onClose={closeOpen} title="Open ID document" subtitle="This file shows a Social Security number. Opening it is recorded in the access log with your reason.">
+              {open.step === "reason" && (
+                <>
+                  <FormField label="Why do you need to open it?" required>
+                    <input style={fieldStyle} autoFocus value={open.reason} onChange={e => { const v = e.target.value; setOpen(o => o && { ...o, reason: v }); }}
+                      placeholder="e.g. checking the SSA award amount" />
+                  </FormField>
+                  {open.error && <div style={{ fontSize: 12, color: CB.red, marginBottom: 10 }}>{open.error}</div>}
+                  <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+                    <SecondaryButton onClick={closeOpen}>Cancel</SecondaryButton>
+                    <PrimaryButton onClick={() => open.reason.trim().length < 3 ? setOpen(o => o && { ...o, error: "Give a reason (a few words)." }) : setOpen(o => o && { ...o, error: null, step: "code" })}>Continue</PrimaryButton>
+                  </div>
+                </>
+              )}
+              {open.step === "code" && (
+                <>
+                  {open.error && <div style={{ fontSize: 12, color: CB.red, marginBottom: 10 }}>{open.error}</div>}
+                  <FreshCodeStep key={open.seq} onVerified={((n, f, r) => () => grant(n, f, r))(open.seq, open.fileId, open.reason)} busyOuter={open.busy} />
+                </>
+              )}
+              {open.step === "ready" && (
+                <div style={{ textAlign: "center", padding: "6px 0" }}>
+                  <div style={{ fontSize: 13, color: CB.textMid, marginBottom: 12 }}>The link works for one minute.</div>
+                  <PrimaryButton onClick={() => { window.open(open.url, "_blank", "noopener"); closeOpen(); }}>{icons.eye({ size: 13, color: CB.white })} Open the document</PrimaryButton>
+                </div>
+              )}
+            </Modal>
+          )}
+        </>
+      );
     }
 
     // Decision 7 — the Person or guardian signs on screen (finger or mouse)
@@ -21946,7 +22036,7 @@
             q(supabase.from("pba_transactions").select("*, pba_receipts(id, file_id)").eq("person_id", clientId).order("entry_date", { ascending: false }).order("created_at", { ascending: false }).limit(2000)),
             q(supabase.from("pba_lost_receipt_affidavits").select("*").eq("person_id", clientId)),
             q(supabase.from("pba_purchase_requests").select("*").eq("person_id", clientId).order("requested_at", { ascending: false }).limit(200)),
-            q(supabase.from("pba_files").select("id, purpose, storage_path, uploaded_at").eq("person_id", clientId)),
+            q(supabase.from("pba_files").select("id, purpose, storage_path, uploaded_at, is_identity").eq("person_id", clientId)), // r1 — whether each file is locked
             q(supabase.rpc("pba_flags", { p_person: clientId })),
             q(supabase.from("staff_directory_v").select("id, first_name, last_name, role").order("last_name")),
             // v20.0.39 — sealed months, back pay and reopened months (empty if the SQL hasn't run)
@@ -22026,10 +22116,10 @@
       const approvedReqs = d.reqs.filter(q => q.status === "approved" || (modal?.kind === "txn" && !modal.isNew && q.id === modal.f?.request_id)); // r1
 
       // ── upload helper bound to this Person ───────────────────────
-      const upload = async (purpose, file) => {
+      const upload = async (purpose, file, identity = false) => {   // v20.0.43 — identity: register it locked
         if (!file) return null;
         setBusy(true);
-        try { return await uploadPbaFile({ orgId, personId: clientId, purpose, file }); }
+        try { return await uploadPbaFile({ orgId, personId: clientId, purpose, file, identity }); }
         catch (err) { addToast(err.message || "Upload failed", "error"); return null; }
         finally { setBusy(false); }
       };
@@ -22051,6 +22141,7 @@
 
       return (
         <div>
+          <PbaIdentityHost />{/* v20.0.43 */}
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
             <h3 style={{ fontSize: 17, fontWeight: 800, color: CB.navy }}>Personal Budget Assistance</h3>
             <Badge text={status === "enrolled" ? "Enrolled" : status === "ended" ? "Ended" : "Pending enrollment"} color={status === "enrolled" ? CB.green : status === "ended" ? CB.textLight : CB.red} />
@@ -22079,12 +22170,29 @@
                   <button onClick={() => openPbaFile(proof.storage_path, addToast)} style={{ background: "none", border: "none", color: CB.blue, cursor: "pointer", fontSize: 14, padding: 0, fontFamily: "inherit" }}>
                     {icons.eye({ size: 13 })} View proof (filed {new Date(proof.uploaded_at).toLocaleDateString()})
                   </button>
-                ) : (isOffice || isManager) ? (
+                ) : null}
+                {proof && (proof.is_identity ? (
+                  <span style={{ fontSize: 12, color: CB.navy, fontWeight: 600, marginLeft: 8 }}>{icons.shield({ size: 12, color: CB.navy })} ID document</span>
+                ) : (
+                  // v20.0.43 — lock a file already on record (only an SSN role can unlock it later)
+                  <button disabled={busy} onClick={async () => {
+                    const { data, error } = await supabase.rpc("pba_mark_identity", { p_file: proof.id, p_on: true, p_reason: null });
+                    if (error || !data?.ok) return addToast(error?.message || data?.error || "Couldn't lock it", "error");
+                    addToast("Locked as an ID document", "success"); load();
+                  }} style={{ background: "none", border: "none", color: CB.textMid, cursor: "pointer", fontSize: 12, padding: 0, marginLeft: 10, fontFamily: "inherit" }}>
+                    Lock as ID document
+                  </button>
+                ))}
+                {!proof && ((isOffice || isManager) ? (
                   <input type="file" accept="application/pdf,image/*" disabled={busy} onChange={async ev => {
-                    const f = await upload("fiduciary_proof", ev.target.files?.[0]); ev.target.value = "";
+                    const chosen = ev.target.files?.[0]; ev.target.value = "";
+                    if (!chosen) return;
+                    const idDoc = await pbaAskIdentity();                     // v20.0.43 — does it show a full SSN?
+                    if (idDoc === null) return;
+                    const f = await upload("fiduciary_proof", chosen, idDoc);
                     if (f) run("pba_set_enrollment", { p_person: clientId, p_fiduciary_type: null, p_proof_file: f.id }, "Proof filed");
                   }} />
-                ) : <div style={{ fontSize: 14, color: CB.red }}>Not on file</div>}
+                ) : <div style={{ fontSize: 14, color: CB.red }}>Not on file</div>)}
               </div>
             </div>
 
@@ -22218,7 +22326,11 @@
                                   <label style={{ color: CB.blue, cursor: "pointer", fontWeight: 600, marginLeft: 6 }}>
                                     Upload notice
                                     <input type="file" accept="image/*,application/pdf" style={{ display: "none" }} disabled={busy} onChange={async ev => {
-                                      const f = await upload("document", ev.target.files?.[0]); ev.target.value = "";
+                                      const chosen = ev.target.files?.[0]; ev.target.value = "";
+                                      if (!chosen) return;
+                                      const idDoc = await pbaAskIdentity();           // v20.0.43 — SSA notices often show the full number
+                                      if (idDoc === null) return;
+                                      const f = await upload("document", chosen, idDoc);
                                       if (f) run("pba_back_pay_notice", { p_exclusion: backPay.id, p_file: f.id }, "SSA notice attached");
                                     }} />
                                   </label>
