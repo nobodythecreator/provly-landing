@@ -26,6 +26,11 @@
 --   serialized per person viewing, so parallel requests can't get past the 10-an-hour limit; refused
 --   deletions and refused role changes are logged like refused views.
 --
+-- r2 (first run stopped at self-test 7; nothing was changed): the purge check and the "is the number
+--   gone?" check ran in one statement, so the second read the table as it was before the purge ran.
+--   They're now separate steps, and each part of test 7 reports what it found. The purge itself is
+--   unchanged.
+--
 -- RUN IN SUPABASE (SQL editor), ONCE. One transaction: preflight → changes → rolled-back self-test on a
 -- synthetic Person → COMMIT → verification table.
 -- =====================================================================================
@@ -619,11 +624,19 @@ BEGIN
     END IF;
 
     -- 7. 90 days after PBA ends, the number is purged
+    -- r2 — each step on its own: a check in the same statement as the purge reads the table as it was
+    -- before the purge ran
     r := public._ssn_set(v_person, '123-45-6711', v_owner, 'owner');
+    IF NOT (r ->> 'ok')::boolean THEN RAISE EXCEPTION 'SELFTEST FAIL 7a: the number could not be entered again: %', r; END IF;
     INSERT INTO pba_enrollments (org_id, person_id, fiduciary_type, started_on, ended_on)
     VALUES (v_org, v_person, 'ssa_payee', current_date - 400, current_date - 91);
-    IF public._ssn_purge_due() < 1 OR EXISTS (SELECT 1 FROM person_ssn WHERE person_id = v_person AND secret_id IS NOT NULL) THEN
-      RAISE EXCEPTION 'SELFTEST FAIL 7: the number outlived its 90 days';
+    IF NOT EXISTS (SELECT 1 FROM pba_enrollments WHERE person_id = v_person AND ended_on = current_date - 91) THEN
+      RAISE EXCEPTION 'SELFTEST FAIL 7b: the test enrollment was not stored as ended';
+    END IF;
+    i := public._ssn_purge_due();
+    IF i < 1 THEN RAISE EXCEPTION 'SELFTEST FAIL 7c: the purge found nothing to delete'; END IF;
+    IF EXISTS (SELECT 1 FROM person_ssn WHERE person_id = v_person AND secret_id IS NOT NULL) THEN
+      RAISE EXCEPTION 'SELFTEST FAIL 7d: the number outlived its 90 days';
     END IF;
 
     -- 8. only the Owner, with a fresh code, changes who may see SSNs, and the Owner always stays
