@@ -40,6 +40,7 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.40 r1 (Greptile r1): Save waits while a statement is being read and attached, so a statement can't be saved without the PDF that was chosen; a successfully read PDF always replaces the lines, even when it has none, so earlier rows can't be saved with another statement. -->
   <!-- v20.0.40 (PBA — PDF statements read in the browser): attaching a Zions Bank PDF in Enter Statement now fills the period, the beginning and ending balances and every line, read on this computer with pdf.js (nothing leaves Provly), for the person to check before saving; a statement for a different account number is refused; if the lines don't add up to the ending balance, it says so; scans, photos and other banks are typed in as before. The month's step tiles show Done as soon as a form is signed. -->
   <!-- v20.0.39b r1 (Greptile r1): an attached statement lands only in the dialog it was chosen in — if that dialog was closed or another opened while the file was uploading, the file is not attached to the new one. -->
   <!-- v20.0.39b: PDF bank statements — "Enter from a PDF statement" (was "Enter manually") now attaches the bank's PDF (or a photo) to the statement, and a statement with a file shows View statement; the CSV importer is labeled as the online-banking export it reads. Includes r2's Form G rule: "Amended" only when an earlier report for the month was sent. -->
@@ -20879,7 +20880,7 @@
       const footer = (onSave, label = "Save") => (
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 12 }}>
           <SecondaryButton onClick={close}>Cancel</SecondaryButton>
-          <PrimaryButton loading={busy} onClick={onSave}>{label}</PrimaryButton>
+          <PrimaryButton loading={busy || !!modal.reading} onClick={onSave}>{label}</PrimaryButton>{/* r1 — waits while a statement is being read */}
         </div>
       );
       const attest = (text, who = "I am signing as myself, and I attest to the statement above.") => (
@@ -20993,7 +20994,8 @@
             }
             return { ...cur, reading: false, file: up, period_start: start, period_end: read.period_end,
                      opening: read.opening.toFixed(2), closing: read.closing.toFixed(2),
-                     lines: read.lines.length ? read.lines.map(l => ({ date: l.date, description: l.description, amount: l.amount.toFixed(2) })) : cur.lines,
+                     // r1 — the read statement's lines replace whatever was there, even when it has none
+                     lines: read.lines.map(l => ({ date: l.date, description: l.description, amount: l.amount.toFixed(2) })),
                      readNote: { tone: notes.length ? "warn" : "ok", text: `Filled from the ${read.bank} PDF — check each figure against the statement before saving.`, notes } };
           });
         };
@@ -21043,6 +21045,7 @@
             ))}
             <SecondaryButton onClick={() => setMd({ lines: [...modal.lines, { date: "", description: "", amount: "" }] })}>{icons.plus({ size: 13 })} Add line</SecondaryButton>
             {footer(() => {
+              if (modal.reading) return addToast("The statement is still being read and attached — Save in a moment", "error"); // r1
               const lines = modal.lines.filter(l => l.date || l.amount).map(l => ({ date: l.date, description: l.description, amount: Number(l.amount) }));
               if (modal.opening === "" || modal.closing === "") return addToast("Enter the beginning and ending balances", "error");
               if (lines.some(l => !l.date || !l.amount)) return addToast("Every line needs a date and an amount", "error");
