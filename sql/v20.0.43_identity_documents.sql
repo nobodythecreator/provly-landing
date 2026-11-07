@@ -14,6 +14,12 @@
 -- Anyone who can see the Person's PBA record can mark a file (locking is always safe); only an SSN role,
 -- with a fresh code and a reason, can unmark one. Every mark, unmark, opening and refusal is logged.
 --
+-- r1 (Greptile round 1, before this file ran): storage now serves a PBA file only once it's registered —
+--   an upload marked "lock it" is unreadable to everyone but its uploader (who has the file anyway) from
+--   the moment its bytes land until its locked record exists, and stays that way if registration never
+--   happens; the self-test uses a role it controls for its
+--   "not allowed" cases instead of one the Owner could have granted.
+--
 -- RUN IN SUPABASE (SQL editor), ONCE. One transaction: preflight → changes → rolled-back self-test on a
 -- synthetic Person → COMMIT → verification table.
 -- =====================================================================================
@@ -33,6 +39,10 @@ BEGIN
   END IF;
   IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'pba_files' AND column_name = 'is_identity') THEN
     RAISE EXCEPTION 'v20.0.43 preflight: this migration has already run';
+  END IF;
+  IF (SELECT count(*) FROM information_schema.columns WHERE table_schema = 'storage' AND table_name = 'objects'
+        AND column_name IN ('owner', 'owner_id')) <> 2 THEN
+    RAISE EXCEPTION 'v20.0.43 preflight: storage.objects is missing its owner columns';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ssn_access_log_action_check') THEN
     RAISE EXCEPTION 'v20.0.43 preflight: the access log''s action rule was not found under its expected name';
@@ -69,21 +79,34 @@ LANGUAGE sql SECURITY DEFINER SET search_path TO 'public' AS $$
 $$;
 
 -- ── 2. Storage refuses a marked file without a fresh opening ─────────────────────────
--- Runs as the signed-in person (it's part of the bucket's read rule). True for any unmarked file; for a
--- marked one, only when this person was granted an opening of it in the last 2 minutes.
+-- Runs as the signed-in person (it's part of the bucket's read rule). Only a REGISTERED file is served
+-- (r1): an upload has no record until it's registered, so it can't be read in between — and a "lock it"
+-- upload is registered already locked. An unmarked file then opens as before; a marked one only when this
+-- person was granted an opening of it in the last 2 minutes.
 CREATE FUNCTION public.pba_object_open_ok(p_name text)
 RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'public' AS $$
-  SELECT NOT EXISTS (SELECT 1 FROM pba_files f WHERE f.storage_path = p_name AND f.is_identity)
-      OR EXISTS (SELECT 1 FROM pba_files f JOIN pba_identity_open_tickets t ON t.file_id = f.id
-                  WHERE f.storage_path = p_name AND f.is_identity
-                    AND t.staff_id = public.my_staff_id()
-                    AND t.created_at > clock_timestamp() - interval '2 minutes')
+  SELECT EXISTS (SELECT 1 FROM pba_files f
+                  WHERE f.storage_path = p_name
+                    AND (NOT f.is_identity
+                         OR EXISTS (SELECT 1 FROM pba_identity_open_tickets t
+                                     WHERE t.file_id = f.id AND t.staff_id = public.my_staff_id()
+                                       AND t.created_at > clock_timestamp() - interval '2 minutes')))
 $$;
 
+-- An upload with no record yet (in the moment before it's registered, or after a registration that failed)
+CREATE FUNCTION public.pba_object_unregistered(p_name text)
+RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'public' AS $$
+  SELECT NOT EXISTS (SELECT 1 FROM pba_files f WHERE f.storage_path = p_name)
+$$;
+
+-- A registered file under the rules above; an unregistered upload only for the person who uploaded it
 DROP POLICY IF EXISTS pba_objects_select ON storage.objects;
 CREATE POLICY pba_objects_select ON storage.objects FOR SELECT TO authenticated
-  USING (bucket_id = 'pba' AND public.pba_path_person_ok(name) AND public.pba_object_open_ok(name));
+  USING (bucket_id = 'pba' AND public.pba_path_person_ok(name)
+         AND (public.pba_object_open_ok(name)
+              OR (public.pba_object_unregistered(name) AND (owner_id = (SELECT auth.uid())::text OR owner = (SELECT auth.uid())))));
 
 -- ── 3. Mark / unmark ────────────────────────────────────────────────────────────────
 CREATE FUNCTION public._pba_mark_identity(p_file uuid, p_on boolean, p_reason text, p_actor uuid, p_role text)
@@ -250,12 +273,12 @@ BEGIN
   FOR f IN
     SELECT p.oid::regprocedure AS sig, p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
      WHERE n.nspname = 'public'
-       AND p.proname IN ('_ssn_log_file', 'pba_object_open_ok', '_pba_mark_identity', '_pba_register_identity_file', '_pba_identity_open',
+       AND p.proname IN ('_ssn_log_file', 'pba_object_open_ok', 'pba_object_unregistered', '_pba_mark_identity', '_pba_register_identity_file', '_pba_identity_open',
                          'pba_mark_identity', 'pba_identity_open', 'pba_register_identity_file')
   LOOP
     EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC, anon, authenticated', f.sig);
-    -- pba_object_open_ok is part of the bucket's read rule, which runs as the signed-in person
-    IF f.proname IN ('pba_mark_identity', 'pba_identity_open', 'pba_register_identity_file', 'pba_object_open_ok') THEN
+    -- pba_object_open_ok / pba_object_unregistered are part of the bucket's read rule, which runs as the signed-in person
+    IF f.proname IN ('pba_mark_identity', 'pba_identity_open', 'pba_register_identity_file', 'pba_object_open_ok', 'pba_object_unregistered') THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO authenticated', f.sig);
     END IF;
   END LOOP;
@@ -338,9 +361,11 @@ BEGIN
     PERFORM set_config('request.jwt.claims', json_build_object('sub', v_ouser, 'role', 'authenticated', 'aal', 'aal2', 'org_id', v_org,
       'app_metadata', json_build_object('org_id', v_org), 'amr', json_build_array(json_build_object('method', 'totp', 'timestamp', v_now)))::text, true);
 
-    -- 1. an unmarked file opens as before
+    -- 1. an unmarked, registered file opens as before; an unregistered upload doesn't open at all
     v_ok := public.pba_object_open_ok(v_path);
     IF NOT v_ok THEN RAISE EXCEPTION 'SELFTEST FAIL 1: an ordinary file was refused'; END IF;
+    v_ok := public.pba_object_open_ok(v_org::text || '/' || v_person::text || '/documents/' || gen_random_uuid()::text || '.pdf');
+    IF v_ok THEN RAISE EXCEPTION 'SELFTEST FAIL 1b: an unregistered upload could be read'; END IF;
 
     -- 2. marking locks it: storage refuses it, even for the Owner, until an opening is granted
     r := public._pba_mark_identity(v_file, true, NULL, v_owner, 'owner');
@@ -356,7 +381,7 @@ BEGIN
     -- 3. refused: no reason; a role that can't see SSNs; a stale code — each logged, none opens it
     r := public._pba_identity_open(v_file, '', v_owner, 'owner');
     IF (r ->> 'ok')::boolean THEN RAISE EXCEPTION 'SELFTEST FAIL 3: opened without a reason'; END IF;
-    r := public._pba_identity_open(v_file, 'self-test', v_owner, 'dsp');
+    r := public._pba_identity_open(v_file, 'self-test', v_owner, 'v20043_no_access');
     IF (r ->> 'ok')::boolean THEN RAISE EXCEPTION 'SELFTEST FAIL 3b: opened for a role that can''t see SSNs'; END IF;
     r := public._pba_identity_open(v_file, 'self-test', gen_random_uuid(), 'owner');
     IF (r ->> 'ok')::boolean THEN RAISE EXCEPTION 'SELFTEST FAIL 3c: opened for someone outside the organization'; END IF;
@@ -395,7 +420,7 @@ BEGIN
     END IF;
 
     -- 6. unlocking: refused for a role that can't see SSNs and without a reason; an SSN role can
-    r := public._pba_mark_identity(v_file, false, 'self-test', v_owner, 'dsp');
+    r := public._pba_mark_identity(v_file, false, 'self-test', v_owner, 'v20043_no_access');
     IF (r ->> 'ok')::boolean THEN RAISE EXCEPTION 'SELFTEST FAIL 6: a role that can''t see SSNs unlocked an ID document'; END IF;
     r := public._pba_mark_identity(v_file, false, '', v_owner, 'owner');
     IF (r ->> 'ok')::boolean THEN RAISE EXCEPTION 'SELFTEST FAIL 6b: unlocked without a reason'; END IF;
@@ -435,7 +460,7 @@ SELECT n, check_name, got, want,
        AND column_name IN ('is_identity', 'identity_marked_by', 'identity_marked_at'))::text got, '3' want
   UNION ALL SELECT 2, 'Storage read rule refuses marked files without an opening',
     (SELECT count(*) FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects' AND policyname = 'pba_objects_select'
-       AND qual LIKE '%pba_object_open_ok%' AND qual LIKE '%pba_path_person_ok%')::text, '1'
+       AND qual LIKE '%pba_object_open_ok%' AND qual LIKE '%pba_path_person_ok%' AND qual LIKE '%pba_object_unregistered%')::text, '1'
   UNION ALL SELECT 3, 'Openings table: RLS on, no client access',
     ((SELECT relrowsecurity FROM pg_class WHERE oid = 'public.pba_identity_open_tickets'::regclass)
      AND NOT has_table_privilege('authenticated', 'public.pba_identity_open_tickets', 'SELECT'))::text, 'true'
@@ -445,14 +470,19 @@ SELECT n, check_name, got, want,
   UNION ALL SELECT 5, 'Internal ID-document functions callable by clients',
     (SELECT count(*) FROM pg_proc WHERE proname IN ('_ssn_log_file', '_pba_mark_identity', '_pba_register_identity_file', '_pba_identity_open')
        AND (has_function_privilege('authenticated', oid, 'EXECUTE') OR has_function_privilege('anon', oid, 'EXECUTE')))::text, '0'
-  UNION ALL SELECT 6, 'Storage rule check usable by signed-in users (not anon)',
+  UNION ALL SELECT 6, 'Storage rule checks usable by signed-in users (not anon)',
     (has_function_privilege('authenticated', 'public.pba_object_open_ok(text)', 'EXECUTE')
-     AND NOT has_function_privilege('anon', 'public.pba_object_open_ok(text)', 'EXECUTE'))::text, 'true'
+     AND has_function_privilege('authenticated', 'public.pba_object_unregistered(text)', 'EXECUTE')
+     AND NOT has_function_privilege('anon', 'public.pba_object_open_ok(text)', 'EXECUTE')
+     AND NOT has_function_privilege('anon', 'public.pba_object_unregistered(text)', 'EXECUTE'))::text, 'true'
   UNION ALL SELECT 7, 'Access log records ID-document openings',
     (position('doc_open' IN (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'ssn_access_log_action_check')) > 0)::text, 'true'
   UNION ALL SELECT 8, 'Self-test leftovers (synthetic Person)',
     (SELECT count(*) FROM persons WHERE identification_number = '099999943')::text, '0'
   UNION ALL SELECT 9, 'Files marked as ID documents so far',
     (SELECT count(*) FROM pba_files WHERE is_identity)::text, '(information)'
+  UNION ALL SELECT 10, 'PBA uploads with no record (readable only by their uploader)',
+    (SELECT count(*) FROM storage.objects o WHERE o.bucket_id = 'pba'
+       AND NOT EXISTS (SELECT 1 FROM pba_files f WHERE f.storage_path = o.name))::text, '(information)'
 ) t
 ORDER BY n;

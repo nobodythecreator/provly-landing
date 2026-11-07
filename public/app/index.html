@@ -40,6 +40,7 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.43 r1 (Greptile r1): each opening of an ID document carries its own number from the moment its dialog opens, so a code verified for a dialog that was closed can never open a different document; the file list loads whether each file is locked, so locked proof shows "ID document". Server-side: storage serves a PBA file only once it's registered (an upload in progress is readable only by its uploader). -->
   <!-- v20.0.43 (ID documents): uploading an SSA notice or payee proof asks whether it shows a full Social Security number; if it does, the file is locked like the SSN itself — it opens only for the roles allowed to see SSNs, with a reason and a fresh authenticator code (storage refuses it otherwise), and every opening is in the SSN access log. Everyone else still sees the file is there. A file already on record can be locked with "Lock as ID document"; only an SSN role can unlock one. -->
   <!-- v20.0.42 r1 (Greptile r1): a viewed number is cleared 30 seconds after it appeared by the clock, not by counting timer ticks, and at once if the page is hidden (another tab, the screen locks, the laptop sleeps). Server-side: deleting requires membership of the Person's organization; SSN status and actions require being able to see the Person; views are serialized per person viewing; refused deletions are logged. -->
   <!-- v20.0.42 (encrypted SSN): a Person's Social Security number is stored encrypted in Supabase Vault — the Overview shows only the last four; the PBA Manager and the roles allowed to see SSNs can enter or replace it (typed twice, never shown back); viewing it takes one of those roles, a written reason and a fresh authenticator code, and it shows for 30 seconds; every entry, view, deletion and refused attempt goes into an access log nobody can change (Settings → Social Security numbers, by month, with a CSV); the Owner decides which roles may see SSNs, and those roles sign in with two-factor; numbers are deleted 90 days after PBA ends. The never-saved last-four box is gone from the client form; the face sheet shows the last four. -->
@@ -20501,26 +20502,30 @@
       const seq = useRef(0);
       useEffect(() => {
         const onAsk = (e) => setAsk(cur => { cur?.resolve(null); return { resolve: e.detail.resolve }; });
-        const onOpen = (e) => { seq.current++; setOpen({ fileId: e.detail.fileId, step: "reason", reason: "", url: null, error: null, busy: false }); };
+        // r1 — each opening is numbered when its dialog opens; everything later checks that number
+        const onOpen = (e) => { const n = ++seq.current; setOpen({ seq: n, fileId: e.detail.fileId, step: "reason", reason: "", url: null, error: null, busy: false }); };
         window.addEventListener(PBA_IDENTITY_ASK_EVENT, onAsk);
         window.addEventListener(PBA_IDENTITY_OPEN_EVENT, onOpen);
         return () => { window.removeEventListener(PBA_IDENTITY_ASK_EVENT, onAsk); window.removeEventListener(PBA_IDENTITY_OPEN_EVENT, onOpen); };
       }, []);
       const answer = (v) => { ask?.resolve(v); setAsk(null); };
-      const grant = async () => {
-        const mine = seq.current;                     // this opening, not one started since
-        const fileId = open.fileId, reason = open.reason.trim();
-        setOpen(o => o && { ...o, busy: true, error: null });
+      // r1 — called with the opening's own number, file and reason (bound when its dialog rendered): a code
+      // verified for a dialog that has since closed is turned away before anything is asked of the server
+      const grant = async (mine, fileId, reasonText) => {
+        if (mine !== seq.current) return;
+        const reason = String(reasonText || "").trim();
+        const same = (o) => o && o.seq === mine;
+        setOpen(o => same(o) ? { ...o, busy: true, error: null } : o);
         const { data, error } = await supabase.rpc("pba_identity_open", { p_file: fileId, p_reason: reason });
         if (mine !== seq.current) return;
         if (error || !data?.ok) {
-          setOpen(o => o && { ...o, busy: false, error: error?.message || data?.error || "Not permitted", step: data?.needs_code ? "code" : "reason" });
+          setOpen(o => same(o) ? { ...o, busy: false, error: error?.message || data?.error || "Not permitted", step: data?.needs_code ? "code" : "reason" } : o);
           return;
         }
         const su = await supabase.storage.from("pba").createSignedUrl(data.path, 60);
         if (mine !== seq.current) return;
-        if (su.error || !su.data?.signedUrl) { setOpen(o => o && { ...o, busy: false, error: su.error?.message || "Couldn't open the file" }); return; }
-        setOpen(o => o && { ...o, busy: false, step: "ready", url: su.data.signedUrl });
+        if (su.error || !su.data?.signedUrl) { setOpen(o => same(o) ? { ...o, busy: false, error: su.error?.message || "Couldn't open the file" } : o); return; }
+        setOpen(o => same(o) ? { ...o, busy: false, step: "ready", url: su.data.signedUrl } : o);
       };
       const closeOpen = () => { seq.current++; setOpen(null); };
       return (
@@ -20553,7 +20558,7 @@
               {open.step === "code" && (
                 <>
                   {open.error && <div style={{ fontSize: 12, color: CB.red, marginBottom: 10 }}>{open.error}</div>}
-                  <FreshCodeStep onVerified={grant} busyOuter={open.busy} />
+                  <FreshCodeStep key={open.seq} onVerified={((n, f, r) => () => grant(n, f, r))(open.seq, open.fileId, open.reason)} busyOuter={open.busy} />
                 </>
               )}
               {open.step === "ready" && (
@@ -22031,7 +22036,7 @@
             q(supabase.from("pba_transactions").select("*, pba_receipts(id, file_id)").eq("person_id", clientId).order("entry_date", { ascending: false }).order("created_at", { ascending: false }).limit(2000)),
             q(supabase.from("pba_lost_receipt_affidavits").select("*").eq("person_id", clientId)),
             q(supabase.from("pba_purchase_requests").select("*").eq("person_id", clientId).order("requested_at", { ascending: false }).limit(200)),
-            q(supabase.from("pba_files").select("id, purpose, storage_path, uploaded_at").eq("person_id", clientId)),
+            q(supabase.from("pba_files").select("id, purpose, storage_path, uploaded_at, is_identity").eq("person_id", clientId)), // r1 — whether each file is locked
             q(supabase.rpc("pba_flags", { p_person: clientId })),
             q(supabase.from("staff_directory_v").select("id, first_name, last_name, role").order("last_name")),
             // v20.0.39 — sealed months, back pay and reopened months (empty if the SQL hasn't run)
