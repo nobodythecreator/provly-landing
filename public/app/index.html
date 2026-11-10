@@ -40,6 +40,7 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.44 (MTP documentation, DHHS91172 Article 13.3(3)): MTP needs the pickup and drop-off place and time for every trip, so DSG notes now carry the day's trips (to the program, home from the program) instead of the "Transported" answer, and the EVV page has Picked up / Dropped off taps that record the place, the server's time and the phone's location. A DSG day bills MTP only when it has a trip and every trip on it is complete; typed trips after the day are late entries with a reason; corrections need a reason and are kept. The e520 review shows the DSG days an MTP line can't bill. -->
   <!-- v20.0.43 r1 (Greptile r1): each opening of an ID document carries its own number from the moment its dialog opens, so a code verified for a dialog that was closed can never open a different document; the file list loads whether each file is locked, so locked proof shows "ID document". Server-side: storage serves a PBA file only once it's registered (an upload in progress is readable only by its uploader). -->
   <!-- v20.0.43 (ID documents): uploading an SSA notice or payee proof asks whether it shows a full Social Security number; if it does, the file is locked like the SSN itself — it opens only for the roles allowed to see SSNs, with a reason and a fresh authenticator code (storage refuses it otherwise), and every opening is in the SSN access log. Everyone else still sees the file is there. A file already on record can be locked with "Lock as ID document"; only an SSN role can unlock one. -->
   <!-- v20.0.42 r1 (Greptile r1): a viewed number is cleared 30 seconds after it appeared by the clock, not by counting timer ticks, and at once if the page is hidden (another tab, the screen locks, the laptop sleeps). Server-side: deleting requires membership of the Person's organization; SSN status and actions require being able to see the Person; views are serialized per person viewing; refused deletions are logged. -->
@@ -1959,7 +1960,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.43</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.44</span>
               </div>
             </button>
             {isMobile && (
@@ -5868,6 +5869,313 @@
     ];
     const transportLabel = (v) => (TRANSPORT_OPTIONS.find(o => o.value === v) || {}).label || "—";
 
+    // ═══════════════════════════════════════════════════════════════
+    // v20.0.44 — MTP TRIP RECORDS (DHHS91172 Article 13.3(3))
+    // For each time the Person is picked up or dropped off: the place and the time, and who drove. A DSG
+    // day bills MTP only when it has at least one trip each of whose four parts is filled in. Taps record
+    // the time on the server and the phone's location if it gives one; typed trips after the day are late
+    // entries and need a reason; changing anything recorded is a correction and needs a reason.
+    // ═══════════════════════════════════════════════════════════════
+    const MTP_DIRECTIONS = [
+      { value: "to_program",   label: "To the program",        pickupHint: "home",    dropoffHint: "program" },
+      { value: "from_program", label: "Home from the program", pickupHint: "program", dropoffHint: "home" },
+    ];
+    const MTP_TZ = "America/Denver";
+    const mtpLegComplete = (l) => !!(l && l.pickup_place && l.pickup_at && l.dropoff_place && l.dropoff_at);
+    const mtpTime = (iso) => iso ? new Date(iso).toLocaleTimeString("en-US", { timeZone: MTP_TZ, hour: "numeric", minute: "2-digit" }) : "";
+    const mtpHhmm = (iso) => iso ? new Date(iso).toLocaleTimeString("en-GB", { timeZone: MTP_TZ, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }) : "";
+    const mtpToday = () => {
+      const p = new Intl.DateTimeFormat("en-US", { timeZone: MTP_TZ, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());
+      const g = (k) => p.find(x => x.type === k).value;
+      return `${g("year")}-${g("month")}-${g("day")}`;
+    };
+    // a Mountain-time wall clock on a date → the exact instant (daylight time handled)
+    function mtpIso(day, hhmm) {
+      if (!day || !/^\d{2}:\d{2}$/.test(hhmm || "")) return null;
+      const [y, m, d] = day.split("-").map(Number), [hh, mm] = hhmm.split(":").map(Number);
+      for (const off of [6, 7]) {
+        const t = new Date(Date.UTC(y, m - 1, d, hh + off, mm));
+        const p = new Intl.DateTimeFormat("en-US", { timeZone: MTP_TZ, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(t);
+        const g = (k) => Number(p.find(x => x.type === k).value);
+        if (g("year") === y && g("month") === m && g("day") === d && g("hour") === hh && g("minute") === mm) return t.toISOString();
+      }
+      return null;
+    }
+    // the Person's home (open placement, else their address) and places used on earlier trips
+    async function mtpLoadPlaces(personId) {
+      const [pl, pe, legs] = await Promise.all([
+        supabase.from("person_placements").select("org_sites(name, address, city)").eq("person_id", personId).is("end_date", null).limit(1),
+        supabase.from("persons").select("address, city").eq("id", personId).maybeSingle(),
+        supabase.from("mtp_legs").select("pickup_place, dropoff_place, direction").eq("person_id", personId).order("service_date", { ascending: false }).limit(40),
+      ]);
+      const site = pl.data?.[0]?.org_sites;
+      const home = site ? `Home — ${[site.address, site.city].filter(Boolean).join(", ")}` :
+                   pe.data?.address ? `Home — ${[pe.data.address, pe.data.city].filter(Boolean).join(", ")}` : "Home";
+      const seen = new Set([home]);
+      const program = [];
+      (legs.data || []).forEach(l => {
+        const p = l.direction === "to_program" ? l.dropoff_place : l.pickup_place;
+        if (p && !seen.has(p)) { seen.add(p); program.push(p); }
+      });
+      return { home, program, all: [home, ...program] };
+    }
+    function mtpGeo() {
+      return new Promise(resolve => {
+        if (!navigator.geolocation) return resolve(null);
+        navigator.geolocation.getCurrentPosition(
+          p => resolve({ lat: Math.round(p.coords.latitude * 1e6) / 1e6, lng: Math.round(p.coords.longitude * 1e6) / 1e6 }),
+          () => resolve(null), { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 });
+      });
+    }
+
+    // Record or correct one trip (typed)
+    function MtpLegModal({ personId, date, direction, leg, places, onClose, onSaved }) {
+      const { addToast } = useToast();
+      const { accessTier } = useAuth();
+      const office = accessTier === "manage" || accessTier === "operate";
+      const dir = MTP_DIRECTIONS.find(d => d.value === direction);
+      const guessPick = dir.pickupHint === "home" ? places?.home : places?.program?.[0];
+      const guessDrop = dir.dropoffHint === "home" ? places?.home : places?.program?.[0];
+      const [f, setF] = useState({
+        pickup_place: leg?.pickup_place || guessPick || "", pickup_time: mtpHhmm(leg?.pickup_at),
+        dropoff_place: leg?.dropoff_place || guessDrop || "", dropoff_time: mtpHhmm(leg?.dropoff_at),
+        driver: leg?.driver_staff_id || "", reason: "",
+      });
+      const [staff, setStaff] = useState([]);
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState(null);
+      const [removing, setRemoving] = useState(false);
+      useEffect(() => {
+        if (!office) return;
+        supabase.from("staff_directory_v").select("id, first_name, last_name").order("last_name")
+          .then(({ data }) => setStaff(data || []));
+      }, [office]);
+      const late = date < mtpToday();
+      const changes = leg && ((leg.pickup_place && f.pickup_place.trim() !== leg.pickup_place) || (leg.pickup_at && f.pickup_time && f.pickup_time !== mtpHhmm(leg.pickup_at))
+        || (leg.dropoff_place && f.dropoff_place.trim() !== leg.dropoff_place) || (leg.dropoff_at && f.dropoff_time && f.dropoff_time !== mtpHhmm(leg.dropoff_at))
+        || (f.driver && f.driver !== leg.driver_staff_id));
+      const needReason = late || changes || removing;
+      const save = async () => {
+        setError(null);
+        const pa = f.pickup_time ? mtpIso(date, f.pickup_time) : null, da = f.dropoff_time ? mtpIso(date, f.dropoff_time) : null;
+        if ((f.pickup_time && !pa) || (f.dropoff_time && !da)) return setError("That time doesn't exist on this date.");
+        if (needReason && f.reason.trim().length < 3) return setError(late ? "This is a late entry — say where the times came from." : "Give a reason for the correction.");
+        setBusy(true);
+        const { error: e } = await supabase.rpc("mtp_record", {
+          p_person: personId, p_day: date, p_direction: direction,
+          p_pickup_place: f.pickup_place.trim() || null, p_pickup_at: pa, p_dropoff_place: f.dropoff_place.trim() || null, p_dropoff_at: da,
+          p_driver: office && f.driver ? f.driver : null, p_reason: f.reason.trim() || null,
+        });
+        setBusy(false);
+        if (e) return setError(e.message);
+        addToast("Trip saved", "success"); onSaved(); onClose();
+      };
+      const remove = async () => {
+        if (f.reason.trim().length < 3) return setError("Give a reason for removing the trip.");
+        setBusy(true);
+        const { error: e } = await supabase.rpc("mtp_delete", { p_leg: leg.id, p_reason: f.reason.trim() });
+        setBusy(false);
+        if (e) return setError(e.message);
+        addToast("Trip removed", "success"); onSaved(); onClose();
+      };
+      const listId = `mtp-places-${direction}`;
+      return (
+        <Modal open onClose={onClose} title={`${dir.label} — ${new Date(date + "T12:00:00").toLocaleDateString()}`}
+          subtitle="Article 13 needs the pickup and drop-off place and time for every trip. Each part you fill in counts; the day bills MTP once every trip on it is complete.">
+          <datalist id={listId}>{(places?.all || []).map(p => <option key={p} value={p} />)}</datalist>
+          <FormRow>
+            <FormField label="Picked up at" half><input style={fieldStyle} list={listId} value={f.pickup_place} onChange={e => setF(x => ({ ...x, pickup_place: e.target.value }))} /></FormField>
+            <FormField label="Pickup time" half><input type="time" style={fieldStyle} value={f.pickup_time} onChange={e => setF(x => ({ ...x, pickup_time: e.target.value }))} /></FormField>
+          </FormRow>
+          <FormRow>
+            <FormField label="Dropped off at" half><input style={fieldStyle} list={listId} value={f.dropoff_place} onChange={e => setF(x => ({ ...x, dropoff_place: e.target.value }))} /></FormField>
+            <FormField label="Drop-off time" half><input type="time" style={fieldStyle} value={f.dropoff_time} onChange={e => setF(x => ({ ...x, dropoff_time: e.target.value }))} /></FormField>
+          </FormRow>
+          {office && (
+            <FormField label="Driver">
+              <select style={fieldStyle} value={f.driver} onChange={e => setF(x => ({ ...x, driver: e.target.value }))}>
+                <option value="">{leg ? "Unchanged" : "Me"}</option>
+                {staff.map(s => <option key={s.id} value={s.id}>{s.first_name} {s.last_name}</option>)}
+              </select>
+            </FormField>
+          )}
+          {needReason && (
+            <FormField label={removing ? "Why remove this trip?" : late ? "Late entry — where do these times come from?" : "Why the correction?"} required>
+              <input style={fieldStyle} value={f.reason} onChange={e => setF(x => ({ ...x, reason: e.target.value }))}
+                placeholder={late ? "e.g. the DSG sign-in sheet; the driver's log" : "e.g. the tap was late; wrong place picked"} />
+            </FormField>
+          )}
+          {error && <div style={{ fontSize: 12, color: CB.red, marginBottom: 10 }}>{error}</div>}
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+            <div>{leg && !removing && <SecondaryButton onClick={() => { setRemoving(true); setError(null); }}>Remove trip</SecondaryButton>}</div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <SecondaryButton onClick={onClose}>Cancel</SecondaryButton>
+              {removing ? <PrimaryButton onClick={remove} loading={busy} color={CB.red}>Remove</PrimaryButton>
+                        : <PrimaryButton onClick={save} loading={busy}>Save</PrimaryButton>}
+            </div>
+          </div>
+        </Modal>
+      );
+    }
+
+    // On a DSG note: the day's trips, whether MTP will bill, and Record / Edit
+    function MtpTripPanel({ personId, date, readOnly = false }) {
+      const [legs, setLegs] = useState(null);
+      const [places, setPlaces] = useState(null);
+      const [err, setErr] = useState(null);
+      const [editing, setEditing] = useState(null);
+      const seq = useRef(0);
+      const load = useCallback(async () => {
+        if (!personId || !date) return;
+        const mine = ++seq.current;
+        const [r, p] = await Promise.all([
+          supabase.from("mtp_legs").select("*").eq("person_id", personId).eq("service_date", date),
+          mtpLoadPlaces(personId).catch(() => null),
+        ]);
+        if (mine !== seq.current) return;                       // another client or date chosen meanwhile
+        if (r.error) { setErr(r.error.message); setLegs([]); return; }
+        setErr(null); setLegs(r.data || []); setPlaces(p);
+      }, [personId, date]);
+      useEffect(() => { setLegs(null); setEditing(null); load(); }, [load]);
+      if (!personId || !date) return <div style={{ fontSize: 12, color: CB.textLight }}>Choose the client and the date first.</div>;
+      if (legs === null) return <div style={{ fontSize: 12, color: CB.textLight }}>Loading trips{"\u2026"}</div>;
+      const documented = legs.length > 0 && legs.every(mtpLegComplete);
+      const btn = { border: `1px solid ${CB.border}`, background: CB.white, borderRadius: 8, padding: "3px 10px", fontSize: 12, cursor: "pointer", fontFamily: "inherit" };
+      return (
+        <div style={{ border: `1px solid ${documented ? CB.green : CB.amber}`, borderRadius: 10, padding: "10px 12px" }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: documented ? CB.green : CB.amber, marginBottom: 6 }}>
+            {documented ? "✓ MTP documented — this day bills MTP"
+              : legs.length === 0 ? "No trips recorded — MTP won't bill for this day"
+              : "A trip is incomplete — MTP won't bill until it's finished"}
+          </div>
+          {err && <div style={{ fontSize: 12, color: CB.red, marginBottom: 6 }}>Couldn{"\u2019"}t load the trips ({err}).</div>}
+          {MTP_DIRECTIONS.map(d => {
+            const l = legs.find(x => x.direction === d.value);
+            return (
+              <div key={d.value} style={{ display: "flex", alignItems: "center", gap: 10, padding: "5px 0", borderTop: `1px solid ${CB.border}`, fontSize: 12, flexWrap: "wrap" }}>
+                <span style={{ minWidth: 150, fontWeight: 600, color: CB.text }}>{d.label}</span>
+                <span style={{ flex: 1, color: l ? CB.text : CB.textLight }}>
+                  {l ? <>{l.pickup_place || <i>pickup place?</i>} {l.pickup_at ? `· ${mtpTime(l.pickup_at)}` : <i>· time?</i>} → {l.dropoff_place || <i>drop-off place?</i>} {l.dropoff_at ? `· ${mtpTime(l.dropoff_at)}` : <i>· time?</i>}
+                        {(l.pickup_source === "tap" || l.dropoff_source === "tap") && <span style={{ color: CB.textMid }}> · tapped</span>}
+                        {l.late_entry && <span style={{ color: CB.amber, fontWeight: 600 }}> · late entry</span>}</>
+                     : "No trip"}
+                </span>
+                {!readOnly && <button style={btn} onClick={() => setEditing(d.value)}>{l ? "Edit" : "Record"}</button>}
+              </div>
+            );
+          })}
+          <div style={{ fontSize: 11, color: CB.textLight, marginTop: 6 }}>A day our staff didn't drive has no trips. A one-way ride has one.</div>
+          {editing && <MtpLegModal personId={personId} date={date} direction={editing} leg={legs.find(x => x.direction === editing) || null}
+                                   places={places} onClose={() => setEditing(null)} onSaved={load} />}
+        </div>
+      );
+    }
+
+    // On the EVV page: Picked up / Dropped off taps for today's day-program rides
+    function MtpTapCard() {
+      const { addToast } = useToast();
+      const [persons, setPersons] = useState([]);
+      const [personId, setPersonId] = useState("");
+      const [legs, setLegs] = useState([]);
+      const [places, setPlaces] = useState(null);
+      const [tapping, setTapping] = useState(null);     // { direction, stage, place }
+      const [busy, setBusy] = useState(false);
+      const seq = useRef(0);
+      const today = mtpToday();
+      useEffect(() => {
+        supabase.from("persons").select("id, first_name, last_name").eq("is_active", true).order("last_name")
+          .then(({ data }) => setPersons(data || []));
+      }, []);
+      const load = useCallback(async () => {
+        if (!personId) { setLegs([]); setPlaces(null); return; }
+        const mine = ++seq.current;
+        const [r, p] = await Promise.all([
+          supabase.from("mtp_legs").select("*").eq("person_id", personId).eq("service_date", today),
+          mtpLoadPlaces(personId).catch(() => null),
+        ]);
+        if (mine !== seq.current) return;
+        setLegs(r.data || []); setPlaces(p);
+      }, [personId, today]);
+      useEffect(() => { setTapping(null); load(); }, [load]);
+      const start = (direction, stage) => {
+        const d = MTP_DIRECTIONS.find(x => x.value === direction);
+        const hint = stage === "pickup" ? d.pickupHint : d.dropoffHint;
+        setTapping({ direction, stage, place: (hint === "home" ? places?.home : places?.program?.[0]) || "", forPerson: personId });
+      };
+      const confirmTap = async () => {
+        const t = tapping;
+        if (!t || (t.place || "").trim().length < 2) return addToast("Say where", "error");
+        setBusy(true);
+        const pos = await mtpGeo();                       // the phone's location, if it gives one
+        const { error } = await supabase.rpc("mtp_tap", { p_person: t.forPerson, p_direction: t.direction, p_stage: t.stage,
+          p_place: t.place.trim(), p_lat: pos?.lat ?? null, p_lng: pos?.lng ?? null });
+        setBusy(false);
+        if (error) return addToast(error.message, "error");
+        addToast(t.stage === "pickup" ? "Pickup recorded" : "Drop-off recorded", "success");
+        setTapping(null);
+        if (t.forPerson === personId) load();
+      };
+      const btn = (on) => ({ border: `1px solid ${on ? CB.navy : CB.border}`, background: on ? CB.navy : CB.white, color: on ? CB.white : CB.textLight,
+                             borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: on ? "pointer" : "default", fontFamily: "inherit" });
+      return (
+        <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, padding: 20, marginBottom: 20 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: CB.text, marginBottom: 2 }}>Day program rides (MTP)</div>
+          <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 12 }}>Tap when you pick the Person up and when you drop them off. Provly records the place and the time.</div>
+          <select style={{ ...fieldStyle, marginBottom: 12 }} value={personId} onChange={e => setPersonId(e.target.value)}>
+            <option value="">Choose the Person</option>
+            {persons.map(p => <option key={p.id} value={p.id}>{p.first_name} {p.last_name}</option>)}
+          </select>
+          {personId && MTP_DIRECTIONS.map(d => {
+            const l = legs.find(x => x.direction === d.value);
+            return (
+              <div key={d.value} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: `1px solid ${CB.border}`, flexWrap: "wrap" }}>
+                <span style={{ minWidth: 160, fontSize: 13, fontWeight: 600 }}>{d.label}</span>
+                <span style={{ flex: 1, fontSize: 12, color: CB.textMid }}>
+                  {l?.pickup_at ? `Picked up ${mtpTime(l.pickup_at)}` : "Not picked up"}{l?.dropoff_at ? ` · dropped off ${mtpTime(l.dropoff_at)}` : ""}
+                </span>
+                <button style={btn(!l?.pickup_at)} disabled={!!l?.pickup_at || busy} onClick={() => start(d.value, "pickup")}>Picked up</button>
+                <button style={btn(!l?.dropoff_at)} disabled={!!l?.dropoff_at || busy} onClick={() => start(d.value, "dropoff")}>Dropped off</button>
+              </div>
+            );
+          })}
+          {tapping && (
+            <Modal open onClose={() => setTapping(null)} title={tapping.stage === "pickup" ? "Picked up — where?" : "Dropped off — where?"}
+              subtitle="The time is recorded when you confirm, with your phone's location if it allows it.">
+              <datalist id="mtp-tap-places">{(places?.all || []).map(p => <option key={p} value={p} />)}</datalist>
+              <FormField label="Place" required>
+                <input style={fieldStyle} list="mtp-tap-places" autoFocus value={tapping.place} onChange={e => { const v = e.target.value; setTapping(t => t && { ...t, place: v }); }} />
+              </FormField>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+                <SecondaryButton onClick={() => setTapping(null)}>Cancel</SecondaryButton>
+                <PrimaryButton onClick={confirmTap} loading={busy}>Record now</PrimaryButton>
+              </div>
+            </Modal>
+          )}
+        </div>
+      );
+    }
+
+    // On the e520 review: DSG days an MTP line can't bill because their trip record isn't complete
+    function MtpGapNote({ personId, from, to }) {
+      const [days, setDays] = useState(null);
+      useEffect(() => {
+        let alive = true;
+        if (!personId || !from || !to) return;
+        supabase.rpc("mtp_undocumented_days", { p_person: personId, p_from: from, p_to: to })
+          .then(({ data, error }) => { if (alive) setDays(error ? [] : (data || [])); });
+        return () => { alive = false; };
+      }, [personId, from, to]);
+      if (!days || days.length === 0) return null;
+      return (
+        <div style={{ marginTop: 6 }}>
+          <Badge text="MTP trip record missing" color={CB.amber} />
+          <div style={{ fontSize: 11, color: CB.textMid, marginTop: 2 }}>
+            Not billed: {days.map(d => new Date(d.service_date + "T12:00:00").toLocaleDateString("en-US", { month: "2-digit", day: "2-digit" })).join(", ")} — record the trips on each DSG note.
+          </div>
+        </div>
+      );
+    }
+
     function ServiceNoteForm({ open, onClose, onSaved, initialPersonId = null }) { // v20.0.15 — opened from a client profile with the client set
       const { addToast } = useToast();
       const { orgId, accessTier, staffProfile } = useAuth();
@@ -6466,13 +6774,8 @@
                 <span style={{ fontSize: 13, fontWeight: 700, color: CB.navy }}>Required Documentation</span>
               </div>
               {selectedCode === "DSG" && (
-                <FormField label="Transported (MTP)" required>
-                  <select style={fieldStyle} value={form.transport || "to_and_from"} onChange={e => set("transport", e.target.value)}>
-                    {TRANSPORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                  </select>
-                  <div style={{ marginTop: 4, fontSize: 11, color: CB.textLight }}>
-                    MTP is billed from this answer. Change it only on a day our staff didn't drive both ways — a family drop-off, a one-way ride.
-                  </div>
+                <FormField label="MTP trips — pickup and drop-off">{/* v20.0.44 — Article 13.3(3) */}
+                  <MtpTripPanel personId={form.person_id} date={form.service_date} />
                 </FormField>
               )}
               {dynamicFields.map(field => (
@@ -6766,7 +7069,7 @@
       const loadNotes = async () => {
         setLoading(true);
         // v19.2 — try with context join, fall back if column/relationship missing
-        const baseSel = "id, service_date, start_time, end_time, duration_minutes, billable_units, status, transport, summary_note, service_code_id, staff_id, staff_ids, staff!service_notes_staff_id_fkey(first_name, last_name), persons(first_name, last_name), service_code_definitions(code, name)";
+        const baseSel = "id, person_id, service_date, start_time, end_time, duration_minutes, billable_units, status, transport, summary_note, service_code_id, staff_id, staff_ids, staff!service_notes_staff_id_fkey(first_name, last_name), persons(first_name, last_name), service_code_definitions(code, name)";
         const ctxSel = baseSel + ", context_id, service_delivery_contexts(id, name, delivery_type)";
         let res = await supabase.from("service_notes").select(ctxSel).order("service_date", { ascending: false }).limit(500);
         if (res.error && /(column|relationship).*context/i.test(res.error.message || "")) {
@@ -7153,17 +7456,13 @@
                     )}
                     <Badge text={editForm.status || viewing.status || "draft"} color={statusColors[editForm.status || viewing.status] || CB.textLight} />
                     <NoAuthFlag state={viewing.no_auth} />
-                    {(() => { // v20.0.23 (e520 D6) — the MTP answer on a DSG note
+                    {(() => { // v20.0.44 — the day's MTP trips (Article 13.3(3)), recorded apart from the note
                       const editCode = serviceCodes.find(sc => sc.id === editForm.service_code_id)?.code || viewing.service_code_definitions?.code;
                       if ((editing ? editCode : viewing.service_code_definitions?.code) !== "DSG") return null;
-                      return editing ? (
-                        <select style={{ ...fieldStyle, padding: "6px 10px", fontSize: 12, width: "auto", minWidth: 200, background: CB.white }}
-                          value={editForm.transport || "to_and_from"} onChange={e => setEditForm(p => ({ ...p, transport: e.target.value }))}
-                          aria-label="Transported (MTP)">
-                          {TRANSPORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                        </select>
-                      ) : (
-                        <Badge text={`MTP: ${transportLabel(viewing.transport || "to_and_from")}`} color={CB.blue} />
+                      return (
+                        <div style={{ flexBasis: "100%", marginTop: 6 }}>
+                          <MtpTripPanel personId={viewing.person_id} date={viewing.service_date} />
+                        </div>
                       );
                     })()}
                     <span style={{ fontSize: 13, color: CB.textMid }}>
@@ -10895,7 +11194,8 @@
             }} color={CB.blue}>{icons.play({ size: 16 })} Clock In</PrimaryButton>}
           />
 
-          <TimeClockCard /> {/* v20.0.32 — the time clock for work EVV doesn't cover */}
+          <TimeClockCard />
+          <MtpTapCard />{/* v20.0.44 — Picked up / Dropped off */} {/* v20.0.32 — the time clock for work EVV doesn't cover */}
           <ReleaseNoticeHost /> {/* v20.0.35 — "You're off duty until …" after a clock-out that starts a release */}
 
           {/* Active sessions banner */}
@@ -14303,7 +14603,7 @@
                             <td style={td}><Badge text={l.service_code || "?"} color={CB.blue} /></td>
                             <td style={{ ...td, whiteSpace: "nowrap" }}>{e520Day(l.start_date)} – {e520Day(l.end_date)}</td>
                             <td style={{ ...td, fontWeight: 700 }}>{l.units}</td>
-                            <td style={td}>{flagList(l.flags)}</td>
+                            <td style={td}>{flagList(l.flags)}{l.service_code === "MTP" && <MtpGapNote personId={l.person_id} from={l.start_date} to={l.end_date} />}</td>
                             {!isDraft && (
                               <td style={td}>
                                 {l.released_at ? (
