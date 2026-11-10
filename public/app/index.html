@@ -40,6 +40,7 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.44 r1 (Greptile r1): saving a trip sends only the parts that changed, so a tapped time (recorded to the second) is never resent rounded to the minute and mistaken for a correction; the ride card clears the previous Person's trips and places the moment another Person is chosen and keeps the taps off until the new Person's details have loaded; the e520 review shows the DSG days missing trip records for every MTP range, including lines removed for having nothing billable. Server-side: front-line drivers change only their own trips; trip changes and the e520 build share a lock. -->
   <!-- v20.0.44 (MTP documentation, DHHS91172 Article 13.3(3)): MTP needs the pickup and drop-off place and time for every trip, so DSG notes now carry the day's trips (to the program, home from the program) instead of the "Transported" answer, and the EVV page has Picked up / Dropped off taps that record the place, the server's time and the phone's location. A DSG day bills MTP only when it has a trip and every trip on it is complete; typed trips after the day are late entries with a reason; corrections need a reason and are kept. The e520 review shows the DSG days an MTP line can't bill. -->
   <!-- v20.0.43 r1 (Greptile r1): each opening of an ID document carries its own number from the moment its dialog opens, so a code verified for a dialog that was closed can never open a different document; the file list loads whether each file is locked, so locked proof shows "ID document". Server-side: storage serves a PBA file only once it's registered (an upload in progress is readable only by its uploader). -->
   <!-- v20.0.43 (ID documents): uploading an SSA notice or payee proof asks whether it shows a full Social Security number; if it does, the file is locked like the SSN itself — it opens only for the roles allowed to see SSNs, with a reason and a fresh authenticator code (storage refuses it otherwise), and every opening is in the SSN access log. Everyone else still sees the file is there. A file already on record can be locked with "Lock as ID document"; only an SSN role can unlock one. -->
@@ -5957,13 +5958,20 @@
       const needReason = late || changes || removing;
       const save = async () => {
         setError(null);
-        const pa = f.pickup_time ? mtpIso(date, f.pickup_time) : null, da = f.dropoff_time ? mtpIso(date, f.dropoff_time) : null;
-        if ((f.pickup_time && !pa) || (f.dropoff_time && !da)) return setError("That time doesn't exist on this date.");
+        // r1 — only what changed goes to the server: an unchanged time keeps its recorded seconds, an
+        // unchanged place its tap and location (NULL = leave it as it is)
+        const same = (typed, stored) => !!stored && typed === stored;
+        const pTyped = f.pickup_time, dTyped = f.dropoff_time;
+        const pa = pTyped && !same(pTyped, mtpHhmm(leg?.pickup_at)) ? mtpIso(date, pTyped) : null;
+        const da = dTyped && !same(dTyped, mtpHhmm(leg?.dropoff_at)) ? mtpIso(date, dTyped) : null;
+        if ((pTyped && !same(pTyped, mtpHhmm(leg?.pickup_at)) && !pa) || (dTyped && !same(dTyped, mtpHhmm(leg?.dropoff_at)) && !da)) return setError("That time doesn't exist on this date.");
+        const pPlace = f.pickup_place.trim(), dPlace = f.dropoff_place.trim();
         if (needReason && f.reason.trim().length < 3) return setError(late ? "This is a late entry — say where the times came from." : "Give a reason for the correction.");
         setBusy(true);
         const { error: e } = await supabase.rpc("mtp_record", {
           p_person: personId, p_day: date, p_direction: direction,
-          p_pickup_place: f.pickup_place.trim() || null, p_pickup_at: pa, p_dropoff_place: f.dropoff_place.trim() || null, p_dropoff_at: da,
+          p_pickup_place: pPlace && pPlace !== leg?.pickup_place ? pPlace : null, p_pickup_at: pa,
+          p_dropoff_place: dPlace && dPlace !== leg?.dropoff_place ? dPlace : null, p_dropoff_at: da,
           p_driver: office && f.driver ? f.driver : null, p_reason: f.reason.trim() || null,
         });
         setBusy(false);
@@ -6080,6 +6088,7 @@
       const [places, setPlaces] = useState(null);
       const [tapping, setTapping] = useState(null);     // { direction, stage, place }
       const [busy, setBusy] = useState(false);
+      const [loadedFor, setLoadedFor] = useState("");   // r1 — whose trips and places are on screen
       const seq = useRef(0);
       const today = mtpToday();
       useEffect(() => {
@@ -6087,17 +6096,20 @@
           .then(({ data }) => setPersons(data || []));
       }, []);
       const load = useCallback(async () => {
-        if (!personId) { setLegs([]); setPlaces(null); return; }
         const mine = ++seq.current;
+        if (!personId) { setLegs([]); setPlaces(null); setLoadedFor(""); return; }
         const [r, p] = await Promise.all([
           supabase.from("mtp_legs").select("*").eq("person_id", personId).eq("service_date", today),
           mtpLoadPlaces(personId).catch(() => null),
         ]);
         if (mine !== seq.current) return;
-        setLegs(r.data || []); setPlaces(p);
+        setLegs(r.data || []); setPlaces(p); setLoadedFor(personId);
       }, [personId, today]);
-      useEffect(() => { setTapping(null); load(); }, [load]);
+      // r1 — the moment another Person is chosen, the last Person's trips and places are gone
+      useEffect(() => { setTapping(null); setLegs([]); setPlaces(null); setLoadedFor(""); load(); }, [load]);
+      const ready = !!personId && loadedFor === personId;
       const start = (direction, stage) => {
+        if (!ready) return;
         const d = MTP_DIRECTIONS.find(x => x.value === direction);
         const hint = stage === "pickup" ? d.pickupHint : d.dropoffHint;
         setTapping({ direction, stage, place: (hint === "home" ? places?.home : places?.program?.[0]) || "", forPerson: personId });
@@ -6131,10 +6143,10 @@
               <div key={d.value} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: `1px solid ${CB.border}`, flexWrap: "wrap" }}>
                 <span style={{ minWidth: 160, fontSize: 13, fontWeight: 600 }}>{d.label}</span>
                 <span style={{ flex: 1, fontSize: 12, color: CB.textMid }}>
-                  {l?.pickup_at ? `Picked up ${mtpTime(l.pickup_at)}` : "Not picked up"}{l?.dropoff_at ? ` · dropped off ${mtpTime(l.dropoff_at)}` : ""}
+                  {!ready ? `Loading${"\u2026"}` : <>{l?.pickup_at ? `Picked up ${mtpTime(l.pickup_at)}` : "Not picked up"}{l?.dropoff_at ? ` · dropped off ${mtpTime(l.dropoff_at)}` : ""}</>}
                 </span>
-                <button style={btn(!l?.pickup_at)} disabled={!!l?.pickup_at || busy} onClick={() => start(d.value, "pickup")}>Picked up</button>
-                <button style={btn(!l?.dropoff_at)} disabled={!!l?.dropoff_at || busy} onClick={() => start(d.value, "dropoff")}>Dropped off</button>
+                <button style={btn(ready && !l?.pickup_at)} disabled={!ready || !!l?.pickup_at || busy} onClick={() => start(d.value, "pickup")}>Picked up</button>
+                <button style={btn(ready && !l?.dropoff_at)} disabled={!ready || !!l?.dropoff_at || busy} onClick={() => start(d.value, "dropoff")}>Dropped off</button>
               </div>
             );
           })}
@@ -14253,7 +14265,7 @@
         const all = [];
         for (let from = 0; ; from += PAGE) {
           const { data, error } = await supabase.from("e520_lines")
-            .select("id, ord, line_number, source_line_number, service_code, unit_type, start_date, end_date, units, action, remove_reason, flags, upi_status, released_at, release_reason, person_id, raw, persons(first_name, last_name)")
+            .select("id, ord, line_number, source_line_number, service_code, unit_type, start_date, end_date, source_start_date, source_end_date, units, action, remove_reason, flags, upi_status, released_at, release_reason, person_id, raw, persons(first_name, last_name)")
             .eq("batch_id", id).order("ord", { ascending: true }).order("id", { ascending: true })
             .range(from, from + PAGE - 1);
           if (error) return { error };
@@ -14458,6 +14470,16 @@
         </div>
       );
       const personName = (l) => l.persons ? `${l.persons.first_name || ""} ${l.persons.last_name || ""}`.trim() : "—";
+      // v20.0.44 r1 — for every MTP source range (kept or removed), once: the DSG days it can't bill
+      const mtpGapSeen = new Set();
+      const mtpGapOnce = (l) => {
+        if (l.service_code !== "MTP" || !l.person_id) return null;
+        const from = l.source_start_date || l.start_date, to = l.source_end_date || l.end_date;
+        const key = `${l.person_id}|${from}|${to}`;
+        if (mtpGapSeen.has(key)) return null;
+        mtpGapSeen.add(key);
+        return <MtpGapNote personId={l.person_id} from={from} to={to} />;
+      };
       const flagList = (flags) => (Array.isArray(flags) && flags.length > 0) ? (
         <div style={{ display: "grid", gap: 4 }}>
           {flags.map((f, i) => (
@@ -14603,7 +14625,7 @@
                             <td style={td}><Badge text={l.service_code || "?"} color={CB.blue} /></td>
                             <td style={{ ...td, whiteSpace: "nowrap" }}>{e520Day(l.start_date)} – {e520Day(l.end_date)}</td>
                             <td style={{ ...td, fontWeight: 700 }}>{l.units}</td>
-                            <td style={td}>{flagList(l.flags)}{l.service_code === "MTP" && <MtpGapNote personId={l.person_id} from={l.start_date} to={l.end_date} />}</td>
+                            <td style={td}>{flagList(l.flags)}{mtpGapOnce(l)}</td>
                             {!isDraft && (
                               <td style={td}>
                                 {l.released_at ? (
@@ -14708,7 +14730,7 @@
                             <td style={{ ...td, fontWeight: 600 }}>{personName(l)}</td>
                             <td style={td}><Badge text={l.service_code || "?"} color={CB.textMid} /></td>
                             <td style={{ ...td, whiteSpace: "nowrap" }}>{e520Day(l.start_date)} – {e520Day(l.end_date)}</td>
-                            <td style={td}>{l.remove_reason}{Array.isArray(l.flags) && l.flags.length > 0 && <div style={{ marginTop: 6 }}>{flagList(l.flags)}</div>}</td>
+                            <td style={td}>{l.remove_reason}{Array.isArray(l.flags) && l.flags.length > 0 && <div style={{ marginTop: 6 }}>{flagList(l.flags)}</div>}{mtpGapOnce(l)}</td>
                           </tr>
                         ))}
                       </tbody>

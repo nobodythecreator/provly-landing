@@ -17,6 +17,12 @@
 --                 plus days already billed for MTP. The transport field is no longer read by billing.
 --   Locking       A day whose MTP is in an e520 file (a live line) can't have its legs changed.
 --
+-- r1 (Greptile round 1, before this file ran): a front-line login can change only trips it drove (the
+--   existing trip's driver is checked, by typed entry and by taps); trip changes and the e520 build's MTP
+--   check share a per-Person lock, so a trip can't be removed between the build reading it and reserving
+--   the day (e520_day_units becomes VOLATILE so it reads after taking the lock); a typed save changes the
+--   source and GPS of only the parts that actually changed.
+--
 -- RUN IN SUPABASE (SQL editor), ONCE. One transaction: preflight → changes → rolled-back self-test on a
 -- synthetic Person → COMMIT → verification table.
 -- =====================================================================================
@@ -151,6 +157,8 @@ BEGIN
   IF p_tier IS NULL OR p_tier NOT IN ('manage', 'operate', 'deliver') THEN RAISE EXCEPTION 'Not permitted'; END IF;
   IF p_tier = 'deliver' AND NOT public.staff_sees_person(p_actor, v_org, p_person) THEN RAISE EXCEPTION 'Not permitted'; END IF;
   IF p_day IS NULL THEN RAISE EXCEPTION 'Give the date of the trip'; END IF;
+  -- r1 — the same per-Person lock the e520 build takes for MTP, held to the end of this change
+  PERFORM pg_advisory_xact_lock(hashtext('provly-mtp'), hashtext(p_person::text));
   IF public._mtp_day_locked(v_org, p_person, p_day) THEN
     RAISE EXCEPTION 'MTP for % is in an e520 file — release that line before changing its trips', to_char(p_day, 'MM/DD/YYYY');
   END IF;
@@ -207,6 +215,10 @@ BEGIN
   SELECT * INTO l FROM mtp_legs WHERE person_id = p_person AND service_date = v_day AND direction = p_direction FOR UPDATE;
   v_found := FOUND;
   IF v_found THEN v_old := to_jsonb(l); END IF;
+  -- r1 — a front-line login finishes only a trip it started
+  IF v_found AND p_tier = 'deliver' AND l.driver_staff_id <> p_actor THEN
+    RAISE EXCEPTION 'Another driver recorded this trip — ask the office to correct it';
+  END IF;
   IF p_stage = 'pickup' THEN
     IF v_found AND l.pickup_at IS NOT NULL THEN RAISE EXCEPTION 'This pickup is already recorded — correct it on the DSG note'; END IF;
     IF v_found AND l.dropoff_at IS NOT NULL AND l.dropoff_at <= now() THEN RAISE EXCEPTION 'The drop-off is already recorded; a pickup can''t come after it'; END IF;
@@ -254,6 +266,8 @@ DECLARE
   v_found   boolean;
   v_correct boolean := false;
   v_fill    boolean := false;
+  v_pchg    boolean := false;
+  v_dchg    boolean := false;
 BEGIN
   v_org := public._mtp_check(p_person, p_day, p_actor, p_tier);
   IF p_direction NOT IN ('to_program', 'from_program') THEN RAISE EXCEPTION 'Choose the trip: to the program, or home'; END IF;
@@ -268,6 +282,10 @@ BEGIN
   v_driver := coalesce(p_driver, CASE WHEN v_found THEN l.driver_staff_id END, p_actor);
   IF NOT EXISTS (SELECT 1 FROM staff s WHERE s.id = v_driver AND s.org_id = v_org) THEN RAISE EXCEPTION 'The driver isn''t on this organization''s staff'; END IF;
   IF p_tier = 'deliver' AND v_driver <> p_actor THEN RAISE EXCEPTION 'You can record only trips you drove'; END IF;
+  -- r1 — and it can change only a trip it drove: the existing trip's driver, not the one asked for
+  IF p_tier = 'deliver' AND v_found AND l.driver_staff_id <> p_actor THEN
+    RAISE EXCEPTION 'Another driver recorded this trip — ask the office to correct it';
+  END IF;
 
   IF NOT v_found THEN
     IF v_pp IS NULL AND p_pickup_at IS NULL AND v_dp IS NULL AND p_dropoff_at IS NULL THEN RAISE EXCEPTION 'Enter the pickup or the drop-off'; END IF;
@@ -281,6 +299,9 @@ BEGIN
     v_fill := (v_pp IS NOT NULL AND l.pickup_place IS NULL) OR (p_pickup_at IS NOT NULL AND l.pickup_at IS NULL)
            OR (v_dp IS NOT NULL AND l.dropoff_place IS NULL) OR (p_dropoff_at IS NOT NULL AND l.dropoff_at IS NULL);
     IF NOT v_correct AND NOT v_fill THEN RETURN l.id; END IF;               -- nothing changed
+    -- r1 — which parts actually change (an unchanged part keeps its source and GPS)
+    v_pchg := (v_pp IS NOT NULL AND v_pp IS DISTINCT FROM l.pickup_place) OR (p_pickup_at IS NOT NULL AND p_pickup_at IS DISTINCT FROM l.pickup_at);
+    v_dchg := (v_dp IS NOT NULL AND v_dp IS DISTINCT FROM l.dropoff_place) OR (p_dropoff_at IS NOT NULL AND p_dropoff_at IS DISTINCT FROM l.dropoff_at);
   END IF;
   IF v_correct AND (v_reason IS NULL OR length(v_reason) < 3) THEN RAISE EXCEPTION 'Give a reason for the correction'; END IF;
   IF v_fill AND v_late AND (v_reason IS NULL OR length(v_reason) < 3) THEN
@@ -302,14 +323,14 @@ BEGIN
     UPDATE mtp_legs SET
       pickup_place  = coalesce(v_pp, pickup_place),
       pickup_at     = coalesce(p_pickup_at, pickup_at),
-      pickup_lat    = CASE WHEN v_pp IS NOT NULL OR p_pickup_at IS NOT NULL THEN NULL ELSE pickup_lat END,
-      pickup_lng    = CASE WHEN v_pp IS NOT NULL OR p_pickup_at IS NOT NULL THEN NULL ELSE pickup_lng END,
-      pickup_source = CASE WHEN v_pp IS NOT NULL OR p_pickup_at IS NOT NULL THEN 'typed' ELSE pickup_source END,
+      pickup_lat    = CASE WHEN v_pchg THEN NULL ELSE pickup_lat END,
+      pickup_lng    = CASE WHEN v_pchg THEN NULL ELSE pickup_lng END,
+      pickup_source = CASE WHEN v_pchg THEN 'typed' ELSE pickup_source END,
       dropoff_place = coalesce(v_dp, dropoff_place),
       dropoff_at    = coalesce(p_dropoff_at, dropoff_at),
-      dropoff_lat   = CASE WHEN v_dp IS NOT NULL OR p_dropoff_at IS NOT NULL THEN NULL ELSE dropoff_lat END,
-      dropoff_lng   = CASE WHEN v_dp IS NOT NULL OR p_dropoff_at IS NOT NULL THEN NULL ELSE dropoff_lng END,
-      dropoff_source = CASE WHEN v_dp IS NOT NULL OR p_dropoff_at IS NOT NULL THEN 'typed' ELSE dropoff_source END,
+      dropoff_lat   = CASE WHEN v_dchg THEN NULL ELSE dropoff_lat END,
+      dropoff_lng   = CASE WHEN v_dchg THEN NULL ELSE dropoff_lng END,
+      dropoff_source = CASE WHEN v_dchg THEN 'typed' ELSE dropoff_source END,
       driver_staff_id = v_driver,
       late_entry    = late_entry OR (v_fill AND v_late),
       late_reason   = CASE WHEN v_fill AND v_late THEN v_reason ELSE late_reason END,
@@ -400,7 +421,7 @@ CREATE OR REPLACE FUNCTION public.e520_day_units(
   p_org uuid, p_person uuid, p_code text, p_code_id uuid, p_unit text, p_evv boolean, p_day date)
 RETURNS TABLE (o_units integer, o_note_units integer, o_evv_units integer, o_notes jsonb, o_null_min boolean)
 LANGUAGE plpgsql
-STABLE
+VOLATILE   -- v20.0.44 r1: takes the MTP lock, then reads (a STABLE function would read the caller's older snapshot)
 SET search_path TO 'public'
 AS $$
 DECLARE
@@ -420,6 +441,9 @@ BEGIN
 
   IF p_code = 'MTP' THEN
     -- one MTP day per approved DSG note day whose MTP trip record is complete (v20.0.44; was D6's transport field)
+    -- r1 — the per-Person lock trip changes take: no trip can change between this read and the build reserving
+    -- the day (the lock is held until the build's transaction ends)
+    PERFORM pg_advisory_xact_lock(hashtext('provly-mtp'), hashtext(p_person::text));
     SELECT array_agg(n.id ORDER BY n.start_time NULLS LAST, n.id) INTO v_ids
       FROM service_notes n JOIN service_code_definitions c ON c.id = n.service_code_id
      WHERE n.org_id = p_org AND n.person_id = p_person AND c.code = 'DSG'
@@ -674,6 +698,8 @@ DECLARE
   v_today   date := (now() AT TIME ZONE 'America/Denver')::date;
   v_n       integer;
   v_ok      boolean;
+  v_other   uuid;
+  v_leg3    uuid;
   r         record;
   t0        timestamptz := (TIMESTAMP '2001-01-15 08:10' AT TIME ZONE 'America/Denver');
 BEGIN
@@ -785,6 +811,35 @@ BEGIN
       RAISE EXCEPTION 'SELFTEST FAIL 8b: the taps did not make a complete leg';
     END IF;
 
+    -- 8c. a typed drop-off fix on a tapped trip leaves the pickup's tap and GPS alone
+    PERFORM public._mtp_record(v_person, v_today, 'to_program', NULL, NULL, 'Day program — west door', NULL, NULL, 'wrong door picked', v_owner, 'manage');
+    IF NOT EXISTS (SELECT 1 FROM mtp_legs WHERE id = v_leg AND pickup_source = 'tap' AND pickup_lat = 40.6
+                   AND dropoff_source = 'typed' AND dropoff_place = 'Day program — west door') THEN
+      RAISE EXCEPTION 'SELFTEST FAIL 8c: fixing the drop-off changed the untouched pickup';
+    END IF;
+
+    -- 8d. a front-line driver can't take over another driver's trip, by tap or by typed entry
+    SELECT s.id INTO v_other FROM staff s WHERE s.org_id = v_org AND s.is_active AND s.id <> v_owner ORDER BY s.id LIMIT 1;
+    IF v_other IS NOT NULL THEN
+      INSERT INTO staff_assignments (org_id, person_id, staff_id) VALUES (v_org, v_person, v_other);
+      v_leg3 := public._mtp_tap(v_person, 'from_program', 'pickup', 'Day program', NULL, NULL, v_owner, 'manage');
+      BEGIN
+        PERFORM public._mtp_tap(v_person, 'from_program', 'dropoff', 'Home', NULL, NULL, v_other, 'deliver');
+        RAISE EXCEPTION 'SELFTEST FAIL 8d: a front-line driver finished another driver''s trip';
+      EXCEPTION WHEN raise_exception THEN
+        IF SQLERRM LIKE 'SELFTEST%' THEN RAISE; END IF;
+      END;
+      BEGIN
+        PERFORM public._mtp_record(v_person, v_today, 'from_program', 'Somewhere else', NULL, NULL, NULL, v_other, 'mine now', v_other, 'deliver');
+        RAISE EXCEPTION 'SELFTEST FAIL 8e: a front-line driver took over another driver''s trip';
+      EXCEPTION WHEN raise_exception THEN
+        IF SQLERRM LIKE 'SELFTEST%' THEN RAISE; END IF;
+      END;
+      IF NOT EXISTS (SELECT 1 FROM mtp_legs WHERE id = v_leg3 AND driver_staff_id = v_owner AND pickup_place = 'Day program' AND dropoff_at IS NULL) THEN
+        RAISE EXCEPTION 'SELFTEST FAIL 8f: another driver''s trip was changed';
+      END IF;
+    END IF;
+
     -- 9. a front-line login can't record for a Person who isn't assigned to them; nobody outside the staff can
     BEGIN
       PERFORM public._mtp_record(v_person, v_day, 'to_program', 'Home', NULL, NULL, NULL, NULL, 'self-test', v_owner, 'deliver');
@@ -855,6 +910,10 @@ SELECT n, check_name, got, want,
   UNION ALL SELECT 9, 'MTP authorizations whose used units changed under the new rule',
     (SELECT count(*) FROM v20044_mtp_changed)::text || coalesce(' (' || (SELECT string_agg(before_units || '→' || after_units, ', ') FROM v20044_mtp_changed) || ')', ''),
     '(information)'
+  UNION ALL SELECT 11, 'Trip changes and the e520 MTP check share a lock',
+    ((position('pg_advisory_xact_lock' IN pg_get_functiondef('public._mtp_check(uuid, date, uuid, text)'::regprocedure)) > 0)
+     AND (position('pg_advisory_xact_lock' IN pg_get_functiondef('public.e520_day_units(uuid, uuid, text, uuid, text, boolean, date)'::regprocedure)) > 0)
+     AND (SELECT provolatile = 'v' FROM pg_proc WHERE oid = 'public.e520_day_units(uuid, uuid, text, uuid, text, boolean, date)'::regprocedure))::text, 'true'
   UNION ALL SELECT 10, 'Approved DSG days with no complete trip record (won''t bill MTP until documented)',
     (SELECT count(DISTINCT (n.person_id, n.service_date))::text FROM service_notes n JOIN service_code_definitions c ON c.id = n.service_code_id
       WHERE c.code = 'DSG' AND n.status = 'approved' AND NOT public._mtp_day_documented(n.org_id, n.person_id, n.service_date)), '(information)'
