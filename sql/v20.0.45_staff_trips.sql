@@ -26,6 +26,9 @@
 --   so no drive is counted twice; off duty needs a known drive time and a release made for the visit that
 --   just ended (its schedule item), with its notice logged by that clock-out; confirming sends the trip's
 --   details as shown, and a trip that changed since is refused.
+-- r2 (Greptile round 2, before this file ran): a connecting drive with a missing location is always kept
+--   (only a known distance under a tenth of a mile is dropped), so its miles can be entered; on-the-spot
+--   releases count again when they were issued during the visit that just ended (or as it ended).
 --
 -- RUN IN SUPABASE (SQL editor), ONCE. One transaction: preflight → changes → rolled-back self-test →
 -- COMMIT → verification table. The verification table reads tables only (no sign-in-dependent functions).
@@ -124,32 +127,33 @@ LANGUAGE sql IMMUTABLE AS $$
       + cos(radians(p_lat1::float8)) * cos(radians(p_lat2::float8)) * power(sin(radians((p_lng2 - p_lng1)::float8) / 2), 2))))::numeric END
 $$;
 
--- Decision 9: off duty only with a valid release MADE FOR THE VISIT THAT JUST ENDED (its scheduled shift or
--- work block), its notice logged by that clock-out, and a gap of at least the drive time + the buffer. With no
--- known drive time (a missing location) the test can't be met, so the trip stays reimbursable.
-CREATE FUNCTION public._trip_off_duty(p_org uuid, p_staff uuid, p_a_shift uuid, p_a_block uuid, p_out timestamptz, p_in timestamptz,
-                                      p_drive_min integer, p_buffer integer)
+-- Decision 9: off duty only with a valid release that belongs to THIS gap — a scheduled release made for the
+-- visit that just ended (its shift or work block), or an on-the-spot release a supervisor issued during that
+-- visit or as it ended — whose notice was logged by that clock-out, and a gap of at least the drive time +
+-- the buffer. With no known drive time (a missing location) the test can't be met: the trip stays reimbursable.
+CREATE FUNCTION public._trip_off_duty(p_org uuid, p_staff uuid, p_a_shift uuid, p_a_block uuid, p_a_in timestamptz,
+                                      p_out timestamptz, p_in timestamptz, p_drive_min integer, p_buffer integer)
 RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'public' AS $$
   SELECT p_drive_min IS NOT NULL
-     AND (p_a_shift IS NOT NULL OR p_a_block IS NOT NULL)
      AND extract(epoch FROM (p_in - p_out)) / 60 >= p_drive_min + coalesce(p_buffer, 30)
      AND EXISTS (SELECT 1 FROM schedule_releases r JOIN release_notices n ON n.release_id = r.id AND n.org_id = r.org_id
                   WHERE r.org_id = p_org AND r.staff_id = p_staff AND r.revoked_at IS NULL
-                    AND ((p_a_shift IS NOT NULL AND r.before_shift_id = p_a_shift)
-                         OR (p_a_block IS NOT NULL AND r.before_work_block_id = p_a_block))
-                    AND n.noticed_at <= p_out + interval '10 minutes'
                     AND r.return_at > p_out AND r.return_at <= p_in + interval '15 minutes'
+                    AND n.noticed_at <= p_out + interval '10 minutes'
+                    AND (   ((p_a_shift IS NOT NULL AND r.before_shift_id = p_a_shift)
+                             OR (p_a_block IS NOT NULL AND r.before_work_block_id = p_a_block))
+                         OR (r.kind = 'on_the_spot' AND r.before_shift_id IS NULL AND r.before_work_block_id IS NULL
+                             AND p_a_in IS NOT NULL AND n.noticed_at >= p_a_in))
                     AND public._release_valid(p_org, r.id, false))
 $$;
 
--- A hop too short to be a drive: under a tenth of a mile, or (with a location missing) under 3 minutes
+-- A hop too short to be a drive: a KNOWN distance under a tenth of a mile. With a location missing the distance
+-- is unknown, so the hop is kept and its miles can be entered (r2).
 CREATE FUNCTION public._trip_negligible(p_lat1 numeric, p_lng1 numeric, p_lat2 numeric, p_lng2 numeric, p_at1 timestamptz, p_at2 timestamptz)
 RETURNS boolean
 LANGUAGE sql IMMUTABLE AS $$
-  SELECT CASE WHEN public._trip_miles(p_lat1, p_lng1, p_lat2, p_lng2) IS NOT NULL
-              THEN public._trip_miles(p_lat1, p_lng1, p_lat2, p_lng2) < 0.1
-              ELSE p_at2 - p_at1 < interval '3 minutes' END
+  SELECT coalesce(public._trip_miles(p_lat1, p_lng1, p_lat2, p_lng2) < 0.1, false)
 $$;
 
 -- W-2 or contractor on the day: an active pay assignment decides; otherwise the staff record
@@ -171,7 +175,7 @@ $$;
 CREATE FUNCTION public._trip_upsert(p_org uuid, p_staff uuid, p_kind text, p_from_ref text, p_to_ref text,
                                     p_from_person uuid, p_to_person uuid, p_from_at timestamptz, p_to_at timestamptz,
                                     p_from_lat numeric, p_from_lng numeric, p_to_lat numeric, p_to_lng numeric,
-                                    p_a_shift uuid, p_a_block uuid, p_may_be_off_duty boolean,
+                                    p_a_shift uuid, p_a_block uuid, p_a_in timestamptz, p_may_be_off_duty boolean,
                                     p_rf numeric, p_mph integer, p_pct integer)
 RETURNS text
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'public' AS $$
@@ -190,7 +194,7 @@ DECLARE
 BEGIN
   v_drive := CASE WHEN v_est IS NULL THEN NULL ELSE ceil(v_est / p_mph * 60)::integer END;
   v_class := CASE WHEN p_kind = 'transport' THEN 'transport_person'
-                  WHEN p_may_be_off_duty AND public._trip_off_duty(p_org, p_staff, p_a_shift, p_a_block, p_from_at, p_to_at, v_drive, v_buffer) THEN 'post_gap'
+                  WHEN p_may_be_off_duty AND public._trip_off_duty(p_org, p_staff, p_a_shift, p_a_block, p_a_in, p_from_at, p_to_at, v_drive, v_buffer) THEN 'post_gap'
                   ELSE 'between_persons' END;
   v_wt    := public._trip_worker_type(p_org, p_staff, v_day);
   v_reimb := v_wt = 'w2' AND v_class IN ('between_persons', 'transport_person');
@@ -282,7 +286,7 @@ BEGIN
     )
     SELECT o.ref AS from_ref, o.n_ref AS to_ref, o.person_id AS from_person, o.n_person AS to_person,
            o.out_at AS from_at, o.n_in AS to_at, o.out_lat AS from_lat, o.out_lng AS from_lng, o.n_lat AS to_lat, o.n_lng AS to_lng,
-           o.shift_id AS a_shift, o.work_block_id AS a_block
+           o.shift_id AS a_shift, o.work_block_id AS a_block, o.in_at AS a_in
       FROM ordered o
      WHERE o.n_ref IS NOT NULL
        AND o.n_person IS DISTINCT FROM o.person_id                                   -- back-to-back Persons
@@ -301,7 +305,7 @@ BEGIN
       v_split := true;
       IF l.pickup_at >= v_pat AND NOT public._trip_negligible(v_plat, v_plng, l.pickup_lat, l.pickup_lng, v_pat, l.pickup_at) THEN
         v_seen := v_seen || public._trip_upsert(p_org, p_staff, 'between_visits', v_pref, 'mtppick:' || l.id::text, v_pperson, l.person_id,
-                                                v_pat, l.pickup_at, v_plat, v_plng, l.pickup_lat, l.pickup_lng, NULL, NULL, false, v_rf, v_mph, v_pct);
+                                                v_pat, l.pickup_at, v_plat, v_plng, l.pickup_lat, l.pickup_lng, NULL, NULL, NULL, false, v_rf, v_mph, v_pct);
       END IF;
       IF l.dropoff_at > v_pat THEN
         v_pref := 'mtpdrop:' || l.id::text; v_pat := l.dropoff_at; v_plat := l.dropoff_lat; v_plng := l.dropoff_lng; v_pperson := l.person_id;
@@ -309,10 +313,10 @@ BEGIN
     END LOOP;
     IF NOT v_split THEN
       v_seen := v_seen || public._trip_upsert(p_org, p_staff, 'between_visits', c.from_ref, c.to_ref, c.from_person, c.to_person,
-                                              c.from_at, c.to_at, c.from_lat, c.from_lng, c.to_lat, c.to_lng, c.a_shift, c.a_block, true, v_rf, v_mph, v_pct);
+                                              c.from_at, c.to_at, c.from_lat, c.from_lng, c.to_lat, c.to_lng, c.a_shift, c.a_block, c.a_in, true, v_rf, v_mph, v_pct);
     ELSIF v_pat <= c.to_at AND NOT public._trip_negligible(v_plat, v_plng, c.to_lat, c.to_lng, v_pat, c.to_at) THEN
       v_seen := v_seen || public._trip_upsert(p_org, p_staff, 'between_visits', v_pref, c.to_ref, v_pperson, c.to_person,
-                                              v_pat, c.to_at, v_plat, v_plng, c.to_lat, c.to_lng, NULL, NULL, false, v_rf, v_mph, v_pct);
+                                              v_pat, c.to_at, v_plat, v_plng, c.to_lat, c.to_lng, NULL, NULL, NULL, false, v_rf, v_mph, v_pct);
     END IF;
   END LOOP;
 
@@ -323,7 +327,7 @@ BEGIN
   LOOP
     v_seen := v_seen || public._trip_upsert(p_org, p_staff, 'transport', 'mtp:' || l.id::text, 'mtp:' || l.id::text, l.person_id, l.person_id,
                                             l.pickup_at, l.dropoff_at, l.pickup_lat, l.pickup_lng, l.dropoff_lat, l.dropoff_lng,
-                                            NULL, NULL, false, v_rf, v_mph, v_pct);
+                                            NULL, NULL, NULL, false, v_rf, v_mph, v_pct);
   END LOOP;
 
   -- trips in the range whose source is gone
@@ -540,6 +544,8 @@ DECLARE
   v_a2    uuid;
   v_b2    uuid;
   g       timestamptz := (TIMESTAMP '2001-03-06 10:00' AT TIME ZONE 'America/Denver');
+  h       timestamptz := (TIMESTAMP '2001-03-07 09:00' AT TIME ZONE 'America/Denver');
+  v_rel   uuid;
   f       timestamptz := (TIMESTAMP '2001-03-05 09:00' AT TIME ZONE 'America/Denver');
 BEGIN
   SELECT m.org_id INTO v_org FROM org_members m WHERE m.role::text = 'owner' ORDER BY m.org_id LIMIT 1;
@@ -699,6 +705,51 @@ BEGIN
     SELECT count(*) INTO v_n FROM trips WHERE staff_id = v_w2 AND trip_date = date '2001-03-06' AND status <> 'void' AND reimbursable;
     IF v_n <> 1 OR NOT EXISTS (SELECT 1 FROM trips WHERE staff_id = v_w2 AND trip_date = date '2001-03-06' AND kind = 'transport' AND status <> 'void') THEN
       RAISE EXCEPTION 'SELFTEST FAIL 7c: the drive was counted % times (expected once, as the MTP ride)', v_n;
+    END IF;
+
+    -- 7d. a connecting drive whose pickup has no location is kept, so its miles can be entered
+    UPDATE mtp_legs SET pickup_lat = NULL, pickup_lng = NULL WHERE driver_staff_id = v_w2 AND service_date = date '2001-03-06';
+    PERFORM public._trips_refresh(v_org, v_w2, date '2001-03-06', date '2001-03-06');
+    IF NOT EXISTS (SELECT 1 FROM trips WHERE staff_id = v_w2 AND trip_date = date '2001-03-06' AND kind = 'between_visits'
+                   AND status <> 'void' AND est_miles IS NULL AND reimbursable) THEN
+      RAISE EXCEPTION 'SELFTEST FAIL 7d: a drive with a missing location was dropped instead of kept for miles entry';
+    END IF;
+
+    -- 7e. an on-the-spot release issued during the visit that just ended makes the gap off duty
+    PERFORM pg_temp.v20045_test_insert('evv_sessions', jsonb_build_object('org_id', v_org, 'staff_id', v_w2, 'person_id', v_p1, 'service_code_id', v_code,
+      'clock_in_at', h, 'clock_out_at', h + interval '1 hour', 'server_clock_in_at', h, 'server_clock_out_at', h + interval '1 hour',
+      'clock_in_lat', 40.7608, 'clock_in_lng', -111.8910, 'clock_out_lat', 40.7608, 'clock_out_lng', -111.8910));
+    PERFORM pg_temp.v20045_test_insert('evv_sessions', jsonb_build_object('org_id', v_org, 'staff_id', v_w2, 'person_id', v_p2, 'service_code_id', v_code,
+      'clock_in_at', h + interval '150 minutes', 'clock_out_at', h + interval '210 minutes',
+      'server_clock_in_at', h + interval '150 minutes', 'server_clock_out_at', h + interval '210 minutes',
+      'clock_in_lat', 40.6669, 'clock_in_lng', -111.8880, 'clock_out_lat', 40.6669, 'clock_out_lng', -111.8880));
+    INSERT INTO schedule_releases (org_id, staff_id, kind, release_date, return_at, created_by)
+    VALUES (v_org, v_w2, 'on_the_spot', date '2001-03-07', h + interval '140 minutes', v_host) RETURNING id INTO v_rel;
+    INSERT INTO release_notices (org_id, release_id, staff_id, channel, noticed_at, recorded_by)
+    VALUES (v_org, v_rel, v_w2, 'supervisor', h + interval '50 minutes', v_host);
+    PERFORM public._trips_refresh(v_org, v_w2, date '2001-03-07', date '2001-03-07');
+    IF NOT EXISTS (SELECT 1 FROM trips WHERE staff_id = v_w2 AND trip_date = date '2001-03-07' AND status <> 'void'
+                   AND classification = 'post_gap' AND NOT reimbursable) THEN
+      RAISE EXCEPTION 'SELFTEST FAIL 7e: an on-the-spot release issued during the visit did not make the gap off duty';
+    END IF;
+
+    -- 7f. an on-the-spot release issued BEFORE the visit started doesn't cover the gap after it (another day)
+    PERFORM pg_temp.v20045_test_insert('evv_sessions', jsonb_build_object('org_id', v_org, 'staff_id', v_w2, 'person_id', v_p1, 'service_code_id', v_code,
+      'clock_in_at', h + interval '1 day', 'clock_out_at', h + interval '1 day 1 hour',
+      'server_clock_in_at', h + interval '1 day', 'server_clock_out_at', h + interval '1 day 1 hour',
+      'clock_in_lat', 40.7608, 'clock_in_lng', -111.8910, 'clock_out_lat', 40.7608, 'clock_out_lng', -111.8910));
+    PERFORM pg_temp.v20045_test_insert('evv_sessions', jsonb_build_object('org_id', v_org, 'staff_id', v_w2, 'person_id', v_p2, 'service_code_id', v_code,
+      'clock_in_at', h + interval '1 day 150 minutes', 'clock_out_at', h + interval '1 day 210 minutes',
+      'server_clock_in_at', h + interval '1 day 150 minutes', 'server_clock_out_at', h + interval '1 day 210 minutes',
+      'clock_in_lat', 40.6669, 'clock_in_lng', -111.8880, 'clock_out_lat', 40.6669, 'clock_out_lng', -111.8880));
+    INSERT INTO schedule_releases (org_id, staff_id, kind, release_date, return_at, created_by)
+    VALUES (v_org, v_w2, 'on_the_spot', date '2001-03-08', h + interval '1 day 140 minutes', v_host) RETURNING id INTO v_rel;
+    INSERT INTO release_notices (org_id, release_id, staff_id, channel, noticed_at, recorded_by)
+    VALUES (v_org, v_rel, v_w2, 'supervisor', h + interval '1 day' - interval '60 minutes', v_host);
+    PERFORM public._trips_refresh(v_org, v_w2, date '2001-03-08', date '2001-03-08');
+    IF NOT EXISTS (SELECT 1 FROM trips WHERE staff_id = v_w2 AND trip_date = date '2001-03-08' AND status <> 'void'
+                   AND classification = 'between_persons' AND reimbursable) THEN
+      RAISE EXCEPTION 'SELFTEST FAIL 7f: an older release took away mileage for a later gap';
     END IF;
 
     -- 8. no location → no estimate, flagged; the staff member enters the miles
