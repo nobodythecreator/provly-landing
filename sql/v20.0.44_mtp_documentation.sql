@@ -22,6 +22,11 @@
 --   check share a per-Person lock, so a trip can't be removed between the build reading it and reserving
 --   the day (e520_day_units becomes VOLATILE so it reads after taking the lock); a typed save changes the
 --   source and GPS of only the parts that actually changed.
+-- r3 (after it ran — the changes committed; only the final check failed): verification row 10 called a
+--   function that reads the session's sign-in details, which are blank once the transaction has ended. The
+--   row now counts the days directly; row 4 looks for the old rule itself (n.transport) rather than the word,
+--   which also appears in a comment. Nothing above COMMIT changed. DON'T RUN THIS FILE AGAIN — its
+--   preflight would stop it anyway.
 -- r2 (Greptile round 2, before this file ran): every write takes the Person lock BEFORE locking a trip row —
 --   removing a trip now reads it, takes the Person lock, then locks and re-reads the row (as saving and
 --   tapping already did), so a removal and a save on the same trip can't deadlock.
@@ -902,7 +907,7 @@ SELECT n, check_name, got, want,
     (SELECT count(*) FROM pg_trigger WHERE tgname = 'mtp_leg_history_append_only' AND NOT tgisinternal)::text, '1'
   UNION ALL SELECT 4, 'e520 MTP days read the trip record (not the transport field)',
     (position('_mtp_day_documented' IN pg_get_functiondef('public.e520_day_units(uuid, uuid, text, uuid, text, boolean, date)'::regprocedure)) > 0
-     AND position('transport' IN pg_get_functiondef('public.e520_day_units(uuid, uuid, text, uuid, text, boolean, date)'::regprocedure)) = 0)::text, 'true'
+     AND position('n.transport' IN pg_get_functiondef('public.e520_day_units(uuid, uuid, text, uuid, text, boolean, date)'::regprocedure)) = 0)::text, 'true'
   UNION ALL SELECT 5, 'Authorization usage reads the trip record',
     (position('_mtp_day_counts' IN pg_get_functiondef('public.provly_auth_used_units(uuid, uuid, uuid, date, date, uuid, text)'::regprocedure)) > 0)::text, 'true'
   UNION ALL SELECT 6, 'Public trip functions for signed-in users (not anon)',
@@ -925,6 +930,10 @@ SELECT n, check_name, got, want,
        < position('FOR UPDATE' IN pg_get_functiondef('public._mtp_delete(uuid, text, uuid, text)'::regprocedure)))::text, 'true'
   UNION ALL SELECT 10, 'Approved DSG days with no complete trip record (won''t bill MTP until documented)',
     (SELECT count(DISTINCT (n.person_id, n.service_date))::text FROM service_notes n JOIN service_code_definitions c ON c.id = n.service_code_id
-      WHERE c.code = 'DSG' AND n.status = 'approved' AND NOT public._mtp_day_documented(n.org_id, n.person_id, n.service_date)), '(information)'
+      WHERE c.code = 'DSG' AND n.status = 'approved'
+        AND NOT (EXISTS (SELECT 1 FROM mtp_legs l WHERE l.person_id = n.person_id AND l.service_date = n.service_date)
+                 AND NOT EXISTS (SELECT 1 FROM mtp_legs l WHERE l.person_id = n.person_id AND l.service_date = n.service_date
+                                   AND (l.pickup_place IS NULL OR l.pickup_at IS NULL OR l.dropoff_place IS NULL OR l.dropoff_at IS NULL)))),
+    '(information)'
 ) t
 ORDER BY n;
