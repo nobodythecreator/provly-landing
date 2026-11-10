@@ -40,6 +40,7 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.45 r1 (Greptile r1): confirming a trip sends the details it was shown with; if the trip changed since (an office correction, a refresh elsewhere), it's refused with "reload and check it again" and the list reloads. Server-side: corrected visit times are used; an MTP ride inside a gap is counted once; off duty needs a release made for the visit that just ended and a known drive time. -->
   <!-- v20.0.45 (staff trips and mileage): the EVV page has a My trips card — each week's trips between back-to-back Persons (from one visit's clock-out to the next visit's clock-in, the same day) and the MTP rides the staff member drove, each with Provly's estimate (straight line × 1.30) to confirm or correct with a reason. Trips after an off-duty release aren't reimbursed; hosts' trips are recorded but are part of their agreement. Office staff can open anyone's trips. -->
   <!-- v20.0.44 r1 (Greptile r1): saving a trip sends only the parts that changed, so a tapped time (recorded to the second) is never resent rounded to the minute and mistaken for a correction; the ride card clears the previous Person's trips and places the moment another Person is chosen and keeps the taps off until the new Person's details have loaded; the e520 review shows the DSG days missing trip records for every MTP range, including lines removed for having nothing billable. Server-side: front-line drivers change only their own trips; trip changes and the e520 build share a lock. -->
   <!-- v20.0.44 (MTP documentation, DHHS91172 Article 13.3(3)): MTP needs the pickup and drop-off place and time for every trip, so DSG notes now carry the day's trips (to the program, home from the program) instead of the "Transported" answer, and the EVV page has Picked up / Dropped off taps that record the place, the server's time and the phone's location. A DSG day bills MTP only when it has a trip and every trip on it is complete; typed trips after the day are late entries with a reason; corrections need a reason and are kept. The e520 review shows the DSG days an MTP line can't bill. -->
@@ -6257,9 +6258,14 @@
       const confirm = async (trip, miles, reason) => {
         const forTrip = trip.id, forLoad = seq.current;
         setBusy(true);
-        const { error } = await supabase.rpc("trip_confirm", { p_trip: forTrip, p_miles: miles, p_reason: reason || null });
+        // r1 — the details this trip was shown with; the server refuses if it has changed since
+        const { error } = await supabase.rpc("trip_confirm", { p_trip: forTrip, p_miles: miles, p_reason: reason || null, p_sig: trip.source_sig });
         setBusy(false);
-        if (error) return addToast(error.message, "error");
+        if (error) {
+          addToast(error.message, "error");
+          if (/changed since you opened it|no longer exists/i.test(error.message || "")) { setEditing(null); if (forLoad === seq.current) load(); }
+          return;
+        }
         addToast("Trip confirmed", "success");
         setEditing(null);
         if (forLoad === seq.current) load();
