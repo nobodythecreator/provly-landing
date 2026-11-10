@@ -22,6 +22,9 @@
 --   check share a per-Person lock, so a trip can't be removed between the build reading it and reserving
 --   the day (e520_day_units becomes VOLATILE so it reads after taking the lock); a typed save changes the
 --   source and GPS of only the parts that actually changed.
+-- r2 (Greptile round 2, before this file ran): every write takes the Person lock BEFORE locking a trip row —
+--   removing a trip now reads it, takes the Person lock, then locks and re-reads the row (as saving and
+--   tapping already did), so a removal and a save on the same trip can't deadlock.
 --
 -- RUN IN SUPABASE (SQL editor), ONCE. One transaction: preflight → changes → rolled-back self-test on a
 -- synthetic Person → COMMIT → verification table.
@@ -351,9 +354,12 @@ DECLARE
   l     mtp_legs;
   v_org uuid;
 BEGIN
-  SELECT * INTO l FROM mtp_legs WHERE id = p_leg FOR UPDATE;
+  -- r2 — lock order on every write path: the Person lock first (in _mtp_check), then the trip row
+  SELECT * INTO l FROM mtp_legs WHERE id = p_leg;
   IF NOT FOUND THEN RAISE EXCEPTION 'Trip not found'; END IF;
   v_org := public._mtp_check(l.person_id, l.service_date, p_actor, p_tier);
+  SELECT * INTO l FROM mtp_legs WHERE id = p_leg FOR UPDATE;        -- re-read under the lock
+  IF NOT FOUND THEN RAISE EXCEPTION 'Trip not found — it was removed a moment ago'; END IF;
   IF p_tier = 'deliver' AND l.driver_staff_id <> p_actor THEN RAISE EXCEPTION 'You can remove only trips you drove'; END IF;
   IF length(btrim(coalesce(p_reason, ''))) < 3 THEN RAISE EXCEPTION 'Give a reason for removing the trip'; END IF;
   INSERT INTO mtp_leg_history (org_id, leg_id, person_id, service_date, action, changed_by, old_values, reason)
@@ -914,6 +920,9 @@ SELECT n, check_name, got, want,
     ((position('pg_advisory_xact_lock' IN pg_get_functiondef('public._mtp_check(uuid, date, uuid, text)'::regprocedure)) > 0)
      AND (position('pg_advisory_xact_lock' IN pg_get_functiondef('public.e520_day_units(uuid, uuid, text, uuid, text, boolean, date)'::regprocedure)) > 0)
      AND (SELECT provolatile = 'v' FROM pg_proc WHERE oid = 'public.e520_day_units(uuid, uuid, text, uuid, text, boolean, date)'::regprocedure))::text, 'true'
+  UNION ALL SELECT 12, 'Removing a trip takes the Person lock before the trip row (same order as saves and taps)',
+    (position('_mtp_check' IN pg_get_functiondef('public._mtp_delete(uuid, text, uuid, text)'::regprocedure))
+       < position('FOR UPDATE' IN pg_get_functiondef('public._mtp_delete(uuid, text, uuid, text)'::regprocedure)))::text, 'true'
   UNION ALL SELECT 10, 'Approved DSG days with no complete trip record (won''t bill MTP until documented)',
     (SELECT count(DISTINCT (n.person_id, n.service_date))::text FROM service_notes n JOIN service_code_definitions c ON c.id = n.service_code_id
       WHERE c.code = 'DSG' AND n.status = 'approved' AND NOT public._mtp_day_documented(n.org_id, n.person_id, n.service_date)), '(information)'
