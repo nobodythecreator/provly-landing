@@ -40,6 +40,7 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.45b r1 (Greptile r1): ending a transport (or clocking in or out) refreshes My trips right away, so the finished ride is there to confirm. Server-side: a transport forgotten at clock-out is closed before the next one starts. -->
   <!-- v20.0.45b (transport during a visit): on your own open visit with a Person — an EVV visit, or a time-clock visit such as nursing — Start transport and End transport record the ride (server time, phone location if allowed). It shows on My trips as "Driving a Person"; one left running ends at clock-out. A ride already recorded as an MTP ride isn't counted twice. -->
   <!-- v20.0.45 r1 (Greptile r1): confirming a trip sends the details it was shown with; if the trip changed since (an office correction, a refresh elsewhere), it's refused with "reload and check it again" and the list reloads. Server-side: corrected visit times are used; an MTP ride inside a gap is counted once; off duty needs a release made for the visit that just ended and a known drive time. -->
   <!-- v20.0.45 (staff trips and mileage): the EVV page has a My trips card — each week's trips between back-to-back Persons (from one visit's clock-out to the next visit's clock-in, the same day) and the MTP rides the staff member drove, each with Provly's estimate (straight line × 1.30) to confirm or correct with a reason. Trips after an off-duty release aren't reimbursed; hosts' trips are recorded but are part of their agreement. Office staff can open anyone's trips. -->
@@ -6254,6 +6255,13 @@
         setTrips(rows); setNames(people); setState("ok"); setErr(null);
       }, [who, week]);
       useEffect(() => { setTrips([]); setEditing(null); load(); }, [load]);
+      // v20.0.45b r1 — a ride ending, or a clock-in/out, changes trips: reload the week on screen
+      useEffect(() => {
+        const onChange = () => load();
+        window.addEventListener(TRIPS_CHANGED_EVENT, onChange);
+        window.addEventListener(TIME_PUNCH_EVENT, onChange);
+        return () => { window.removeEventListener(TRIPS_CHANGED_EVENT, onChange); window.removeEventListener(TIME_PUNCH_EVENT, onChange); };
+      }, [load]);
       if (state === "hidden" || !who) return null;
 
       const confirm = async (trip, miles, reason) => {
@@ -6365,6 +6373,7 @@
     // On the staff member's own open visit with a Person. The server records the time; the phone's location
     // is sent if it gives one. The ride becomes a "driving a Person" trip on the My trips card.
     // ═══════════════════════════════════════════════════════════════
+    const TRIPS_CHANGED_EVENT = "provly-trips-changed";   // r1 — My trips reloads when a ride starts or ends
     function VisitTransport({ visitKind, visitId, ownerId }) {
       const { addToast } = useToast();
       const { staffProfile } = useAuth();
@@ -6393,6 +6402,7 @@
         setBusy(false);
         if (error) { addToast(error.message, "error"); if (forSeq === seq.current) load(); return; }
         addToast(current ? "Transport ended" : "Transport started", "success");
+        window.dispatchEvent(new CustomEvent(TRIPS_CHANGED_EVENT));       // r1 — the finished ride shows on My trips
         if (forSeq === seq.current && forVisit === `${visitKind}:${visitId}`) load();
       };
       return (

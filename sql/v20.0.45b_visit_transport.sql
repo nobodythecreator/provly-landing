@@ -12,6 +12,10 @@
 --   • A transport that overlaps an MTP ride the same driver made isn't counted again.
 --   • The trip finder (v20.0.45) is replaced only to add this one source; everything else in it is unchanged.
 --
+-- r1 (Greptile round 1, before this file ran): a transport left open when its visit ended is closed for real
+--   (at the visit's clock-out time and point) before the next Start transport, so a forgotten End never
+--   blocks later rides.
+--
 -- RUN IN SUPABASE (SQL editor), ONCE. One transaction: preflight → changes → rolled-back self-test →
 -- COMMIT → verification table (reads tables only).
 -- =====================================================================================
@@ -63,6 +67,28 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'public' AS $$
   SELECT p.org_id, p.staff_id, p.person_id, p.clock_out_at IS NULL FROM time_punches p WHERE p_kind = 'punch' AND p.id = p_id AND p.person_id IS NOT NULL
 $$;
 
+-- A transport still open after its visit ended is closed at the visit's clock-out (its pay time and point)
+CREATE FUNCTION public._vt_settle(p_staff uuid)
+RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'public' AS $$
+BEGIN
+  UPDATE visit_transports vt
+     SET ended_at = greatest(x.out_at, vt.started_at + interval '1 second'), end_lat = x.out_lat, end_lng = x.out_lng
+    FROM (SELECT t.id,
+                 CASE WHEN e.id IS NOT NULL THEN
+                        CASE WHEN e.original_clock_out_at IS NOT NULL THEN e.clock_out_at ELSE coalesce(e.server_clock_out_at, e.clock_out_at) END
+                      ELSE p.clock_out_at END AS out_at,
+                 coalesce(e.clock_out_lat, p.clock_out_lat) AS out_lat,
+                 coalesce(e.clock_out_lng, p.clock_out_lng) AS out_lng
+            FROM visit_transports t
+            LEFT JOIN evv_sessions e ON t.visit_ref = 'evv:' || e.id::text
+            LEFT JOIN time_punches p ON t.visit_ref = 'punch:' || p.id::text
+           WHERE t.staff_id = p_staff AND t.ended_at IS NULL) x
+   WHERE vt.id = x.id AND x.out_at IS NOT NULL
+     AND (x.out_lat IS NULL) = (x.out_lng IS NULL);
+END;
+$$;
+
 CREATE FUNCTION public._transport_start(p_kind text, p_id uuid, p_lat numeric, p_lng numeric, p_actor uuid)
 RETURNS uuid
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'public' AS $$
@@ -78,6 +104,7 @@ BEGIN
     RAISE EXCEPTION 'The location from the phone is not valid';
   END IF;
   PERFORM pg_advisory_xact_lock(hashtext('provly-trips'), hashtext(p_actor::text));     -- the trip finder's lock
+  PERFORM public._vt_settle(p_actor);            -- r1 — one forgotten at an earlier clock-out is closed first
   IF EXISTS (SELECT 1 FROM visit_transports WHERE staff_id = p_actor AND ended_at IS NULL) THEN
     RAISE EXCEPTION 'A transport is already going — end it first';
   END IF;
@@ -261,7 +288,7 @@ DECLARE
 BEGIN
   FOR f IN
     SELECT p.oid::regprocedure AS sig, p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-     WHERE n.nspname = 'public' AND p.proname IN ('_vt_visit', '_transport_start', '_transport_end', 'transport_start', 'transport_end', '_trips_refresh')
+     WHERE n.nspname = 'public' AND p.proname IN ('_vt_visit', '_vt_settle', '_transport_start', '_transport_end', 'transport_start', 'transport_end', '_trips_refresh')
   LOOP
     EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC, anon, authenticated', f.sig);
     IF f.proname IN ('transport_start', 'transport_end') THEN
@@ -331,6 +358,7 @@ DECLARE
   v_s2    uuid;
   v_t     uuid;
   v_t2    uuid;
+  v_s3    uuid;
   v_today date := (now() AT TIME ZONE 'America/Denver')::date;
   tr      trips;
 BEGIN
@@ -398,6 +426,17 @@ BEGIN
       RAISE EXCEPTION 'SELFTEST FAIL 3b: an open transport did not end at the visit''s clock-out point';
     END IF;
 
+    -- 3c. a transport forgotten at clock-out doesn't block the next one: it's closed at the clock-out first
+    v_s3 := pg_temp.v20045b_test_insert('evv_sessions', jsonb_build_object('org_id', v_org, 'staff_id', v_w2, 'person_id', v_p, 'service_code_id', v_code,
+      'clock_in_at', clock_timestamp(), 'server_clock_in_at', clock_timestamp(), 'clock_in_lat', 40.7608, 'clock_in_lng', -111.8910));
+    PERFORM public._transport_start('evv', v_s3, 40.7608, -111.8910, v_w2);
+    IF NOT EXISTS (SELECT 1 FROM visit_transports WHERE id = v_t2 AND ended_at IS NOT NULL AND end_lat = 40.7608) THEN
+      RAISE EXCEPTION 'SELFTEST FAIL 3c: the forgotten transport was not closed at its visit''s clock-out';
+    END IF;
+    IF (SELECT count(*) FROM visit_transports WHERE staff_id = v_w2 AND ended_at IS NULL) <> 1 THEN
+      RAISE EXCEPTION 'SELFTEST FAIL 3d: the next transport could not start';
+    END IF;
+
     -- 4. a transport overlapping an MTP ride the same driver made isn't counted twice
     INSERT INTO mtp_legs (org_id, person_id, service_date, direction, pickup_place, pickup_at, pickup_lat, pickup_lng, pickup_source,
                           dropoff_place, dropoff_at, dropoff_lat, dropoff_lng, dropoff_source, driver_staff_id)
@@ -433,7 +472,7 @@ SELECT n, check_name, got, want,
     (SELECT count(*) FROM pg_proc WHERE proname IN ('transport_start', 'transport_end')
        AND has_function_privilege('authenticated', oid, 'EXECUTE') AND NOT has_function_privilege('anon', oid, 'EXECUTE'))::text, '2'
   UNION ALL SELECT 5, 'Internal functions callable by clients',
-    (SELECT count(*) FROM pg_proc WHERE proname IN ('_vt_visit', '_transport_start', '_transport_end', '_trips_refresh')
+    (SELECT count(*) FROM pg_proc WHERE proname IN ('_vt_visit', '_vt_settle', '_transport_start', '_transport_end', '_trips_refresh')
        AND (has_function_privilege('authenticated', oid, 'EXECUTE') OR has_function_privilege('anon', oid, 'EXECUTE')))::text, '0'
   UNION ALL SELECT 6, 'The trip finder reads transports during visits',
     (position('visit_transports' IN pg_get_functiondef('public._trips_refresh(uuid, uuid, date, date)'::regprocedure)) > 0)::text, 'true'
