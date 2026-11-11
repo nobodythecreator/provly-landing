@@ -15,6 +15,9 @@
 -- r1 (Greptile round 1, before this file ran): a transport left open when its visit ended is closed for real
 --   (at the visit's clock-out time and point) before the next Start transport, so a forgotten End never
 --   blocks later rides.
+-- r2 (Greptile round 2, before this file ran): a ride closed at clock-out is marked as such, and its end keeps
+--   following the visit — if the office corrects the clock-out, the ride's end moves with it (and a ride the
+--   correction leaves outside the visit drops out). A tapped End is kept, but never past the visit's end.
 --
 -- RUN IN SUPABASE (SQL editor), ONCE. One transaction: preflight → changes → rolled-back self-test →
 -- COMMIT → verification table (reads tables only).
@@ -48,10 +51,12 @@ CREATE TABLE public.visit_transports (
   ended_at    timestamptz,
   end_lat     numeric(9,6) CHECK (end_lat BETWEEN -90 AND 90),
   end_lng     numeric(9,6) CHECK (end_lng BETWEEN -180 AND 180),
+  ended_by    text CHECK (ended_by IN ('tap', 'clock_out')),     -- r2 — a clock_out end keeps following the visit
   created_at  timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT visit_transports_staff_fk FOREIGN KEY (staff_id, org_id) REFERENCES public.staff (id, org_id),
   CONSTRAINT visit_transports_person_fk FOREIGN KEY (person_id, org_id) REFERENCES public.persons (id, org_id) ON DELETE CASCADE,
   CONSTRAINT visit_transports_order CHECK (ended_at IS NULL OR ended_at > started_at),
+  CONSTRAINT visit_transports_ended_shape CHECK ((ended_at IS NULL) = (ended_by IS NULL)),
   CONSTRAINT visit_transports_start_point CHECK ((start_lat IS NULL) = (start_lng IS NULL)),
   CONSTRAINT visit_transports_end_point CHECK ((end_lat IS NULL) = (end_lng IS NULL))
 );
@@ -73,7 +78,8 @@ RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'public' AS $$
 BEGIN
   UPDATE visit_transports vt
-     SET ended_at = greatest(x.out_at, vt.started_at + interval '1 second'), end_lat = x.out_lat, end_lng = x.out_lng
+     SET ended_at = greatest(x.out_at, vt.started_at + interval '1 second'), end_lat = x.out_lat, end_lng = x.out_lng,
+         ended_by = 'clock_out'
     FROM (SELECT t.id,
                  CASE WHEN e.id IS NOT NULL THEN
                         CASE WHEN e.original_clock_out_at IS NOT NULL THEN e.clock_out_at ELSE coalesce(e.server_clock_out_at, e.clock_out_at) END
@@ -135,7 +141,8 @@ BEGIN
   IF NOT FOUND OR NOT v.o_open THEN
     RAISE EXCEPTION 'The visit has ended — the transport ended with it at clock-out';
   END IF;
-  UPDATE visit_transports SET ended_at = greatest(clock_timestamp(), t.started_at + interval '1 second'), end_lat = p_lat, end_lng = p_lng
+  UPDATE visit_transports SET ended_at = greatest(clock_timestamp(), t.started_at + interval '1 second'), end_lat = p_lat, end_lng = p_lng,
+                              ended_by = 'tap'
    WHERE id = t.id;
 END;
 $$;
@@ -236,21 +243,24 @@ BEGIN
                                             NULL, NULL, NULL, false, v_rf, v_mph, v_pct);
   END LOOP;
 
-  -- v20.0.45b — transports during visits (Start / End transport taps). One left open ends at its visit's
-  -- clock-out, at the clock-out point. A transport overlapping an MTP ride the same driver made is left out
+  -- v20.0.45b — transports during visits (Start / End transport taps). One left open, or closed at clock-out,
+  -- ends at its visit's clock-out as corrected, at the clock-out point; a tapped End never runs past the visit. A transport overlapping an MTP ride the same driver made is left out
   -- (the ride is already counted). One still in progress is skipped until it ends.
-  FOR l IN SELECT vt.id, vt.person_id, vt.started_at, vt.start_lat, vt.start_lng,
-                  coalesce(vt.ended_at,
-                           CASE WHEN e.id IS NOT NULL THEN
-                                  CASE WHEN e.original_clock_out_at IS NOT NULL THEN e.clock_out_at ELSE coalesce(e.server_clock_out_at, e.clock_out_at) END
-                                ELSE p.clock_out_at END) AS end_at,
-                  CASE WHEN vt.ended_at IS NOT NULL THEN vt.end_lat ELSE coalesce(e.clock_out_lat, p.clock_out_lat) END AS end_lat,
-                  CASE WHEN vt.ended_at IS NOT NULL THEN vt.end_lng ELSE coalesce(e.clock_out_lng, p.clock_out_lng) END AS end_lng
-             FROM visit_transports vt
-             LEFT JOIN evv_sessions e ON vt.visit_ref = 'evv:' || e.id::text
-             LEFT JOIN time_punches p ON vt.visit_ref = 'punch:' || p.id::text
-            WHERE vt.org_id = p_org AND vt.staff_id = p_staff
-              AND (vt.started_at AT TIME ZONE 'America/Denver')::date BETWEEN p_from AND p_to
+  FOR l IN SELECT x.id, x.person_id, x.started_at, x.start_lat, x.start_lng,
+                  CASE WHEN x.ended_by = 'tap' THEN least(x.ended_at, coalesce(x.visit_out, x.ended_at)) ELSE x.visit_out END AS end_at,
+                  CASE WHEN x.ended_by = 'tap' AND x.ended_at <= coalesce(x.visit_out, x.ended_at) THEN x.end_lat ELSE x.visit_out_lat END AS end_lat,
+                  CASE WHEN x.ended_by = 'tap' AND x.ended_at <= coalesce(x.visit_out, x.ended_at) THEN x.end_lng ELSE x.visit_out_lng END AS end_lng
+             FROM (SELECT vt.*,
+                          CASE WHEN e.id IS NOT NULL THEN
+                                 CASE WHEN e.original_clock_out_at IS NOT NULL THEN e.clock_out_at ELSE coalesce(e.server_clock_out_at, e.clock_out_at) END
+                               ELSE p.clock_out_at END AS visit_out,                 -- the visit's end as corrected (pay time)
+                          coalesce(e.clock_out_lat, p.clock_out_lat) AS visit_out_lat,
+                          coalesce(e.clock_out_lng, p.clock_out_lng) AS visit_out_lng
+                     FROM visit_transports vt
+                     LEFT JOIN evv_sessions e ON vt.visit_ref = 'evv:' || e.id::text
+                     LEFT JOIN time_punches p ON vt.visit_ref = 'punch:' || p.id::text
+                    WHERE vt.org_id = p_org AND vt.staff_id = p_staff
+                      AND (vt.started_at AT TIME ZONE 'America/Denver')::date BETWEEN p_from AND p_to) x
   LOOP
     CONTINUE WHEN l.end_at IS NULL OR l.end_at <= l.started_at;
     CONTINUE WHEN EXISTS (SELECT 1 FROM mtp_legs m
@@ -435,6 +445,16 @@ BEGIN
     END IF;
     IF (SELECT count(*) FROM visit_transports WHERE staff_id = v_w2 AND ended_at IS NULL) <> 1 THEN
       RAISE EXCEPTION 'SELFTEST FAIL 3d: the next transport could not start';
+    END IF;
+
+    -- 3e. the office corrects that visit's clock-out to before the ride started: the ride drops out
+    UPDATE evv_sessions SET clock_out_at = (SELECT started_at FROM visit_transports WHERE id = v_t2) - interval '1 minute' WHERE id = v_s2;
+    PERFORM public._trips_refresh(v_org, v_w2, v_today, v_today);
+    IF EXISTS (SELECT 1 FROM trips WHERE staff_id = v_w2 AND from_ref = 'vt:' || v_t2::text AND status <> 'void') THEN
+      RAISE EXCEPTION 'SELFTEST FAIL 3e: a ride closed at clock-out ignored the corrected clock-out';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM visit_transports WHERE id = v_t2 AND ended_by = 'clock_out') THEN
+      RAISE EXCEPTION 'SELFTEST FAIL 3f: the ride closed at clock-out is not marked as such';
     END IF;
 
     -- 4. a transport overlapping an MTP ride the same driver made isn't counted twice
