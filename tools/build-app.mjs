@@ -1,4 +1,4 @@
-// tools/build-app.mjs — v20.0.46
+// tools/build-app.mjs — v20.0.46 (r1: --check mode)
 //
 // Builds public/app/index.html (the page the browser loads) from app-src/index.src.html
 // (the page we edit). Never edit public/app/index.html by hand: change the source, rebuild,
@@ -20,7 +20,12 @@
 //
 // Run from the repo root (needs esbuild 0.28.2 where Node can find it):
 //   npm install -g esbuild@0.28.2
-//   NODE_PATH="$(npm root -g)" node tools/build-app.mjs
+//   NODE_PATH="$(npm root -g)" node tools/build-app.mjs           build: writes public/app/index.html
+//   NODE_PATH="$(npm root -g)" node tools/build-app.mjs --check   check: writes nothing; fails if the
+//                                                                 committed page isn't exactly what the
+//                                                                 source builds to
+// --check is what .github/workflows/app-build-check.yml runs on every pull request and on main
+// (Vercel serves the committed page as-is, so this is the one place a stale page gets caught).
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -29,6 +34,17 @@ import vm from "node:vm";
 
 const require = createRequire(import.meta.url);
 const esbuild = require("esbuild");
+
+const args = process.argv.slice(2);
+const CHECK = args.includes("--check");
+for (const a of args) if (a !== "--check") { console.error(`build-app: unknown option ${a} (only --check)`); process.exit(2); }
+
+// The output depends on the esbuild version, so the build and the check both use exactly this one.
+const ESBUILD_VERSION = "0.28.2";
+if (esbuild.version !== ESBUILD_VERSION) {
+  console.error(`build-app: needs esbuild ${ESBUILD_VERSION}, found ${esbuild.version} — another version can produce a different page`);
+  process.exit(1);
+}
 
 const SRC = "app-src/index.src.html";
 const OUT = "public/app/index.html";
@@ -94,7 +110,7 @@ try {
     console.error(`build-app: ${SRC} line ${line}: ${err.text}`);
   }
   if (errors.length > 20) console.error(`build-app: … and ${errors.length - 20} more`);
-  fail("compile failed — nothing written");
+  fail("compile failed — nothing written or checked");
 }
 
 const appScript =
@@ -146,6 +162,33 @@ const stamp =
   `src-sha256 ${srcHash} — edit the source, not this file. -->\n`;
 out = DOCTYPE + stamp + out.slice(DOCTYPE.length);
 
+// ── 4. Check (writes nothing) ───────────────────────────────────────
+if (CHECK) {
+  let committed;
+  try {
+    committed = readFileSync(OUT, "utf8");
+  } catch (e) {
+    fail(`--check: ${OUT} is missing — build it from ${SRC} and commit it`);
+  }
+  if (committed === out) {
+    console.log(`build-app --check: ${OUT} is up to date with ${SRC} (src-sha256 ${srcHash})`);
+    process.exit(0);
+  }
+  const stamped = committed.match(/src-sha256 ([0-9a-f]{12})/);
+  if (!stamped) {
+    fail(`--check: ${OUT} has no build stamp, so it wasn't made by this script — rebuild it from ${SRC}`);
+  }
+  if (stamped[1] !== srcHash) {
+    fail(`--check: ${SRC} changed after ${OUT} was built (page built from ${stamped[1]}, source is now ${srcHash}) — rebuild and commit both files`);
+  }
+  const a = committed.split("\n");
+  const b = out.split("\n");
+  let line = 0;
+  while (line < a.length && line < b.length && a[line] === b[line]) line++;
+  fail(`--check: ${OUT} doesn't match what ${SRC} builds to (first difference at line ${line + 1}) — it was edited by hand or built differently; make the change in ${SRC} and rebuild`);
+}
+
+// ── 5. Write ────────────────────────────────────────────────────────
 writeFileSync(OUT, out, "utf8");
 console.log(`build-app: ${SRC} (${Buffer.byteLength(src)} bytes, src-sha256 ${srcHash})`);
 console.log(`build-app: → ${OUT} (${Buffer.byteLength(out)} bytes, esbuild ${esbuild.version})`);
