@@ -40,6 +40,9 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.47b r2 (Greptile r2): clock-in, clock-out and corrections start the pre-flight refresh through the page as it is now (runValidationRef), so they always check the month on screen; a call that still belongs to an older month is refused before it can cancel the current month's check. -->
+  <!-- v20.0.47b r1 (Greptile r1): an export only updates the panel if you are still on its month (and the month picker is locked while an export runs); a check that fails says so on the panel, with Check again, instead of leaving an older result looking current; clock-ins and clock-outs refresh the check too, not only corrections. -->
+  <!-- v20.0.47b (EVV pre-flight that explains itself): the Utah EVV pre-flight now runs on its own — when the EVV page opens, when the month changes, when you come back to the tab, and after a visit is corrected — so the list shrinks as things get fixed. Every item says who, what is wrong and how to fix it, with a link straight to the fix (a client's profile, the visit, or Settings → Branding). Export runs the same check; when something blocks it, the list opens and is scrolled into view instead of a count in a toast that disappears. Missing Medicaid numbers say exactly what is on file ("blank", "has 7 digits"). -->
   <!-- v20.0.47a (EVV provider ID hotfix): the Utah EVV export wrote one fixed Medicaid provider ID on every organization's file. It now uses the organization's own ID (organizations.medicaid_provider_id), entered under Settings → Branding Details, and refuses to export until it is set — so no organization's visits can be filed under another provider's ID. -->
   <!-- v20.0.47 r1 (Greptile r1): a sign-up never depends on this release's database change — if signup_create_organization_v2 isn't installed, the organization is created by the existing signup_create_organization, without its sign-up source. Server-side: the migration enables pg_cron itself, and the alert sender claims one email job at a time, right before sending it, with a 10-second limit on every request, so a job can never outlive its claim. -->
   <!-- v20.0.47 (sign-up capture): the sign-up form asks "How did you hear about Provly?" (one required choice, with an optional detail for Google, AI assistants, referrals, Provly outreach and Other), and sends where the visitor came from — their first visit and the visit they signed up on, recorded by getprovly.com in their own browser for 90 days: the referring site (no query string), the Provly page, campaign tags and the date. Saved with the organization by signup_create_organization_v2; a missing or bad answer never blocks a sign-up. Server-side (sql/v20.0.47 + the signup-notify edge function): the platform owner gets an email for every new organization and for every stuck sign-up (a login with no organization after 15 minutes), and each new provider's owner gets one welcome email. Logins now record whether they were a new provider or an invite. The provider partner's name, phone, address and contract number are gone from the app's built-in defaults. -->
@@ -2082,7 +2085,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.47a</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.47b</span>
               </div>
             </button>
             {isMobile && (
@@ -11145,6 +11148,7 @@
           if (hadOpenPunch) addToast("The open time-clock punch ended as this visit started", "info");
           setShowClockIn(false);
           loadAll();
+          refreshPreflight();   // v20.0.47b r1/r2
         } catch (e) {
           // v19.7.6 — distinguish GPS errors (which have a code) from other
           // failures. GPS permission errors open the help modal; other GPS
@@ -11192,6 +11196,7 @@
           }
           checkReleaseNotice("evv", sessionId); // v20.0.35 — shows only for your own visit, only if a release starts now
           loadAll();
+          refreshPreflight();   // v20.0.47b r1/r2
         } catch (e) {
           // v19.7.6 — same GPS interpretation as clock-in
           const isGpsError = (e && typeof e.code === "number") || /geolocation|gps|location|denied|timeout|unavailable/i.test(e.message || "");
@@ -11260,30 +11265,90 @@
         if (error) throw error;
         return data || [];
       };
-      const runValidation = async () => {
-        setValRunning(true);
-        try {
-          const rows = await fetchSubMonthSessions();
-          const over24 = [], open = [], badMedicaid = [], noGps = [];
-          const seenPersons = new Set(); // one Medicaid flag per client, not per session
-          rows.forEach(r => {
-            if (!r.clock_out_at) open.push(r);
-            else if (new Date(r.clock_out_at) - new Date(r.clock_in_at) > 24 * 3600000) over24.push(r);
+      // v20.0.47a — the organization's own Medicaid provider ID (Settings → Branding).
+      //   Never a built-in value: a file must not carry another provider's ID.
+      const providerMedicaidId = (brand && brand.orgMedicaidProviderId) || "";
+      // v20.0.47b — "October 2026" for "2026-10"
+      const monthLabelOf = (ym) => {
+        const [yy, mm] = String(ym || "").split("-").map(Number);
+        return yy && mm ? new Date(yy, mm - 1, 1).toLocaleString("en-US", { month: "long", year: "numeric" }) : "this month";
+      };
+      // v20.0.47b — the one pre-flight check, shared by the panel and the export. Blocking items:
+      //   no provider ID, a completed visit whose client has no valid Medicaid number (one item per
+      //   client, with how many visits it holds back), a visit over 24 hours. Not blocking: visits
+      //   still clocked in (left out of the file) and visits without a location.
+      const checkSessions = (rows) => {
+        const over24 = [], open = [], noGps = [];
+        const maByPerson = new Map();
+        rows.forEach(r => {
+          if (!r.clock_out_at) open.push(r);
+          else {
+            if (new Date(r.clock_out_at) - new Date(r.clock_in_at) > 24 * 3600000) over24.push(r);
             const ma = (r.persons?.medicaid_number || "").trim();
             if (!MEDICAID_RE.test(ma)) {
               const pid = r.persons?.id || "?";
-              if (!seenPersons.has(pid)) { seenPersons.add(pid); badMedicaid.push(r); }
+              const hit = maByPerson.get(pid);
+              if (hit) hit._visits += 1; else maByPerson.set(pid, { ...r, _visits: 1 });
             }
-            const hasIn = r.clock_in_lat != null && r.clock_in_lng != null;
-            const hasOut = r.clock_out_lat != null && r.clock_out_lng != null;
-            if (!hasIn || (r.clock_out_at && !hasOut)) noGps.push(r);
-          });
-          setValResults({ total: rows.length, truncated: rows.length >= 5000, over24, open, badMedicaid, noGps, ranAt: new Date() });
-        } catch (err) {
-          addToast(`Validation failed: ${err.message || "unknown error"}`, "error");
-        }
-        setValRunning(false);
+          }
+          const hasIn = r.clock_in_lat != null && r.clock_in_lng != null;
+          const hasOut = r.clock_out_lat != null && r.clock_out_lng != null;
+          if (!hasIn || (r.clock_out_at && !hasOut)) noGps.push(r);
+        });
+        const badMedicaid = Array.from(maByPerson.values());
+        const missingProviderId = !/^\d{4,15}$/.test(providerMedicaidId);
+        const blocking = (missingProviderId ? 1 : 0) + badMedicaid.length + over24.length;
+        return { total: rows.length, truncated: rows.length >= 5000, over24, open, badMedicaid, noGps,
+                 missingProviderId, blocking, month: subMonth, ranAt: new Date() };
       };
+      const valRunRef = useRef(0);
+      const lastAutoCheckRef = useRef(0);
+      const preflightRef = useRef(null);
+      const subMonthRef = useRef(subMonth);   // r1 — the month on screen right now, for async work
+      subMonthRef.current = subMonth;
+      const [valError, setValError] = useState(null); // r1 — { month, message, at } when the latest check failed
+      const runValidation = async ({ quiet = false } = {}) => {
+        const month = subMonth;
+        // r2 — a call from an older render (its month is no longer on screen) must not cancel the
+        //   current month's check: refuse it before it touches valRunRef.
+        if (month !== subMonthRef.current) return;
+        const run = ++valRunRef.current;       // only the latest run may write its results
+        setValRunning(true);
+        try {
+          const rows = await fetchSubMonthSessions();
+          if (run === valRunRef.current && month === subMonthRef.current) {
+            setValResults(checkSessions(rows));
+            setValError(null);
+          }
+        } catch (err) {
+          // r1 — background checks stay quiet (no toast), but the panel says the result may be out of date
+          if (run === valRunRef.current && month === subMonthRef.current) {
+            setValError({ month, message: err.message || "unknown error", at: new Date() });
+          }
+          if (!quiet) addToast(`The pre-flight check couldn't run: ${err.message || "unknown error"}. Try "Check again".`, "error");
+        }
+        if (run === valRunRef.current) setValRunning(false);
+      };
+      // r2 — handlers that await (GPS, the database) call this, so the refresh runs as the page is now
+      const runValidationRef = useRef(null);
+      runValidationRef.current = runValidation;
+      const refreshPreflight = () => { if (accessTier !== "deliver" && runValidationRef.current) runValidationRef.current({ quiet: true }); };
+      // v20.0.47b — keep the pre-flight current without anyone pressing a button: on open, on a
+      //   month change, when the provider ID changes, and when you come back to this tab (e.g. after
+      //   fixing a client's Medicaid number). Office tiers only, like the panel itself.
+      useEffect(() => {
+        if (accessTier === "deliver" || !subMonth) return;
+        runValidation({ quiet: true });
+        const onBack = () => {
+          if (document.visibilityState !== "visible") return;
+          if (Date.now() - lastAutoCheckRef.current < 2000) return;   // focus + visibility fire together
+          lastAutoCheckRef.current = Date.now();
+          runValidation({ quiet: true });
+        };
+        document.addEventListener("visibilitychange", onBack);
+        window.addEventListener("focus", onBack);
+        return () => { document.removeEventListener("visibilitychange", onBack); window.removeEventListener("focus", onBack); };
+      }, [subMonth, accessTier, providerMedicaidId]);
 
       // v19.10 (Item A) — Utah EVV CSV export. Header text, column order, and
       // value formats replicate Hope Haven's May 2026 submission accepted by
@@ -11292,36 +11357,31 @@
       // = YYYYMM, sequential Record_id, the Medicaid provider ID, vendor
       // "Provly". Member ID written verbatim to preserve leading zeros.
       const UTAH_EVV_HEADER = "Member ID (req),First name (req),Middle initial,Last name (req),Service code (req),Service description,Provider ID (req),Employee Performing Service (req),Begin date (req),Begin time (req),Begin address (req),Begin Apt/Suite/Floor,Begin City (req),Begin State,Begin Zip,Begin Geo Latitude,Begin Geo Longitude,End date (req),End time (req),End Address1,End Address2,End City,End State,End Zip,End Geo Latitude,End Geo Longitude,Orig_receipt_id (req if CORRECTION),Batch_id (req),Record_id (req),EVV Vendor (req)";
-      // v20.0.47a — the organization's own Medicaid provider ID (Settings → Branding Details).
-      //   Never a built-in value: a file must not carry another provider's ID.
-      const providerMedicaidId = (brand && brand.orgMedicaidProviderId) || "";
       const EVV_VENDOR_NAME = "Provly";
       const SERVICE_DESC_FALLBACK = { SLN: "Supported Living Natural", SLH: "Supported Living Hourly" };
       const exportUtahCsv = async () => {
-        if (!/^\d{4,15}$/.test(providerMedicaidId)) {
-          addToast("Add your organization's Medicaid provider ID under Settings → Branding Details before exporting EVV.", "error");
-          return;
-        }
+        const exportMonth = subMonth;
         setExporting(true);
         try {
           const rows = await fetchSubMonthSessions();
+          // r1 — the month was changed while this export was loading: drop it, touch nothing
+          if (exportMonth !== subMonthRef.current) { setExporting(false); return; }
           if (rows.length >= 5000) { addToast("Month hits the 5,000-session cap — export blocked to prevent a partial submission", "error"); setExporting(false); return; }
           if (rows.length === 0) { addToast("No EVV sessions found for the selected month", "error"); setExporting(false); return; }
+          // v20.0.47b — the same check as the pre-flight panel. Anything that blocks the file is listed
+          //   there by name, with a link to fix it; the toast only points at the list.
+          const check = checkSessions(rows);
+          if (check.blocking > 0) {
+            valRunRef.current += 1;              // a background re-check must not overwrite this result
+            setValResults(check);
+            setValError(null);
+            setValRunning(false);
+            addToast(`Can't export ${monthLabelOf(subMonth)} yet — ${check.blocking} ${check.blocking === 1 ? "item needs" : "items need"} fixing. Each one is listed under Pre-flight with a link to fix it.`, "error");
+            setTimeout(() => { if (preflightRef.current) preflightRef.current.scrollIntoView({ behavior: "smooth", block: "start" }); }, 50);
+            setExporting(false); return;
+          }
           const completed = rows.filter(r => r.clock_out_at);
           const openCount = rows.length - completed.length;
-          const badMa = completed.filter(r => !MEDICAID_RE.test((r.persons?.medicaid_number || "").trim()));
-          if (badMa.length > 0) {
-            addToast(`Export blocked: ${badMa.length} session(s) have a missing/invalid client Medicaid number. Fix the client profile(s), then re-export — submitting without them would under-report the month.`, "error");
-            setExporting(false); return;
-          }
-          // v19.10.1 — a session longer than 24h is a missed clock-out, not a
-          // real visit. June 2026 exported one at 54h before this gate existed.
-          // Pre-flight flagged it; the export did not stop it. It does now.
-          const over24 = completed.filter(r => new Date(r.clock_out_at) - new Date(r.clock_in_at) > 24 * 3600000);
-          if (over24.length > 0) {
-            addToast(`Export blocked: ${over24.length} session(s) exceed 24 hours — almost certainly missed clock-outs. Run validation, click the flagged session, and correct its clock-out time before exporting.`, "error");
-            setExporting(false); return;
-          }
           if (openCount > 0 && !window.confirm(`${openCount} open session(s) (no clock-out) cannot be submitted and will be EXCLUDED from this export. Continue?`)) { setExporting(false); return; }
           const mtDate = new Intl.DateTimeFormat("en-US", { timeZone: "America/Denver", year: "numeric", month: "numeric", day: "numeric" });
           const mtTime = new Intl.DateTimeFormat("en-US", { timeZone: "America/Denver", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true });
@@ -11499,6 +11559,7 @@
         addToast("EVV session updated", "success");
         setViewing(null);
         loadAll();
+        refreshPreflight();   // v20.0.47b — the list updates (r2: through the current render)
       };
 
       const columns = [
@@ -11609,66 +11670,123 @@
           {/* v19.9 — Utah EVV Submission pre-flight (validation runs the checks
               the state system rejects on, before you export/submit a month)
               v20.0.13a — state-submission tooling is office-tier only. */}
-          {accessTier !== "deliver" && <div style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, padding: 20, marginBottom: 20 }}>
+          {accessTier !== "deliver" && <div ref={preflightRef} style={{ background: CB.white, borderRadius: 14, border: `1px solid ${CB.border}`, boxShadow: CB.cardShadow, padding: 20, marginBottom: 20, scrollMarginTop: 72 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
               <div style={{ flex: 1, minWidth: 220 }}>
                 <div style={{ fontSize: 15, fontWeight: 800, color: CB.navy }}>Utah EVV Submission — Pre-flight</div>
-                <div style={{ fontSize: 12, color: CB.textMid }}>Validate, then export a month's sessions for state submission. Dates/times export in Mountain Time.</div>
+                <div style={{ fontSize: 12, color: CB.textMid }}>Checks the month on its own and updates as you fix things. Dates and times export in Mountain Time.</div>
               </div>
-              <input type="month" style={{ ...fieldStyle, width: 170 }} value={subMonth} onChange={e => { setSubMonth(e.target.value); setValResults(null); }} />
-              <PrimaryButton onClick={runValidation} disabled={valRunning || !subMonth} color={CB.teal}>
-                {valRunning ? <Spinner size={14} color={CB.white} /> : icons.checkCircle({ size: 15 })} Run Validation
+              <input type="month" style={{ ...fieldStyle, width: 170 }} value={subMonth} disabled={exporting} title={exporting ? "Wait for the export to finish" : undefined} onChange={e => { valRunRef.current += 1; setSubMonth(e.target.value); setValResults(null); setValError(null); }} />
+              <PrimaryButton onClick={() => runValidation()} disabled={valRunning || !subMonth} color={CB.teal}>
+                {valRunning ? <Spinner size={14} color={CB.white} /> : icons.checkCircle({ size: 15 })} Check again
               </PrimaryButton>
               <PrimaryButton onClick={exportUtahCsv} disabled={exporting || !subMonth} color={CB.navy}>
                 {exporting ? <Spinner size={14} color={CB.white} /> : icons.save({ size: 15 })} Export Utah CSV
               </PrimaryButton>
             </div>
-            {valResults && (() => {
-              const label = (r) => `${formatDate(r.clock_in_at)} — ${r.staff ? `${r.staff.first_name} ${r.staff.last_name}` : "?"} → ${r.persons ? `${r.persons.first_name} ${r.persons.last_name}` : "?"} (${r.service_code_definitions?.code || "?"})`;
+            {valError && valError.month === subMonth && (
+              <div style={{ marginTop: 16, padding: "12px 16px", borderRadius: 10, background: `${CB.amber}12`, border: `1px solid ${CB.amber}40`, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                <div style={{ flex: 1, minWidth: 220, fontSize: 13, color: CB.navy }}>
+                  <strong>Provly couldn't re-check {monthLabelOf(subMonth)} just now</strong> ({valError.message}).
+                  {valResults && valResults.month === subMonth ? " What's below is from the last successful check and may be out of date." : ""}
+                </div>
+                <button type="button" onClick={() => runValidation()} disabled={valRunning}
+                  style={{ padding: "7px 14px", borderRadius: 8, border: `1px solid ${CB.amber}`, background: CB.white, color: CB.navy, fontWeight: 700, fontSize: 13, cursor: valRunning ? "wait" : "pointer", fontFamily: "inherit" }}>
+                  {valRunning ? "Checking…" : "Check again"}
+                </button>
+              </div>
+            )}
+            {valResults && valResults.month === subMonth && (() => {
+              // v20.0.47b — every item says who, what's wrong and how to fix it, with a link to the fix.
+              const who = (r) => r.persons ? `${r.persons.first_name} ${r.persons.last_name}`.trim() : "Unknown client";
+              const label = (r) => `${formatDate(r.clock_in_at)} — ${r.staff ? `${r.staff.first_name} ${r.staff.last_name}` : "Unknown staff"} → ${who(r)}`;
+              const maProblem = (raw) => {
+                const v = String(raw || "").trim();
+                if (!v) return "no Medicaid number on file";
+                if (!/^\d+$/.test(v)) return `"${v}" has letters or symbols in it`;
+                return `"${v}" has ${v.length} digit${v.length === 1 ? "" : "s"}`;
+              };
+              const linkStyle = { color: CB.teal, fontWeight: 700, fontSize: 12.5, textDecoration: "none", whiteSpace: "nowrap" };
+              const rowBtn = { background: "none", border: "none", padding: 0, color: CB.teal, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, whiteSpace: "nowrap" };
               const groups = [
-                { key: "open", title: "Open sessions (no clock-out)", desc: "Cannot be submitted — clock out or correct the record.", rows: valResults.open, color: CB.red },
-                { key: "over24", title: "Sessions longer than 24 hours", desc: "Implausible duration — verify and correct the clock-out time.", rows: valResults.over24, color: CB.red },
-                { key: "badMedicaid", title: "Missing / invalid Medicaid number", desc: "Member ID must be 9–10 digits. One row per affected client — fix on the client profile.", rows: valResults.badMedicaid, color: CB.amber },
-                { key: "noGps", title: "Missing GPS coordinates", desc: "No location on clock-in, or on clock-out for a completed session.", rows: valResults.noGps, color: CB.amber },
-              ];
-              const issueCount = groups.reduce((n, g) => n + g.rows.length, 0);
+                valResults.missingProviderId && { key: "provider", color: CB.red, blocks: true,
+                  title: "Your organization's Medicaid provider ID isn't set",
+                  fix: "Every line of the file carries it. Add your Utah Medicaid provider ID under Settings → Branding, then come back.",
+                  rows: [] },
+                { key: "badMedicaid", color: CB.red, blocks: true,
+                  title: "Clients without a valid Medicaid number",
+                  fix: "Open each client's profile, choose Edit, and enter their Medicaid number exactly as it is on their Medicaid card (9 or 10 digits). Each client drops off this list when you come back.",
+                  rows: valResults.badMedicaid },
+                { key: "over24", color: CB.red, blocks: true,
+                  title: "Visits longer than 24 hours",
+                  fix: "Someone most likely forgot to clock out. Open the visit and correct its clock-out time.",
+                  rows: valResults.over24 },
+                { key: "open", color: CB.amber, blocks: false,
+                  title: "Visits still clocked in",
+                  fix: "These are left out of the file until they're clocked out or corrected.",
+                  rows: valResults.open },
+                { key: "noGps", color: CB.amber, blocks: false,
+                  title: "Visits without a location",
+                  fix: "The phone didn't share its location. This doesn't stop the export, but an auditor may ask about it.",
+                  rows: valResults.noGps },
+              ].filter(g => g && (g.key === "provider" || g.rows.length > 0));
+              const notes = groups.filter(g => !g.blocks).reduce((n, g) => n + g.rows.length, 0);
+              const month = monthLabelOf(valResults.month);
               return (
                 <div style={{ marginTop: 16 }}>
                   {valResults.truncated && (
                     <div style={{ padding: "12px 16px", borderRadius: 10, background: `${CB.red}10`, border: `1px solid ${CB.red}30`, fontSize: 13, fontWeight: 700, color: CB.red, marginBottom: 10 }}>
-                      Scan hit the 5,000-session cap — results are incomplete. Do not treat this month as validated.
+                      {month} has more than 5,000 visits, so this check is incomplete and the export is blocked. Contact support.
                     </div>
                   )}
-                  {issueCount === 0 && !valResults.truncated ? (
+                  {valResults.blocking === 0 && !valResults.truncated && !(valError && valError.month === subMonth) ? (
                     <div style={{ padding: "12px 16px", borderRadius: 10, background: `${CB.green}10`, border: `1px solid ${CB.green}30`, fontSize: 13, fontWeight: 700, color: CB.green }}>
-                      ✓ All {valResults.total} session{valResults.total === 1 ? "" : "s"} passed pre-flight for {subMonth}. Ready to export.
+                      ✓ Ready to export {month}: {valResults.total} visit{valResults.total === 1 ? "" : "s"} checked.
+                      {notes > 0 && <span style={{ fontWeight: 600, color: CB.textMid }}> {notes} {notes === 1 ? "thing" : "things"} to look at below; {notes === 1 ? "it doesn't" : "they don't"} stop the export.</span>}
                     </div>
-                  ) : (
-                    <div style={{ fontSize: 13, fontWeight: 700, color: CB.navy, marginBottom: 10 }}>
-                      {valResults.total} session{valResults.total === 1 ? "" : "s"} scanned · {issueCount} issue{issueCount === 1 ? "" : "s"} found
+                  ) : valResults.blocking > 0 && (
+                    <div style={{ padding: "12px 16px", borderRadius: 10, background: `${CB.red}08`, border: `1px solid ${CB.red}30` }}>
+                      <div style={{ fontSize: 14, fontWeight: 800, color: CB.red }}>
+                        {valResults.blocking} {valResults.blocking === 1 ? "thing" : "things"} to fix before you can export {month}
+                      </div>
+                      <div style={{ fontSize: 12, color: CB.textMid, marginTop: 2 }}>This list updates on its own as you fix them.</div>
                     </div>
                   )}
-                  {groups.filter(g => g.rows.length > 0).map(g => (
+                  {groups.map(g => (
                     <div key={g.key} style={{ marginTop: 10, padding: "12px 16px", borderRadius: 10, background: `${g.color}08`, border: `1px solid ${g.color}25` }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                        <Badge text={String(g.rows.length)} color={g.color} />
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4, flexWrap: "wrap" }}>
+                        {g.key !== "provider" && <Badge text={String(g.rows.length)} color={g.color} />}
                         <span style={{ fontSize: 13, fontWeight: 800, color: CB.navy }}>{g.title}</span>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: g.blocks ? CB.red : CB.textLight }}>{g.blocks ? "Blocks the export" : "Doesn't block the export"}</span>
                       </div>
-                      <div style={{ fontSize: 12, color: CB.textMid, marginBottom: 6 }}>{g.desc}</div>
-                      {g.rows.slice(0, 8).map(r => (
-                        <div key={r.id} onClick={() => openEVVDetail(r)} title="Open this session to correct it"
-                          style={{ fontSize: 12.5, color: CB.text, padding: "3px 0", cursor: "pointer", textDecoration: "underline", textDecorationColor: `${g.color}60`, textUnderlineOffset: 3 }}>
-                          {label(r)}
-                          {g.key === "badMedicaid" && (
-                            <span style={{ color: g.color, fontWeight: 700 }}> — MA: {r.persons?.medicaid_number ? `"${r.persons.medicaid_number}"` : "missing"}</span>
+                      <div style={{ fontSize: 12.5, color: CB.textMid, marginBottom: 6 }}>{g.fix}</div>
+                      {g.key === "provider" && (
+                        <a href="#/settings/branding" style={linkStyle}>Open Settings → Branding</a>
+                      )}
+                      {g.rows.slice(0, 25).map(r => (
+                        <div key={g.key === "badMedicaid" ? `ma-${r.persons?.id || r.id}` : r.id}
+                          style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap", fontSize: 12.5, color: CB.text, padding: "4px 0", borderTop: `1px solid ${g.color}15` }}>
+                          {g.key === "badMedicaid" ? (
+                            <>
+                              <span><strong>{who(r)}</strong>: {maProblem(r.persons?.medicaid_number)} · {r._visits} visit{r._visits === 1 ? "" : "s"} held back</span>
+                              {r.persons?.id && <a href={`#/client-profile/${r.persons.id}`} style={linkStyle}>Open profile →</a>}
+                            </>
+                          ) : (
+                            <>
+                              <span>{label(r)}</span>
+                              <button type="button" onClick={() => openEVVDetail(r)} style={rowBtn}>{g.key === "over24" ? "Fix clock-out →" : "Open visit →"}</button>
+                            </>
                           )}
                         </div>
                       ))}
-                      {g.rows.length > 8 && (
-                        <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, paddingTop: 4 }}>+ {g.rows.length - 8} more</div>
+                      {g.rows.length > 25 && (
+                        <div style={{ fontSize: 12, fontWeight: 700, color: CB.textLight, paddingTop: 4 }}>+ {g.rows.length - 25} more</div>
                       )}
                     </div>
                   ))}
+                  <div style={{ fontSize: 11, color: CB.textLight, marginTop: 8 }}>
+                    Checked {valResults.ranAt.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}{valRunning ? " · checking again…" : ""}
+                  </div>
                 </div>
               );
             })()}
