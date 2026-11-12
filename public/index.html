@@ -10,17 +10,21 @@
      v20.0.10dr4 (Greptile r3): AI drafting moved to coming soon — the app's AI calls are unauthenticated browser requests to api.anthropic.com and cannot succeed in production; ships after an edge-function proxy exists.
      v20.0.47: the provider partner is no longer named ("built in partnership with a Utah DSPD provider"); the page records where
      visitors came from, in their own browser only (see the script at the end).
+     v20.0.48: Google foundation — sharper title/description, DSPD spelled out once, canonical + structured data
+     (company, software and prices, FAQ), Growth card fix, two FAQ answers, and a "Guides for Utah providers" row
+     linking the five guide pages; sitemap.xml + robots.txt added.
 -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Provly — Compliance for Utah DSPD providers</title>
-<meta name="description" content="The compliance platform built for Utah DSPD providers. Staff training, client records, service notes, EVV, incidents, and audit readiness in one system. Free for 30 days.">
-<meta property="og:title" content="Provly — Compliance for Utah DSPD providers">
-<meta property="og:description" content="Staff training, client records, service notes, EVV, incidents, and audit readiness in one system. Every module included. Free for 30 days.">
+<title>Provly: Utah DSPD Compliance, Service Notes, Medications &amp; EVV</title>
+<meta name="description" content="Utah DSPD provider software: compliance, service notes, medication management and EVV, plus training, billing and audits. Try it free for 30 days.">
+<meta property="og:title" content="Provly: Utah DSPD Compliance, Service Notes, Medications &amp; EVV">
+<meta property="og:description" content="Utah DSPD provider software: compliance, service notes, medication management and EVV, plus training, billing and audits. Try it free for 30 days.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://getprovly.com/">
+<link rel="canonical" href="https://getprovly.com/">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -124,6 +128,7 @@
   .plan .btn{margin-top:auto;justify-content:center}
   .plan.dark{background:var(--ink);color:var(--paper)}
   .plan.dark .note,.plan.dark .price small{color:#C9C9C9}
+  .plan.dark .fit{color:var(--paper)}   /* v20.0.48 — was ink on the ink card (invisible) */
   .plan.dark .btn{border-color:var(--care);background:var(--care);color:var(--paper)}
   .plan.dark .btn:hover{background:var(--paper);border-color:var(--paper);color:var(--ink)}
   .plans-fine{margin-top:18px;color:var(--muted);font-size:15px}
@@ -150,10 +155,16 @@
   .final h2{font-size:clamp(40px,6vw,72px);font-weight:800;letter-spacing:-0.03em;max-width:16ch}
   .final .cta{margin-top:32px;display:flex;gap:14px;flex-wrap:wrap}
 
+  .guides{list-style:none;margin-top:28px;border-top:1.5px solid var(--ink);display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));column-gap:28px}
+  .guides li{border-bottom:1px solid var(--line)}
+  .guides a{display:block;padding:16px 0;font-family:var(--display);font-weight:600;font-size:18px}
+  .guides a:hover{text-decoration:underline}
+  .guides a[aria-current]{color:var(--muted)}
   footer{padding:36px 0;border-top:1.5px solid var(--ink);font-size:15px;color:var(--muted)}
   footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
   footer a{border-bottom:1px solid var(--line)}
 </style>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Organization","@id":"https://getprovly.com/#org","name":"Provly","url":"https://getprovly.com/","email":"sales@getprovly.com","areaServed":{"@type":"State","name":"Utah"}},{"@type":"SoftwareApplication","name":"Provly","applicationCategory":"BusinessApplication","operatingSystem":"Web","url":"https://getprovly.com/","description":"Utah DSPD provider software: compliance, service notes, medication management and EVV, plus training, billing and audits. Try it free for 30 days.","publisher":{"@id":"https://getprovly.com/#org"},"offers":[{"@type":"Offer","name":"Starter","price":"99","priceCurrency":"USD"},{"@type":"Offer","name":"Growth","price":"299","priceCurrency":"USD"},{"@type":"Offer","name":"Scale","price":"599","priceCurrency":"USD"}]},{"@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is Provly built for Utah's DSPD rules?","acceptedAnswer":{"@type":"Answer","text":"Yes. Provly is built on Utah's DSPD scope of work, its service codes and its rate table, not adapted from a generic national template."}},{"@type":"Question","name":"Who is Provly for?","acceptedAnswer":{"@type":"Answer","text":"Utah agencies that provide DSPD services: host homes, residential, day and employment programs. That runs from new agencies with a few clients to multi-site organizations."}},{"@type":"Question","name":"Do I need a card to start?","acceptedAnswer":{"@type":"Answer","text":"No. Create your organization, use every module for 30 days, then choose a plan from inside the app when you're ready."}},{"@type":"Question","name":"Can I bring my data over from Therap?","acceptedAnswer":{"@type":"Answer","text":"Yes. Export clients and staff from Therap as CSV and the migration module maps and imports them, so you're not re-typing records to switch."}},{"@type":"Question","name":"Does EVV really replace my vendor?","acceptedAnswer":{"@type":"Answer","text":"Clock in and out is built into the service note for EVV-required codes, with original times preserved and any edit reason-coded. There is no separate EVV subscription."}},{"@type":"Question","name":"Where does my data live, and who can see it?","acceptedAnswer":{"@type":"Answer","text":"In Postgres, behind row-level security: the database itself scopes every query to your organization, so nobody outside it can read your records. Access rules live in the database, not just in the app."}},{"@type":"Question","name":"What happens when my census grows past my plan?","acceptedAnswer":{"@type":"Answer","text":"Nothing stops. You'll see a nudge that you've outgrown the plan and a one-click path to move up. Caps are guidance, not walls."}},{"@type":"Question","name":"How do I cancel?","acceptedAnswer":{"@type":"Answer","text":"From your billing portal, any time. Your data stays yours."}}]}]}</script>
 </head>
 <body>
 
@@ -179,7 +190,7 @@
 <header class="hero" id="top">
   <div class="wrap">
     <h1><span class="l1">We Got Compliance.</span><span class="l2">You Got Care.</span></h1>
-    <p class="lede">The compliance platform built for Utah DSPD providers. Staff training, client records, service notes, EVV, incidents, and audit readiness in one system — every module included, from $99 a month.</p>
+    <p class="lede">The compliance platform built for Utah providers of DSPD services (the Division of Services for People with Disabilities). Compliance, service notes, medication management and EVV, plus staff training, client records, billing and audit readiness, in one system, from $99 a month.</p>
     <div class="cta">
       <a class="btn solid" href="/app/signup">Start your free trial</a>
       <a class="btn ghost" href="#modules">See what's inside</a>
@@ -195,7 +206,7 @@
       <p class="lede">Right now you're paying for Therap, Virtru, an EVV vendor, a scheduling tool, and tracking compliance on spreadsheets. Your staff spends more time on paperwork than on the people they support. Provly replaces the stack with one system built on the DSPD scope of work.</p>
     </div>
     <ul>
-      <li><strong>Built on the scope of work</strong>Pick your service codes and the platform configures itself to the forms, deadlines, and billing rules that apply to you.</li>
+      <li><strong>Built on the scope of work</strong>Service notes and billing rules follow the DSPD service code you work under: choose RHS, DSI or MTP and the right fields and rates load.</li>
       <li><strong>Everything included</strong>One price per organization. Unlimited staff. No per-user fees, no add-on modules.</li>
       <li><strong>Built with a provider</strong>Provly is built in partnership with an active Utah DSPD provider that runs on it every day.</li>
     </ul>
@@ -205,7 +216,7 @@
 <section id="modules">
   <div class="wrap">
     <h2>Every module. One platform.</h2>
-    <p class="lede">Select your service codes and the whole system auto-configures to your operations. Here is what's inside today.</p>
+    <p class="lede">Every module is built on the DSPD scope of work. Here is what's inside today.</p>
     <div class="check">
       <div class="row"><div class="box on"></div><div class="name">Staff management</div><div class="desc">Training matrix calculated from hire date with 30, 90, and 180-day deadlines. Credential expiration alerts.</div></div>
       <div class="row"><div class="box on"></div><div class="name">Client records and intake</div><div class="desc">Every SOW 1.10 field, intake workflow, and 1056 authorization tracking with utilization alerts.</div></div>
@@ -298,6 +309,8 @@
   <div class="wrap">
     <h2>Questions providers ask.</h2>
     <div class="faq">
+      <details><summary>Is Provly built for Utah&#x27;s DSPD rules?</summary><p>Yes. Provly is built on Utah&#x27;s DSPD scope of work, its service codes and its rate table, not adapted from a generic national template.</p></details>
+      <details><summary>Who is Provly for?</summary><p>Utah agencies that provide DSPD services: host homes, residential, day and employment programs. That runs from new agencies with a few clients to multi-site organizations.</p></details>
       <details><summary>Do I need a card to start?</summary><p>No. Create your organization, use every module for 30 days, then choose a plan from inside the app when you're ready.</p></details>
       <details><summary>Can I bring my data over from Therap?</summary><p>Yes. Export clients and staff from Therap as CSV and the migration module maps and imports them, so you're not re-typing records to switch.</p></details>
       <details><summary>Does EVV really replace my vendor?</summary><p>Clock in and out is built into the service note for EVV-required codes, with original times preserved and any edit reason-coded. There is no separate EVV subscription.</p></details>
@@ -305,6 +318,13 @@
       <details><summary>What happens when my census grows past my plan?</summary><p>Nothing stops. You'll see a nudge that you've outgrown the plan and a one-click path to move up. Caps are guidance, not walls.</p></details>
       <details><summary>How do I cancel?</summary><p>From your billing portal, any time. Your data stays yours.</p></details>
     </div>
+  </div>
+</section>
+
+<section id="guides">
+  <div class="wrap">
+    <h2>Guides for Utah providers</h2>
+    <ul class="guides"><li><a href="/utah-dspd-upi-billing/">UPI billing &amp; e520</a></li><li><a href="/utah-dspd-evv/">EVV for DSPD</a></li><li><a href="/utah-host-home-compliance/">Host home (HHS) compliance</a></li><li><a href="/utah-dspd-pba/">PBA, Form B, D &amp; G</a></li><li><a href="/utah-dspd-audit-readiness/">Audit readiness</a></li></ul>
   </div>
 </section>
 
