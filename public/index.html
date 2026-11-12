@@ -7,7 +7,10 @@
      not a dedicated database; smooth anchor scrolling only when motion is welcome; migration and AI rows worded to what the app does.
      v20.0.10dr2: DSPD claims are submitted in UPI, not PRISM (PRISM is Medicaid provider enrollment). Corrected per Tombé.
      v20.0.10dr3 (Greptile r2): AI row describes what ships — handoff + quarterly summaries drafted from service notes; output is reviewed, copied, or exported; nothing is filed.
-     v20.0.10dr4 (Greptile r3): AI drafting moved to coming soon — the app's AI calls are unauthenticated browser requests to api.anthropic.com and cannot succeed in production; ships after an edge-function proxy exists. -->
+     v20.0.10dr4 (Greptile r3): AI drafting moved to coming soon — the app's AI calls are unauthenticated browser requests to api.anthropic.com and cannot succeed in production; ships after an edge-function proxy exists.
+     v20.0.47: the provider partner is no longer named ("built in partnership with a Utah DSPD provider"); the page records where
+     visitors came from, in their own browser only (see the script at the end).
+-->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -189,12 +192,12 @@
   <div class="wrap cols">
     <div>
       <h2>You didn't start a disability services agency to wrestle with software.</h2>
-      <p class="lede">Right now you're paying for Therap, Virtru, an EVV vendor, a scheduling tool, and tracking compliance on spreadsheets. Your staff spends more time on paperwork than on the people they support. Provly replaces the stack with one system built on the DHHS91172 scope of work.</p>
+      <p class="lede">Right now you're paying for Therap, Virtru, an EVV vendor, a scheduling tool, and tracking compliance on spreadsheets. Your staff spends more time on paperwork than on the people they support. Provly replaces the stack with one system built on the DSPD scope of work.</p>
     </div>
     <ul>
       <li><strong>Built on the scope of work</strong>Pick your service codes and the platform configures itself to the forms, deadlines, and billing rules that apply to you.</li>
       <li><strong>Everything included</strong>One price per organization. Unlimited staff. No per-user fees, no add-on modules.</li>
-      <li><strong>Built by a provider</strong>Hope Haven Services runs on Provly every day under contract DHHS91172.</li>
+      <li><strong>Built with a provider</strong>Provly is built in partnership with an active Utah DSPD provider that runs on it every day.</li>
     </ul>
   </div>
 </div>
@@ -283,9 +286,9 @@
 
 <section>
   <div class="wrap provider">
-    <h2>Built by a real provider who lives the pain every day.</h2>
+    <h2>Built in partnership with a real provider who lives the pain every day.</h2>
     <div>
-      <p>Provly isn't another venture-funded startup guessing at your problems. It's built by Hope Haven Services Inc., an active DSPD provider under contract DHHS91172. We use it to run our own agency.</p>
+      <p>Provly isn't another venture-funded startup guessing at your problems. It's built in partnership with an active Utah DSPD provider that runs its own agency on Provly every day.</p>
       <p>We know what a DHHS compliance review feels like. We know what it's like to track training deadlines on spreadsheets. We know the stress of wondering whether your documentation would hold up. We built the system we wished we'd had.</p>
     </div>
   </div>
@@ -317,10 +320,48 @@
 
 <footer>
   <div class="wrap">
-    <div>Provly is built by Hope Haven Services Inc., Utah.</div>
+    <div>Provly · Built in Utah.</div>
     <div><a href="mailto:sales@getprovly.com">sales@getprovly.com</a> &nbsp;&nbsp; <a href="/app">Sign in</a></div>
   </div>
 </footer>
+
+<script>
+  // v20.0.47 — where this visitor came from, kept in their own browser (localStorage) and sent
+  // only if they sign up. provly_first_touch = the first visit (kept 90 days);
+  // provly_last_touch = the latest visit that arrived from another site or with campaign tags.
+  // A touch holds the referring site (host + path, never its query string), this page
+  // (host + path), utm_* tags and the time — nothing else. The sign-up page reads the same keys.
+  (function () {
+    try {
+      var FIRST = "provly_first_touch", LAST = "provly_last_touch", MAX_AGE = 90 * 24 * 60 * 60 * 1000;
+      var read = function (k) {
+        try {
+          var t = JSON.parse(window.localStorage.getItem(k) || "null");
+          if (!t || typeof t !== "object" || typeof t.at !== "string") return null;
+          var age = Date.now() - Date.parse(t.at);
+          return age >= 0 && age < MAX_AGE ? t : null;
+        } catch (e) { return null; }
+      };
+      var params = new URLSearchParams(window.location.search), utm = {}, hasUtm = false;
+      ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"].forEach(function (k) {
+        var v = params.get(k); if (v) { utm[k] = v.slice(0, 100); hasUtm = true; }
+      });
+      var ref = null;
+      try {
+        if (document.referrer) {
+          var r = new URL(document.referrer);
+          if (r.host && r.host !== window.location.host) ref = (r.host + r.pathname).slice(0, 300);
+        }
+      } catch (e) { /* unreadable referrer: treat as direct */ }
+      var external = !!ref || hasUtm, first = read(FIRST), last = read(LAST);
+      if (!external && first && last) return;
+      var touch = { ref: ref, page: (window.location.host + window.location.pathname).slice(0, 300), at: new Date().toISOString() };
+      for (var k in utm) touch[k] = utm[k];
+      if (!first) window.localStorage.setItem(FIRST, JSON.stringify(touch));
+      if (external || !last) window.localStorage.setItem(LAST, JSON.stringify(touch));
+    } catch (e) { /* storage blocked: nothing recorded */ }
+  })();
+</script>
 
 </body>
 </html>
