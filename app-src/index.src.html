@@ -40,13 +40,14 @@
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.47 (sign-up capture): the sign-up form asks "How did you hear about Provly?" (one required choice, with an optional detail for Google, AI assistants, referrals, Provly outreach and Other), and sends where the visitor came from — their first visit and the visit they signed up on, recorded by getprovly.com in their own browser for 90 days: the referring site (no query string), the Provly page, campaign tags and the date. Saved with the organization by signup_create_organization_v2; a missing or bad answer never blocks a sign-up. Server-side (sql/v20.0.47 + the signup-notify edge function): the platform owner gets an email for every new organization and for every stuck sign-up (a login with no organization after 15 minutes), and each new provider's owner gets one welcome email. Logins now record whether they were a new provider or an invite. The provider partner's name, phone, address and contract number are gone from the app's built-in defaults. -->
   <!-- v20.0.46 (faster start): the app ships already compiled. app-src/index.src.html is the source — a complete page that still runs on its own with Babel in the browser; tools/build-app.mjs compiles its React block once, ahead of time, for the same minimum browsers (Chrome / Edge 79+, Firefox 60+, Safari / iOS 12+), into public/app/index.html, which is what the browser loads. The browser no longer downloads the Babel compiler or compiles the app on every visit. The app starts at the same moment as before (once the PDF and CSV libraries are in), and the console shows how long the start took. -->
   <!-- v20.0.45b r1 (Greptile r1): ending a transport (or clocking in or out) refreshes My trips right away, so the finished ride is there to confirm. Server-side: a transport forgotten at clock-out is closed before the next one starts. -->
   <!-- v20.0.45b (transport during a visit): on your own open visit with a Person — an EVV visit, or a time-clock visit such as nursing — Start transport and End transport record the ride (server time, phone location if allowed). It shows on My trips as "Driving a Person"; one left running ends at clock-out. A ride already recorded as an MTP ride isn't counted twice. -->
   <!-- v20.0.45 r1 (Greptile r1): confirming a trip sends the details it was shown with; if the trip changed since (an office correction, a refresh elsewhere), it's refused with "reload and check it again" and the list reloads. Server-side: corrected visit times are used; an MTP ride inside a gap is counted once; off duty needs a release made for the visit that just ended and a known drive time. -->
   <!-- v20.0.45 (staff trips and mileage): the EVV page has a My trips card — each week's trips between back-to-back Persons (from one visit's clock-out to the next visit's clock-in, the same day) and the MTP rides the staff member drove, each with Provly's estimate (straight line × 1.30) to confirm or correct with a reason. Trips after an off-duty release aren't reimbursed; hosts' trips are recorded but are part of their agreement. Office staff can open anyone's trips. -->
   <!-- v20.0.44 r1 (Greptile r1): saving a trip sends only the parts that changed, so a tapped time (recorded to the second) is never resent rounded to the minute and mistaken for a correction; the ride card clears the previous Person's trips and places the moment another Person is chosen and keeps the taps off until the new Person's details have loaded; the e520 review shows the DSG days missing trip records for every MTP range, including lines removed for having nothing billable. Server-side: front-line drivers change only their own trips; trip changes and the e520 build share a lock. -->
-  <!-- v20.0.44 (MTP documentation, DHHS91172 Article 13.3(3)): MTP needs the pickup and drop-off place and time for every trip, so DSG notes now carry the day's trips (to the program, home from the program) instead of the "Transported" answer, and the EVV page has Picked up / Dropped off taps that record the place, the server's time and the phone's location. A DSG day bills MTP only when it has a trip and every trip on it is complete; typed trips after the day are late entries with a reason; corrections need a reason and are kept. The e520 review shows the DSG days an MTP line can't bill. -->
+  <!-- v20.0.44 (MTP documentation, the DSPD contract, Article 13.3(3)): MTP needs the pickup and drop-off place and time for every trip, so DSG notes now carry the day's trips (to the program, home from the program) instead of the "Transported" answer, and the EVV page has Picked up / Dropped off taps that record the place, the server's time and the phone's location. A DSG day bills MTP only when it has a trip and every trip on it is complete; typed trips after the day are late entries with a reason; corrections need a reason and are kept. The e520 review shows the DSG days an MTP line can't bill. -->
   <!-- v20.0.43 r1 (Greptile r1): each opening of an ID document carries its own number from the moment its dialog opens, so a code verified for a dialog that was closed can never open a different document; the file list loads whether each file is locked, so locked proof shows "ID document". Server-side: storage serves a PBA file only once it's registered (an upload in progress is readable only by its uploader). -->
   <!-- v20.0.43 (ID documents): uploading an SSA notice or payee proof asks whether it shows a full Social Security number; if it does, the file is locked like the SSN itself — it opens only for the roles allowed to see SSNs, with a reason and a fresh authenticator code (storage refuses it otherwise), and every opening is in the SSN access log. Everyone else still sees the file is there. A file already on record can be locked with "Lock as ID document"; only an SSN role can unlock one. -->
   <!-- v20.0.42 r1 (Greptile r1): a viewed number is cleared 30 seconds after it appeared by the clock, not by counting timer ticks, and at once if the page is hidden (another tab, the screen locks, the laptop sleeps). Server-side: deleting requires membership of the Person's organization; SSN status and actions require being able to see the Person; views are serialized per person viewing; refused deletions are logged. -->
@@ -141,7 +142,7 @@
   <!-- v20.0.12 (Item 4 PR b — read policies): identity comes from MEMBERSHIP. Role and tier are read from member_role() / access_tier() (org_members, written only by the staff trigger and RPCs); the email-matched staff lookup and the "no staff row = owner" fallback are gone — no membership means a no-access screen, never a role. Navigation falls back by TIER (manage → owner set, operate → supervisor set, deliver → dsp set + training) instead of every unmapped role landing on the DSP menu. Every authorization READ goes through person_service_authorizations_v (rate hidden below manage; sight via can_see_person); the Add Auth write path stays on the base table. Staff → Assignments lists person edges (manual and schedule-opened, with their window) and can end them. Database side: sql/v20.0.12.sql — RESTRICTIVE tenant guard (org claim + live membership) on 44 tables, one tier read policy per table, staff_directory_v, the shifts → sight-edge trigger. -->
   <!-- v20.0.11 (Item 4 PR a — identity + membership): the database now owns who may change staff access. staff.role / is_active / user_id / termination_date and the organizations subscription columns are no longer app-writable (column privileges, sql/v20.0.11.sql); role changes and terminations go through set_staff_role / terminate_staff / reactivate_staff, which enforce the ceiling rule (act on and grant only roles below your own; owner anything; last owner protected). org_members is derived from staff by trigger. Invite modal offers only roles the caller may grant; existing staff records get 'Invite to app' (invite carries staff_id, accept_invite binds the login to that record). No visibility change yet — that is PR (b). Design: docs/item4-rls-design.md -->
   <!-- v20.0.10b: Enterprise cap 500 (was 1,000) — tiers now 10 / 50 / 250 / 500 active clients; Enterprise stays contact-sales and caps stay soft (advisory toast, never a wall). The at-cap toast on an Enterprise org now points to sales@getprovly.com instead of an upgrade button that doesn't exist. App-only; no SQL. Precedes Item 4 (v20.0.11+) so the DB tier→cap trigger and the app agree on 500. -->
-  <!-- v20.0.10: client-form integrity + EVV audit — (1) Update Client absorbs a complete Add Auth row and refuses a partial one (nothing typed is ever silently dropped); (2) rate_per_unit is persisted, worksheet codes (BILLING_RULES.worksheet) REQUIRE a rate — non-rate roles are stopped, rate-holders may tick "Rate pending from SC" (deliberate null; row wears RATE NEEDED; inline Set rate repairs in place without resetting used_units), rates over the DSPD ceiling are blocked; BILLING_RULES refreshed to DHHS91172 eff. 7/1/2026 (PM1/PM2 quarter-hour, SEI fixed $14.54, SJD/SJR/SJP added); (3) authorization status written on create (approved / expired — an APPROVAL enum) + one-time backfill in sql/v20.0.10.sql; (4) retired org units (is_active=false) render dimmed with a Retired tag, no edit/add/delete, and are excluded from the delivery-context picker; (5) EVV clock-IN is correctable on the same audited terms as clock-out (reason required, DST guardrail, in-before-out), with originally captured instants preserved on the row by a set-once DB trigger. DEFERRED: outbound email + internal messaging — after Item 4 (operator logins/RLS), messaging needs per-user identities. -->
+  <!-- v20.0.10: client-form integrity + EVV audit — (1) Update Client absorbs a complete Add Auth row and refuses a partial one (nothing typed is ever silently dropped); (2) rate_per_unit is persisted, worksheet codes (BILLING_RULES.worksheet) REQUIRE a rate — non-rate roles are stopped, rate-holders may tick "Rate pending from SC" (deliberate null; row wears RATE NEEDED; inline Set rate repairs in place without resetting used_units), rates over the DSPD ceiling are blocked; BILLING_RULES refreshed to the DSPD rate table eff. 7/1/2026 (PM1/PM2 quarter-hour, SEI fixed $14.54, SJD/SJR/SJP added); (3) authorization status written on create (approved / expired — an APPROVAL enum) + one-time backfill in sql/v20.0.10.sql; (4) retired org units (is_active=false) render dimmed with a Retired tag, no edit/add/delete, and are excluded from the delivery-context picker; (5) EVV clock-IN is correctable on the same audited terms as clock-out (reason required, DST guardrail, in-before-out), with originally captured instants preserved on the row by a set-once DB trigger. DEFERRED: outbound email + internal messaging — after Item 4 (operator logins/RLS), messaging needs per-user identities. -->
   <!-- v20.0.8r6 (Greptile): the 30s confirmation deadline is now exact — each attempt's abort timer is min(8s, time remaining) and inter-attempt sleeps are clamped the same way, so an attempt starting near the limit aborts AT the deadline and the delayed-confirmation guidance always appears by 30s; the finalizing state is also only engaged when the resolving loop can actually run. -->
   <!-- v20.0.8r5 (Greptile): each sequential poll attempt is killed, not abandoned — a per-attempt AbortController (8s) makes a never-responding refresh settle by abortion, so the 30s deadline is always evaluated and the finalizing state cannot hang; cancel()/watcher/unmount abort the in-flight attempt too, so no orphaned request survives cancellation. -->
   <!-- v20.0.8r4 (Greptile): the checkout poll is rewritten as a SEQUENTIAL loop — one request in flight at a time, every result awaited and observed, activation anywhere in the window ends it silently, and the timeout warning is reachable only when every attempt returned non-active with none in flight. This removes the overlapping-request primitive that generated the r1–r3 ordering findings, rather than narrowing another window. -->
@@ -488,7 +489,7 @@
         manageRoles: false, intake: false,
       },
       // RN — registered nurse handling medical decisions, med reviews,
-      // ISP medical sections. At Hope Haven this is a planned hire that
+      // ISP medical sections. At the partner provider this is a planned hire that
       // completes the margin capture of RHS + BC services. Sees all
       // clients for medical oversight, can edit medical fields.
       rn: {
@@ -685,9 +686,9 @@
                 // v19.5.1 — optional identifiers: NO fallback to DEFAULT_BRAND.
                 // Null on the tenant row must stay null so the conditional
                 // rendering in createBrandedPDF's drawHeader correctly hides
-                // the Award / FEIN lines instead of leaking Hope Haven values
-                // (v19.5.0 bug: Test Provider's PDFs rendered Hope Haven's
-                // 'DHHS A04899' as Award because the row had NULL and the
+                // the Award / FEIN lines instead of leaking another tenant's values
+                // (v19.5.0 bug: Test Provider's PDFs rendered another tenant's
+                // award number as Award because the row had NULL and the
                 // || operator fell through to the default).
                 orgContractAwardNumber: b.contract_award_number || null,
                 orgFEIN:                b.fein                  || null,
@@ -697,7 +698,7 @@
               };
               if (stale()) return;
               setBrand(next);
-              // Also push values into the legacy HopeHavenPDF singleton so its
+              // Also push values into the legacy ProvlyPDF singleton so its
               // jsPDF callers (Doc Engine, Secure Comms, the rightsGrievance
               // form) pick up the new values without every caller threading
               // brand through. Mutation is safe here: brand loads once per
@@ -1333,12 +1334,68 @@
     // flashed "Couldn't accept this invitation" before the reload landed.
     let joinInProgress = false;
 
+    // v20.0.47 — where a visitor came from. getprovly.com's landing page records the same two
+    // keys (same site, so the app can read them): provly_first_touch (the first visit, kept 90
+    // days) and provly_last_touch (the latest visit that arrived from outside or with campaign
+    // tags). A touch holds only the referring site (host + path, never its query string), the
+    // Provly page (host + path), utm_* tags and the time. Storage can be blocked: every access
+    // is guarded, and the sign-up never depends on it.
+    const TOUCH_FIRST = "provly_first_touch", TOUCH_LAST = "provly_last_touch";
+    const TOUCH_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+    const readTouch = (key) => {
+      try {
+        const t = JSON.parse(window.localStorage.getItem(key) || "null");
+        if (!t || typeof t !== "object" || typeof t.at !== "string") return null;
+        const age = Date.now() - Date.parse(t.at);
+        return age >= 0 && age < TOUCH_MAX_AGE_MS ? t : null;
+      } catch (e) { return null; }
+    };
+    const recordVisitTouch = () => {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const utm = {};
+        ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"].forEach(k => {
+          const v = params.get(k); if (v) utm[k] = v.slice(0, 100);
+        });
+        let ref = null;
+        try {
+          if (document.referrer) {
+            const r = new URL(document.referrer);
+            if (r.host && r.host !== window.location.host) ref = (r.host + r.pathname).slice(0, 300);
+          }
+        } catch (e) { /* unreadable referrer: treat as direct */ }
+        const external = !!ref || Object.keys(utm).length > 0;
+        const first = readTouch(TOUCH_FIRST), last = readTouch(TOUCH_LAST);
+        if (!external && first && last) return;
+        const touch = { ref, page: (window.location.host + window.location.pathname).slice(0, 300), at: new Date().toISOString(), ...utm };
+        if (!first) window.localStorage.setItem(TOUCH_FIRST, JSON.stringify(touch));
+        if (external || !last) window.localStorage.setItem(TOUCH_LAST, JSON.stringify(touch));
+      } catch (e) { /* storage blocked: nothing recorded */ }
+    };
+
+    // v20.0.47 — "How did you hear about Provly?" (new providers only). `detail` is the optional
+    // follow-up box's label; options without one have no box.
+    const HEARD_OPTIONS = [
+      { value: "google",              label: "Google search",                                       detail: "What did you search for?" },
+      { value: "ai_assistant",        label: "An AI assistant (ChatGPT, Google's AI answer, others)", detail: "Which one?" },
+      { value: "provider_referral",   label: "Another provider recommended it",                     detail: "Who?" },
+      { value: "support_coordinator", label: "A support coordinator or DSPD" },
+      { value: "provly_outreach",     label: "Someone from Provly reached out",                     detail: "Who?" },
+      { value: "event",               label: "An event, training or association" },
+      { value: "social",              label: "Social media" },
+      { value: "other",               label: "Other",                                               detail: "Tell us" },
+    ];
+
     function SignupPage({ inviteToken = null }) {
       const CB = FD_CB; // v20.0.17 — front door: the landing page palette
       const [form, setForm] = useState({
         legal_name: "", address: "", phone: "", email: "", contract_number: "",
         first_name: "", last_name: "", password: "", confirm_password: "",
+        heard_via: "", heard_detail: "",   // v20.0.47
       });
+      // v20.0.47 — a new-provider visit to the sign-up page counts as a visit too (people
+      // arrive here straight from an email or a shared link). Invite links never record one.
+      useEffect(() => { if (!inviteToken) recordVisitTouch(); }, [inviteToken]);
       // v20.0.3 — invite mode ("join an existing org"). The token is looked
       // up pre-auth via get_invite; a valid payload flips the page into JOIN
       // mode: org fields hidden, email locked to the invite.
@@ -1391,6 +1448,7 @@
           if (!form.email.trim())                   e.email = "Required";
           else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) e.email = "Invalid email format";
           if (!form.contract_number.trim())         e.contract_number = "Required";
+          if (!form.heard_via)                      e.heard_via = "Choose one";   // v20.0.47
         }
         // Admin account
         if (!form.first_name.trim())              e.first_name = "Required";
@@ -1435,6 +1493,8 @@
             const { data: authData, error: authErr } = await supabase.auth.signUp({
               email: invite.email,
               password: form.password,
+              // v20.0.47 — lets the stuck-sign-up check say who invited them if joining fails
+              options: { data: { provly_signup: "invite", provly_invited_by: String(invite.org_name || "").slice(0, 200) } },
             });
             if (authErr) {
               if (/already registered|already exists|user already/i.test(authErr.message)) {
@@ -1505,6 +1565,7 @@
           const { data: authData, error: authErr } = await supabase.auth.signUp({
             email: form.email.trim(),
             password: form.password,
+            options: { data: { provly_signup: "provider" } },   // v20.0.47 — see the invite path
           });
           if (authErr) {
             // Common case: email already registered. Stripe-style messaging.
@@ -1529,7 +1590,10 @@
           //     email confirmation is required at the project level).
           //     The RPC uses COALESCE(auth.uid(), p_user_id) and verifies
           //     the user_id exists in auth.users before proceeding.
-          const { error: rpcErr } = await supabase.rpc("signup_create_organization", {
+          // v20.0.47 — v2 = the same organization setup + how they heard and where they came
+          //   from (cleaned server-side; a bad or missing source never blocks the sign-up).
+          const heardOpt = HEARD_OPTIONS.find(o => o.value === form.heard_via);
+          const { error: rpcErr } = await supabase.rpc("signup_create_organization_v2", {
             p_legal_name:      form.legal_name.trim(),
             p_address:         form.address.trim(),
             p_phone:           form.phone.trim(),
@@ -1538,12 +1602,16 @@
             p_first_name:      form.first_name.trim(),
             p_last_name:       form.last_name.trim(),
             p_user_id:         authData.user.id,
+            p_heard_via:       form.heard_via || null,
+            p_heard_detail:    heardOpt && heardOpt.detail ? (form.heard_detail.trim().slice(0, 200) || null) : null,
+            p_first_touch:     readTouch(TOUCH_FIRST),
+            p_signup_touch:    readTouch(TOUCH_LAST),
           });
           if (rpcErr) {
             // The auth user exists but org creation failed. We can't easily
             // undo the auth user from the client, so surface this clearly
             // and ask them to retry from the sign-in page.
-            console.error("signup_create_organization failed:", rpcErr);
+            console.error("signup_create_organization_v2 failed:", rpcErr);
             setSubmitError(`Account created but organization setup failed: ${rpcErr.message}. Please sign in and contact support.`);
             setSubmitting(false);
             return;
@@ -1716,6 +1784,41 @@
               {renderField("password", "Password", { type: "password", placeholder: "At least 8 characters", autoComplete: "new-password" })}
               {renderField("confirm_password", "Confirm password", { type: "password", autoComplete: "new-password" })}
             </div>
+
+            {/* v20.0.47 — Step 3: how they heard (new providers only) */}
+            {!inviteMode && (() => {
+              const opt = HEARD_OPTIONS.find(o => o.value === form.heard_via);
+              return (
+                <div style={sectionStyle}>
+                  <div style={sectionLabel}>Step 3</div>
+                  <h2 style={sectionTitle}>How did you hear about Provly?</h2>
+                  <p style={sectionSub}>One quick question. It helps us reach more providers like you.</p>
+                  <div style={{ marginBottom: opt && opt.detail ? 14 : 0 }}>
+                    <label htmlFor="signup-heard-via" style={{ display: "block", fontSize: 13, fontWeight: 600, color: CB.text, marginBottom: 6 }}>
+                      Choose one<span style={{ color: CB.red, marginLeft: 4 }}>*</span>
+                    </label>
+                    <select
+                      id="signup-heard-via"
+                      value={form.heard_via}
+                      onChange={e => { setField("heard_via", e.target.value); setForm(f => ({ ...f, heard_detail: "" })); }}
+                      style={{
+                        width: "100%", padding: "12px 16px", borderRadius: 8,
+                        border: `1px solid ${errors.heard_via ? CB.red : CB.border}`,
+                        fontSize: 15, fontFamily: "inherit", color: form.heard_via ? CB.text : CB.textLight,
+                        background: FD.paper, boxSizing: "border-box",
+                      }}
+                    >
+                      <option value="" disabled>Select an answer</option>
+                      {HEARD_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                    {errors.heard_via && (
+                      <div style={{ fontSize: 12, color: CB.red, marginTop: 4 }}>{errors.heard_via}</div>
+                    )}
+                  </div>
+                  {opt && opt.detail && renderField("heard_detail", `${opt.detail} (optional)`, { required: false })}
+                </div>
+              );
+            })()}
 
             {/* Submit */}
             <button
@@ -1966,7 +2069,7 @@
               </div>
               <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
                 <span style={{ fontSize: 20, fontWeight: 800, color: CB.white, letterSpacing: -0.5 }}>Provly</span>
-                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.46</span>
+                <span style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: 0.4, marginTop: 4 }}>v20.0.47</span>
               </div>
             </button>
             {isMobile && (
@@ -4866,7 +4969,7 @@
       PAC:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 5.82, alt_daily: 186.05 },
       // Personal Budget Assistant — PER SESSION on the 1056 (v20.0.26; the table's quarter-hour rate $9.31 is kept as the alternate)
       PBA:  { unit_type: "session", label: "Per Session", rate: 18.59, alt_quarter_hour: 9.31 },
-      // Professional Medication Monitoring (LPN / RN) — QUARTER HOUR per DHHS91172, fixed
+      // Professional Medication Monitoring (LPN / RN) — QUARTER HOUR per the DSPD rate table, fixed
       PM1:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 8.45 },
       PM2:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 12.22 },
       // Professional Nursing — daily, fixed (PN2 also has session $29.87)
@@ -4888,7 +4991,7 @@
       SEE:  { unit_type: "tiered_daily", label: "Daily (Tiered)", worksheet: true,
               tiers: [ { maxHours: 1, max_rate: 55.05 }, { maxHours: 2, max_rate: 78.92 }, { maxHours: 3, max_rate: 102.76 },
                         { maxHours: 4, max_rate: 126.63 }, { maxHours: 5, max_rate: 150.49 }, { maxHours: 6, max_rate: 174.35 } ] },
-      // Supported Employment for an Individual — quarter hour, FIXED (no asterisk on DHHS91172)
+      // Supported Employment for an Individual — quarter hour, FIXED (no asterisk on the DSPD rate table)
       SEI:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 14.54 },
       // Supported Job Development — quarter hour, fixed
       SJD:  { unit_type: "quarter_hour", label: "Quarter-Hour", rate: 17.31 },
@@ -4927,7 +5030,7 @@
       const rate = parseFloat(typed);
       if (!(rate > 0)) return "Rate must be a positive amount";
       const ceiling = rule.max_rate != null ? rule.max_rate : (rule.tiers ? Math.max(...rule.tiers.map(t => t.max_rate)) : null);
-      if (ceiling != null && rate > ceiling + 1e-9) return `Rate exceeds the DSPD max for ${code} ($${ceiling.toFixed(2)}/unit, DHHS91172 effective ${BILLING_RULES_EFFECTIVE})`;
+      if (ceiling != null && rate > ceiling + 1e-9) return `Rate exceeds the DSPD max for ${code} ($${ceiling.toFixed(2)}/unit, DSPD rate table effective ${BILLING_RULES_EFFECTIVE})`;
       return null;
     };
 
@@ -5207,22 +5310,22 @@
     // ═══════════════════════════════════════════════════════════════
     // PDF DOCUMENT ENGINE — generates branded forms from data
     // Uses jsPDF + autoTable for client-side PDF generation
-    // v19.5 — COMPANY/ADDRESS/PHONE/EMAIL/CONTRACT_NUMBER are now overwritten
-    //   at sign-in by AuthProvider.fetchOrgId() from the organizations row.
-    //   The values below remain as Hope Haven fallbacks so a logged-out
-    //   render or a pre-migration install still produces a sane PDF.
+    // v19.5 — COMPANY/ADDRESS/PHONE/EMAIL/CONTRACT_NUMBER are overwritten at
+    //   sign-in (applyBrandToPDF) from the organization's own row, and reset to the
+    //   neutral DEFAULT_BRAND on every reset/error path.
+    // v20.0.47 — the built-in defaults are blank: no tenant's identity ships in the code.
     // ═══════════════════════════════════════════════════════════════
-    const HopeHavenPDF = {
+    const ProvlyPDF = {
       // Shared constants (mutable — see comment above)
       HEADER_COLOR: [10, 30, 51],   // CB.navy
       ACCENT_COLOR: [0, 137, 123],  // CB.teal
       LIGHT_BG: [250, 251, 253],
-      COMPANY: "HOPE HAVEN SERVICES INC.",
-      ORG_NAME: "Hope Haven Services Inc.",   // title case for inline body text
-      ADDRESS: "4974 W Mellow Way, South Jordan, UT 84009",
-      PHONE: "801-558-8070",
-      EMAIL: "hopehaven@hopehavenservices.org",
-      CONTRACT_NUMBER: "DHHS91172",
+      COMPANY: "",
+      ORG_NAME: "",   // title case for inline body text
+      ADDRESS: "",
+      PHONE: "",
+      EMAIL: "",
+      CONTRACT_NUMBER: "",
 
       // Utility: add company header to any PDF
       _header(doc, title, subtitle) {
@@ -12117,7 +12220,7 @@
           <PageHeader title="Compliance Dashboard" subtitle={`Real-time audit readiness — ${brand.orgContractNumber ? brand.orgContractNumber + " " : ""}SOW compliance scoring`}
             action={
               <div style={{ display: "flex", gap: 8 }}>
-                <SecondaryButton onClick={() => HopeHavenPDF.insuranceTracker()}>{icons.fileText({ size: 15 })} Insurance Tracker</SecondaryButton>
+                <SecondaryButton onClick={() => ProvlyPDF.insuranceTracker()}>{icons.fileText({ size: 15 })} Insurance Tracker</SecondaryButton>
                 <PrimaryButton onClick={runAudit} color={CB.navy}>{icons.refresh({ size: 16 })} Re-run Audit</PrimaryButton>
               </div>
             }
@@ -15383,7 +15486,7 @@
                       <p style={{ fontSize:13,color:CB.textMid,marginBottom:16 }}>File should contain: consumer_name, consumer_pid, service_code, rate, unit_type, units, service_start_date, service_end_date</p>
                       <input type="file" accept=".csv" onChange={handleFileUpload} style={{ fontSize:14 }} />
                     </div>
-                    <div style={{ fontSize:12,color:CB.textLight,padding:"8px 12px",background:`${CB.navy}06`,borderRadius:10 }}>Expected format: UPI monthly billing export (e.g. <strong>2026-03HopeHavenServices.csv</strong>)</div>
+                    <div style={{ fontSize:12,color:CB.textLight,padding:"8px 12px",background:`${CB.navy}06`,borderRadius:10 }}>Expected format: UPI monthly billing export (e.g. <strong>2026-03YourAgency.csv</strong>)</div>
                   </div>
                 ) : (
                   <div>
@@ -15468,8 +15571,8 @@
       }, []);
 
       const pdfHeader = (doc, title, subtitle) => {
-        doc.setFontSize(18); doc.setFont(undefined, "bold"); doc.text(HopeHavenPDF.ORG_NAME, 20, 20);
-        if (HopeHavenPDF.CONTRACT_NUMBER) { doc.setFontSize(10); doc.setFont(undefined, "normal"); doc.text(`DHHS Contract: ${HopeHavenPDF.CONTRACT_NUMBER}`, 20, 27); }
+        doc.setFontSize(18); doc.setFont(undefined, "bold"); doc.text(ProvlyPDF.ORG_NAME, 20, 20);
+        if (ProvlyPDF.CONTRACT_NUMBER) { doc.setFontSize(10); doc.setFont(undefined, "normal"); doc.text(`DHHS Contract: ${ProvlyPDF.CONTRACT_NUMBER}`, 20, 27); }
         doc.setFontSize(14); doc.setFont(undefined, "bold"); doc.text(title, 20, 38);
         if (subtitle) { doc.setFontSize(10); doc.setFont(undefined, "normal"); doc.text(subtitle, 20, 45); }
         doc.setLineWidth(0.5); doc.line(20, subtitle ? 48 : 42, 190, subtitle ? 48 : 42);
@@ -15719,7 +15822,7 @@
             const monthLabel = monthStart.toLocaleString("default", { month: "long", year: "numeric" });
             const { data: claims } = await supabase.from("claim_submissions").select("*, persons(first_name, last_name), contracts(contract_number)").gte("service_date", prevStart).lte("service_date", prevEnd);
             const doc = new jsPDF();
-            let y = pdfHeader(doc, `Monthly Billing Summary — ${monthLabel}`, `${HopeHavenPDF.ORG_NAME} — ${HopeHavenPDF.CONTRACT_NUMBER}`);
+            let y = pdfHeader(doc, `Monthly Billing Summary — ${monthLabel}`, `${ProvlyPDF.ORG_NAME} — ${ProvlyPDF.CONTRACT_NUMBER}`);
             const total = (claims || []).reduce((s, c) => s + Number(c.billed_amount || 0), 0);
             const paid = (claims || []).reduce((s, c) => s + Number(c.paid_amount || 0), 0);
             doc.setFontSize(10); doc.text(`Total Claims: ${(claims || []).length}  |  Billed: $${total.toFixed(2)}  |  Paid: $${paid.toFixed(2)}  |  Outstanding: $${(total - paid).toFixed(2)}`, 20, y); y += 8;
@@ -15813,7 +15916,7 @@
             const { data: trainAll } = await supabase.from("staff_trainings").select("staff_id, expires_at");
             const { data: docAll } = await supabase.from("documents").select("staff_id, person_id, doc_type, expires_at").eq("is_archived", false);
             const doc = new jsPDF();
-            let y = pdfHeader(doc, "Organization Compliance Report", `${HopeHavenPDF.ORG_NAME} — ${new Date().toLocaleDateString()}`);
+            let y = pdfHeader(doc, "Organization Compliance Report", `${ProvlyPDF.ORG_NAME} — ${new Date().toLocaleDateString()}`);
             doc.setFontSize(10);
             const now = new Date();
             const expTrainings = (trainAll || []).filter(t => t.expires_at && new Date(t.expires_at) < now).length;
@@ -15875,7 +15978,7 @@
 
       return (
         <div>
-          <PageHeader title="Document Engine" subtitle={`Generate PDF documents from ${HopeHavenPDF.ORG_NAME} templates`} />
+          <PageHeader title="Document Engine" subtitle={`Generate PDF documents from ${ProvlyPDF.ORG_NAME} templates`} />
           {/* Category Filter */}
           <div style={{ display: "flex", gap: 4, marginBottom: 20, background: CB.white, borderRadius: 12, padding: 4, border: `1px solid ${CB.border}`, width: "fit-content", flexWrap: "wrap" }}>
             <button onClick={() => setCatFilter("all")} style={{ padding: "9px 18px", borderRadius: 9, border: "none", fontSize: 13, fontWeight: 600, fontFamily: "inherit", cursor: "pointer", background: catFilter === "all" ? CB.navy : "transparent", color: catFilter === "all" ? CB.white : CB.textMid }}>All ({DOC_TEMPLATES.length})</button>
@@ -16467,23 +16570,23 @@
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                 {entityType === "staff" && (
                   <>
-                    <button onClick={() => { HopeHavenPDF.staffCoverSheet(entityData); addToast("Cover Sheet PDF generated", "success"); }} style={{
+                    <button onClick={() => { ProvlyPDF.staffCoverSheet(entityData); addToast("Cover Sheet PDF generated", "success"); }} style={{
                       padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
                       color: CB.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
                     }}>Cover Sheet</button>
-                    <button onClick={() => { HopeHavenPDF.codeOfConduct(entityData); addToast("Code of Conduct PDF generated", "success"); }} style={{
+                    <button onClick={() => { ProvlyPDF.codeOfConduct(entityData); addToast("Code of Conduct PDF generated", "success"); }} style={{
                       padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
                       color: CB.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
                     }}>Code of Conduct</button>
-                    <button onClick={() => { HopeHavenPDF.medicaidExclusion(entityData); addToast("Medicaid Exclusion PDF generated", "success"); }} style={{
+                    <button onClick={() => { ProvlyPDF.medicaidExclusion(entityData); addToast("Medicaid Exclusion PDF generated", "success"); }} style={{
                       padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
                       color: CB.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
                     }}>Medicaid Exclusion</button>
-                    <button onClick={() => { HopeHavenPDF.trainingLog(entityData); addToast("Training Log PDF generated", "success"); }} style={{
+                    <button onClick={() => { ProvlyPDF.trainingLog(entityData); addToast("Training Log PDF generated", "success"); }} style={{
                       padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
                       color: CB.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
                     }}>Training Log</button>
-                    <button onClick={() => { HopeHavenPDF.staffOnboardingPacket(entityData); addToast("Full packet downloading (4 PDFs)", "success"); }} style={{
+                    <button onClick={() => { ProvlyPDF.staffOnboardingPacket(entityData); addToast("Full packet downloading (4 PDFs)", "success"); }} style={{
                       padding: "6px 14px", borderRadius: 8, border: `2px solid ${CB.teal}`, background: `${CB.teal}08`,
                       color: CB.teal, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
                     }}>⬇ Full Onboarding Packet</button>
@@ -16491,23 +16594,23 @@
                 )}
                 {entityType === "client" && (
                   <>
-                    <button onClick={() => { HopeHavenPDF.dailyServiceLog(entityData); addToast("Daily Service Log PDF generated", "success"); }} style={{
+                    <button onClick={() => { ProvlyPDF.dailyServiceLog(entityData); addToast("Daily Service Log PDF generated", "success"); }} style={{
                       padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
                       color: CB.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
                     }}>Daily Service Log</button>
-                    <button onClick={() => { HopeHavenPDF.quarterlySummary(entityData); addToast("Quarterly Summary PDF generated", "success"); }} style={{
+                    <button onClick={() => { ProvlyPDF.quarterlySummary(entityData); addToast("Quarterly Summary PDF generated", "success"); }} style={{
                       padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
                       color: CB.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
                     }}>Quarterly Summary</button>
-                    <button onClick={() => { HopeHavenPDF.rightsGrievance(entityData); addToast("Rights & Grievance PDF generated", "success"); }} style={{
+                    <button onClick={() => { ProvlyPDF.rightsGrievance(entityData); addToast("Rights & Grievance PDF generated", "success"); }} style={{
                       padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
                       color: CB.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
                     }}>Rights & Grievance</button>
-                    <button onClick={() => { HopeHavenPDF.roomBoardAgreement(entityData); addToast("Room & Board PDF generated", "success"); }} style={{
+                    <button onClick={() => { ProvlyPDF.roomBoardAgreement(entityData); addToast("Room & Board PDF generated", "success"); }} style={{
                       padding: "6px 12px", borderRadius: 8, border: `1px solid ${CB.border}`, background: CB.white,
                       color: CB.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
                     }}>Room & Board</button>
-                    <button onClick={() => { HopeHavenPDF.clientIntakePacket(entityData, { is_residential: true }); addToast("Full packet downloading (4 PDFs)", "success"); }} style={{
+                    <button onClick={() => { ProvlyPDF.clientIntakePacket(entityData, { is_residential: true }); addToast("Full packet downloading (4 PDFs)", "success"); }} style={{
                       padding: "6px 14px", borderRadius: 8, border: `2px solid ${CB.teal}`, background: `${CB.teal}08`,
                       color: CB.teal, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
                     }}>⬇ Full Intake Packet</button>
@@ -16745,7 +16848,7 @@
                 Created with {form.auths.length} service authorization{form.auths.length !== 1 ? "s" : ""}
               </p>
               <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
-                <PrimaryButton onClick={() => HopeHavenPDF.clientIntakePacket(form, { pid: form.pid, sc_name: form.support_coordinator, sc_phone: form.sc_phone, is_residential: form.auths.some(a => ["RHS", "HHS", "PPS"].includes(a.code)) })} color={CB.navy}>
+                <PrimaryButton onClick={() => ProvlyPDF.clientIntakePacket(form, { pid: form.pid, sc_name: form.support_coordinator, sc_phone: form.sc_phone, is_residential: form.auths.some(a => ["RHS", "HHS", "PPS"].includes(a.code)) })} color={CB.navy}>
                   {icons.fileText({ size: 16 })} Download Intake Packet
                 </PrimaryButton>
                 <PrimaryButton onClick={() => { setComplete(false); setStep(0); setForm({ first_name: "", last_name: "", date_of_birth: "", medicaid_number: "", address: "", city: "", state: "UT", zip: "", phone: "", pid: "", gender: "", ssn_last4: "", primary_language: "English", guardian_name: "", guardian_phone: "", guardian_relation: "", emergency_name: "", emergency_phone: "", emergency_relation: "", support_coordinator: "", sc_phone: "", sc_email: "", sc_agency: "", diagnoses: "", medications_on_file: false, pcsp_on_file: false, admission_date: ymd(), auths: [] }); }}>
@@ -17210,7 +17313,7 @@
               {bCollected}/{bRequired.length} hire paperwork items collected — view staff record to add remaining documents
             </p>
             <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
-              <PrimaryButton onClick={() => HopeHavenPDF.staffOnboardingPacket(form)} color={CB.navy}>
+              <PrimaryButton onClick={() => ProvlyPDF.staffOnboardingPacket(form)} color={CB.navy}>
                 {icons.fileText({ size: 16 })} Download Onboarding Packet
               </PrimaryButton>
               <PrimaryButton onClick={() => { setComplete(false); setStep(0); setForm(prev => {
@@ -24834,30 +24937,28 @@
       tealHex: "00897B",
       logoUrl: null,
     };
-    // Backwards-compat alias — anything that imported HOPE_HAVEN_BRAND keeps working.
-    const HOPE_HAVEN_BRAND = DEFAULT_BRAND;
 
-    // v20.0.1 — apply a brand object to the legacy HopeHavenPDF singleton.
+    // v20.0.1 — apply a brand object to the legacy ProvlyPDF singleton.
     // Called on hydration success AND on every reset/empty/error path so the
     // singleton can never retain a previous tenant's identity (stale-singleton
     // finding: a failed same-realm branding load previously left the prior
     // tenant's values in place for jsPDF callers).
     function applyBrandToPDF(bb) {
-      if (typeof HopeHavenPDF === "undefined" || !bb) return;
-      HopeHavenPDF.COMPANY = (bb.orgName || "").toUpperCase();
-      HopeHavenPDF.ORG_NAME = bb.orgName || "";
-      HopeHavenPDF.ADDRESS = bb.orgAddress || "";
-      HopeHavenPDF.PHONE   = bb.orgPhone   || "";
-      HopeHavenPDF.EMAIL   = bb.orgEmail   || "";
-      HopeHavenPDF.CONTRACT_NUMBER = bb.orgContractNumber || "";
+      if (typeof ProvlyPDF === "undefined" || !bb) return;
+      ProvlyPDF.COMPANY = (bb.orgName || "").toUpperCase();
+      ProvlyPDF.ORG_NAME = bb.orgName || "";
+      ProvlyPDF.ADDRESS = bb.orgAddress || "";
+      ProvlyPDF.PHONE   = bb.orgPhone   || "";
+      ProvlyPDF.EMAIL   = bb.orgEmail   || "";
+      ProvlyPDF.CONTRACT_NUMBER = bb.orgContractNumber || "";
       const hexToRgb = (h) => {
         const s = (h || "").replace(/^#/, "");
         if (s.length !== 6) return null;
         const n = parseInt(s, 16);
         return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
       };
-      const navy = hexToRgb(bb.navyHex); if (navy) HopeHavenPDF.HEADER_COLOR = navy;
-      const teal = hexToRgb(bb.tealHex); if (teal) HopeHavenPDF.ACCENT_COLOR = teal;
+      const navy = hexToRgb(bb.navyHex); if (navy) ProvlyPDF.HEADER_COLOR = navy;
+      const teal = hexToRgb(bb.tealHex); if (teal) ProvlyPDF.ACCENT_COLOR = teal;
     }
 
     // v20.0.1 — monotonically increasing hydration token. Each fetchOrgId run
@@ -24879,7 +24980,7 @@
     // PDF RENDERING KERNEL
     // Wraps pdf-lib in a branded layout helper. Every form uses this for
     // header/footer/signature/text-block primitives so they all look like
-    // one unified document set. v19.5 — was createHopeHavenPDF; renamed
+    // one unified document set. v19.5 — was createProvlyPDF; renamed
     // and parameterized by brand so any tenant gets their own header.
     // ──────────────────────────────────────────────────────────────────
     async function createBrandedPDF({ title, subtitle, brand = DEFAULT_BRAND, watermark = null }) { // v20.0.37 — optional watermark
