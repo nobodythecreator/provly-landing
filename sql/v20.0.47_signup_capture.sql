@@ -7,8 +7,13 @@
 -- rows are inserted only if absent (re-running never resets them).
 --
 -- What it adds
---  1. pg_net (Supabase's built-in web-request extension) so the database
---     can call the signup-notify edge function.
+--  1. pg_cron (the minute job) and pg_net (Supabase's built-in web-request
+--     extension, so the database can call the signup-notify edge function).
+--     r1 (Greptile r1): both are enabled here rather than assumed. Production
+--     already has pg_cron 1.6.4 (checked Nov 2026), so for it that line is a
+--     no-op; if either extension can't be enabled, the whole migration rolls
+--     back with nothing changed, and the app's sign-up still works (it falls
+--     back to the existing signup_create_organization when v2 is missing).
 --  2. platform_settings — Provly-wide settings, service-role only. Holds the
 --     alert address (change it with one UPDATE, no release), the welcome
 --     email's reply-to address and on/off switch, and the edge function's
@@ -35,8 +40,10 @@
 
 begin;
 
--- 1 ── pg_net ─────────────────────────────────────────────────────────
--- (Supabase keeps extensions in the "extensions" schema; pg_net's functions live in "net".)
+-- 1 ── pg_cron + pg_net ──────────────────────────────────────────────
+-- pg_cron's jobs live in schema "cron" (Supabase installs it in pg_catalog);
+-- pg_net's functions live in "net" (Supabase keeps the extension in "extensions").
+create extension if not exists pg_cron with schema pg_catalog;
 create extension if not exists pg_net with schema extensions;
 
 -- 2 ── platform_settings ─────────────────────────────────────────────
@@ -185,7 +192,10 @@ $$;
 
 -- 6 ── outbox: claim / report / authorize ────────────────────────────
 -- Claims up to p_limit due rows for 2 minutes and returns everything the
--- emails need, plus the settings the edge function uses.
+-- emails need, plus the settings the edge function uses. r1: the edge function
+-- claims ONE row at a time, immediately before sending it, and bounds every
+-- request at 10 s (≤ ~30 s per row), so a row is never still being worked when
+-- its 2-minute claim lapses, and only rows actually worked count an attempt.
 create or replace function public.signup_outbox_claim(p_limit integer default 10)
 returns jsonb
 language plpgsql

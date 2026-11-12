@@ -11,6 +11,12 @@
 // refused. Each email carries a stable Resend idempotency key (row id + which email), so a
 // retry after a crash cannot send it twice.
 //
+// r1 (Greptile r1): it claims ONE row at a time, right before sending it, and every request
+// (database or Resend) is cut off after 10 s. A row's worst case is ~30 s (two sends + the
+// report), well inside its 2-minute claim, so no other run can pick it up while it is being
+// worked, and rows this run never reaches are never claimed (their attempts don't move).
+// A run stops after 20 rows or 60 s; the next minute's tick continues.
+//
 // None of these emails contains client (health) information: only business contact
 // details, how the provider heard about Provly, and where their visit came from.
 //
@@ -26,6 +32,9 @@ const FROM_ALERT = "Provly <no-reply@getprovly.com>";
 const FROM_WELCOME = "Tombé at Provly <no-reply@getprovly.com>";
 const SIGN_IN_URL = "https://getprovly.com/app";
 const TZ = "America/Denver";
+const REQUEST_TIMEOUT_MS = 10_000;   // every database or Resend request
+const RUN_BUDGET_MS = 60_000;        // a run stops claiming new rows after this
+const MAX_ROWS_PER_RUN = 20;
 
 // ── Types ────────────────────────────────────────────────────────────
 type Touch = {
@@ -248,6 +257,7 @@ async function rpc(name: string, args: Record<string, unknown>): Promise<unknown
     method: "POST",
     headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" },
     body: JSON.stringify(args),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   const body = await res.text();
   if (!res.ok) throw new Error(`${name} failed (${res.status}): ${body.slice(0, 300)}`);
@@ -267,6 +277,7 @@ async function send(email: Email, idempotencyKey: string): Promise<{ outcome: Ou
         from: email.from, to: [email.to], subject: email.subject, html: email.html, text: email.text,
         ...(email.reply_to ? { reply_to: email.reply_to } : {}),
       }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (res.ok) return { outcome: "sent" };
     const body = (await res.text()).slice(0, 300);
@@ -276,7 +287,9 @@ async function send(email: Email, idempotencyKey: string): Promise<{ outcome: Ou
     if (res.status === 429 || res.status >= 500) return { outcome: "retry", error: `Resend ${res.status}: ${body}` };
     return { outcome: "failed", error: `Resend ${res.status}: ${body}` };
   } catch (e) {
-    return { outcome: "retry", error: `Resend unreachable: ${e instanceof Error ? e.message : String(e)}` };
+    // Includes the 10 s timeout. Resend may still have accepted it; the retry reuses the same
+    // idempotency key, so it is not sent twice.
+    return { outcome: "retry", error: `Resend unreachable or slow: ${e instanceof Error ? e.message : String(e)}` };
   }
 }
 
@@ -325,11 +338,14 @@ export async function handle(req: Request): Promise<Response> {
   try {
     const ok = await rpc("signup_notify_authorized", { p_secret: req.headers.get("x-provly-notify") ?? "" });
     if (ok !== true) return json({ error: "unauthorized" }, 401);
-    const batch = (await rpc("signup_outbox_claim", { p_limit: 10 })) as { settings?: Settings; events?: SignupEvent[] } | null;
-    const settings = batch?.settings ?? {};
+    const started = Date.now();
     const results = [];
-    for (const ev of batch?.events ?? []) {
-      try { results.push(await processEvent(ev, settings)); }
+    for (let i = 0; i < MAX_ROWS_PER_RUN && Date.now() - started < RUN_BUDGET_MS; i++) {
+      // One row per claim, claimed immediately before it is worked.
+      const batch = (await rpc("signup_outbox_claim", { p_limit: 1 })) as { settings?: Settings; events?: SignupEvent[] } | null;
+      const ev = batch?.events?.[0];
+      if (!ev) break;
+      try { results.push(await processEvent(ev, batch?.settings ?? {})); }
       catch (e) { console.error(`signup-notify: event ${ev.id}:`, e); }   // its claim lapses; it is retried
     }
     return json({ processed: results.length, results });
