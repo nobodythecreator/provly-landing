@@ -38,6 +38,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <!-- v20.0.9: billing truth on every path — (1) stripe-webhook has full subscription parity (subscription.created/updated/deleted, invoice.paid/payment_failed; syncs the subscription's CURRENT state from Stripe, resolves the org by stripe_customer_id, backfills stripe_subscription_id — portal-originated subscriptions now provision like checkout ones); (2) Settings → Subscription derives "current plan" from STATUS (trial = no current card, every plan buyable — the tier-default trap is gone), annotates each plan against the live client census (Fits / Recommended / Below your census) with a confirm dialog on under-buying (guidance, not a wall); (3) create-checkout-session binds the caller to the billed org (owner only), whitelists priceId server-side, stamps client_census + tier on the session/subscription metadata, and refuses a second checkout when a live subscription exists — returns the Billing Portal deep-linked to the plan change instead. -->
+  <!-- v20.0.48a r1 (Greptile r1): the moment jsPDF loads, a placeholder fills its AutoTable slot, so a table-based PDF (Medicaid Exclusion, Training Log…) made before the AutoTable add-on arrives gets the same "getting ready" note instead of failing, and restarts the add-on's download; if that download failed, the next table PDF tries again. The real add-on replaces the placeholder when it loads. -->
   <!-- v20.0.48a (faster first start): the PDF and spreadsheet libraries no longer load before the app starts. jsPDF (+ AutoTable) loads in the background once the app is up — a PDF made in those first seconds gets "Getting Provly's PDF tools ready. Try again in a moment." instead of failing silently; pdf-lib and PapaParse load only when a file is actually built or read; fontkit, which nothing used, is gone. The EVV pre-flight re-checks on returning to the tab at most once a minute (opening the page, changing the month, clock-ins/outs and corrections still re-check at once). -->
   <!-- v20.0.47b r2 (Greptile r2): clock-in, clock-out and corrections start the pre-flight refresh through the page as it is now (runValidationRef), so they always check the month on screen; a call that still belongs to an older month is refused before it can cancel the current month's check. -->
   <!-- v20.0.47b r1 (Greptile r1): an export only updates the panel if you are still on its month (and the month picker is locked while an export runs); a check that fails says so on the panel, with Check again, instead of leaving an older result looking current; clock-ins and clock-outs refresh the check too, not only corrections. -->
@@ -243,9 +244,13 @@
     // ═══════════════════════════════════════════════════════════════
     const PROVLY_LIBS = {
       jspdf:     { src: "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js",
-                   ready: () => !!(window.jspdf && !window.jspdf.__provlyPending && window.jspdf.jsPDF) },
+                   ready: () => !!(window.jspdf && !window.jspdf.__provlyPending && window.jspdf.jsPDF),
+                   afterLoad: () => guardAutoTableSlot() },
       autotable: { src: "https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js", after: "jspdf",
-                   ready: () => !!(window.jspdf && window.jspdf.jsPDF && window.jspdf.jsPDF.API && window.jspdf.jsPDF.API.autoTable) },
+                   ready: () => {
+                     const api = window.jspdf && window.jspdf.jsPDF && window.jspdf.jsPDF.API;
+                     return !!(api && typeof api.autoTable === "function" && !api.autoTable.__provlyPending);
+                   } },
       pdflib:    { src: "https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js",
                    ready: () => typeof window.PDFLib !== "undefined" },
       papaparse: { src: "https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js",
@@ -262,7 +267,10 @@
         const el = document.createElement("script");
         el.src = lib.src;
         el.async = true;
-        el.onload = () => (libReady(name) ? resolve() : reject(new Error(`${name} loaded but isn't usable`)));
+        el.onload = () => {
+          try { if (lib.afterLoad) lib.afterLoad(); } catch (_) { /* readiness decides */ }
+          return libReady(name) ? resolve() : reject(new Error(`${name} loaded but isn't usable`));
+        };
         el.onerror = () => reject(new Error(`Couldn't load ${name}`));
         document.head.appendChild(el);
       })).catch(err => { delete _libLoads[name]; throw err; });   // a failed load can be retried
@@ -272,6 +280,20 @@
       window.dispatchEvent(new CustomEvent("provly:notice", { detail: { message, type } }));
     const ensurePdfTools = () => ensureLib("jspdf").then(() => ensureLib("autotable"));
     const PDF_TOOLS_LOADING = "Getting Provly's PDF tools ready. Try again in a moment.";
+    // r1 — between jsPDF loading and the AutoTable add-on arriving (or if the add-on's download
+    //   failed), doc.autoTable(...) is this placeholder: it shows the same note and (re)starts the
+    //   add-on's download. The add-on assigns jsPDF.API.autoTable when it loads, replacing it.
+    function guardAutoTableSlot() {
+      const api = window.jspdf && window.jspdf.jsPDF && window.jspdf.jsPDF.API;
+      if (!api || typeof api.autoTable === "function") return;
+      const placeholder = function () {
+        ensureLib("autotable").catch(() => provlyNotice("Couldn't load Provly's PDF tools. Check your connection and try again.", "error"));
+        provlyNotice(PDF_TOOLS_LOADING);
+        throw new Error(PDF_TOOLS_LOADING);
+      };
+      placeholder.__provlyPending = true;
+      api.autoTable = placeholder;
+    }
     if (!window.jspdf) {
       window.jspdf = { __provlyPending: true, jsPDF: function () {
         ensurePdfTools().catch(() => provlyNotice("Couldn't load Provly's PDF tools. Check your connection and try again.", "error"));
