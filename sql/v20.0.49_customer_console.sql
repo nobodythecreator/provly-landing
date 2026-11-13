@@ -297,7 +297,8 @@ declare
   v_new    timestamptz;
 begin
   v_me := public.platform_require(array['owner']);
-  if p_days not in (7, 14, 30) then
+  -- r1 (Greptile r1): NULL NOT IN (...) is NULL, which would skip this check and clear the end date
+  if p_days is null or p_days not in (7, 14, 30) then
     raise exception 'A trial can be extended by 7, 14 or 30 days' using errcode = '22023';
   end if;
   if char_length(btrim(coalesce(p_reason, ''))) not between 3 and 500 then
